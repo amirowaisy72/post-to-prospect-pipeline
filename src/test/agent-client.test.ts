@@ -1,0 +1,64 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  AGENT_NOT_RUNNING_MESSAGE,
+  AgentUnreachableError,
+  getAgentHealth,
+  startAgentScrape,
+} from "@/lib/agent-client";
+
+const okJson = (body: unknown, status = 200) =>
+  ({ ok: status >= 200 && status < 300, status, json: async () => body }) as unknown as Response;
+
+describe("agent client", () => {
+  const mockFetch = vi.fn();
+  beforeEach(() => {
+    mockFetch.mockReset();
+    vi.stubGlobal("fetch", mockFetch);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads health from /health", async () => {
+    mockFetch.mockResolvedValue(okJson({ ok: true, service: "leadhunter-agent", facebook: "unknown" }));
+    const health = await getAgentHealth("http://127.0.0.1:8001");
+    expect(health.ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:8001/health",
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+
+  it("throws AgentUnreachableError when the agent is down", async () => {
+    mockFetch.mockRejectedValue(new TypeError("fetch failed"));
+    await expect(getAgentHealth("http://127.0.0.1:8001")).rejects.toThrow(AgentUnreachableError);
+    await expect(getAgentHealth("http://127.0.0.1:8001")).rejects.toThrow(AGENT_NOT_RUNNING_MESSAGE);
+  });
+
+  it("starts a scrape with the source details and returns the job id", async () => {
+    mockFetch.mockResolvedValue(okJson({ jobId: "job-1" }, 202));
+    const r = await startAgentScrape("http://127.0.0.1:8001/", {
+      sourceId: "src-1",
+      sourceUrl: "https://facebook.com/groups/psxinvestorspk",
+      sourceName: "PSX Investors Pakistan",
+      accountId: "acc-1",
+    });
+    expect(r.jobId).toBe("job-1");
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8001/scrape");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toMatchObject({ sourceId: "src-1", accountId: "acc-1" });
+  });
+
+  it("surfaces the agent's error detail on a failed start", async () => {
+    mockFetch.mockResolvedValue(okJson({ detail: "Another job is already running" }, 409));
+    await expect(
+      startAgentScrape("http://127.0.0.1:8001", {
+        sourceId: "src-1",
+        sourceUrl: "https://facebook.com/groups/psxinvestorspk",
+        accountId: "acc-1",
+      }),
+    ).rejects.toThrow("Another job is already running");
+  });
+});

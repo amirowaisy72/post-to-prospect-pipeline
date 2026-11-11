@@ -2,8 +2,12 @@
 // Returns an array of post objects, each with nested comments/replies:
 //
 //   [{ author: {name, url}, text, postUrl, comments: [
-//        { author: {name, url}, text, replies: [
-//            { author: {name, url}, text, replies: [...] } ] } ] }]
+//        { author: {name, url}, text, postedAt, postedAtLabel, replies: [
+//            { author: {name, url}, text, postedAt, postedAtLabel, replies: [...] } ] } ] }]
+// postedAtLabel is the visible relative label ("5d"); postedAt is
+// the exact time when the timestamp element's title/description
+// carries one ("Friday 6 November 2026 at 09:10"), otherwise the
+// label computed against the collection time (approximate).
 // postUrl is the page the post was collected from (window.location.href)
 // — the LeadHunter app de-duplicates collected posts by postUrl, and the
 // extension is the only place that knows the page URL.
@@ -34,6 +38,122 @@
 // falls back to treating top-level articles as posts. If the page has
 // no articles (not Facebook, or the feed did not render), returns []
 // and the caller falls back to flat text capture.
+
+// --- Timestamps (module scope, so node tests can import them). ---
+// Facebook shows only a RELATIVE label in the visible text ("5d",
+// "19h", "Yesterday"), but the EXACT time is in the timestamp
+// element's description/tooltip — its title attribute or the element
+// referenced by aria-describedby (live diagnostic 2026-11-12:
+// visible "5d" -> "Friday 6 November 2026 at 09:10"). So the order
+// is: (1) exact time from the title/description, parsed to ISO;
+// (2) ONLY if that is missing, compute from the label against the
+// collection time ("5d" -> now minus 5 days). The fallback is
+// approximate by nature (a "5d" label covers that whole day) — the
+// computed value is still used for latest-activity filtering.
+// postedAtLabel always keeps the original visible label.
+var MONTHS = { january: 0, february: 1, march: 2, april: 3, may: 4, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11 };
+
+function isTimestampLabel(text) {
+  var t = (text || '').trim();
+  if (/^\d+[smhdw]$/.test(t)) return true;
+  if (/^\d+\s+(second|minute|hour|day|week|month|year)s?\s+ago$/i.test(t)) return true;
+  if (/^(Yesterday|Just now)$/i.test(t)) return true;
+  if (/^Yesterday at \d{1,2}:\d{2}$/i.test(t)) return true;
+  if (/^Today at \d{1,2}:\d{2}$/i.test(t)) return true;
+  if (/^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}(, \d{4})?$/i.test(t)) return true;
+  if (/^\d{1,2} (January|February|March|April|May|June|July|August|September|October|November|December)( \d{4})?$/i.test(t)) return true;
+  if (/^\d{1,2} (January|February|March|April|May|June|July|August|September|October|November|December) at \d{1,2}:\d{2}$/i.test(t)) return true;
+  return false;
+}
+
+function postedAtFromLabel(label, nowMs) {
+  var now = typeof nowMs === 'number' ? nowMs : Date.now();
+  var t = (label || '').trim();
+  var m = t.match(/^(\d+)([smhdw])$/);
+  if (m) {
+    var unit = { s: 1000, m: 60000, h: 3600000, d: 86400000, w: 604800000 }[m[2]];
+    return new Date(now - parseInt(m[1], 10) * unit).toISOString();
+  }
+  m = t.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago$/i);
+  if (m) {
+    var per = { second: 1000, minute: 60000, hour: 3600000, day: 86400000, week: 604800000, month: 2592000000, year: 31536000000 }[m[2].toLowerCase()];
+    return new Date(now - parseInt(m[1], 10) * per).toISOString();
+  }
+  if (/^Just now$/i.test(t)) return new Date(now).toISOString();
+  if (/^Yesterday/i.test(t)) return new Date(now - 86400000).toISOString();
+  return null;
+}
+
+function parseExactTimestamp(text, nowMs) {
+  var now = typeof nowMs === 'number' ? nowMs : Date.now();
+  var t = (text || '').trim();
+  if (!t) return null;
+  // "Yesterday at 21:02" / "Today at 09:10" — tooltips for recent labels.
+  var m = /^(Yesterday|Today) at (\d{1,2}):(\d{2})$/i.exec(t);
+  if (m) {
+    var base = new Date(now);
+    if (/^Yesterday/i.test(m[1])) base = new Date(now - 86400000);
+    base.setHours(parseInt(m[2], 10), parseInt(m[3], 10), 0, 0);
+    return base.toISOString();
+  }
+  // "[Weekday] DD Month YYYY at HH:MM" — weekday and comma optional.
+  m = /^(?:[A-Za-z]+,?\s+)?(\d{1,2}) (January|February|March|April|May|June|July|August|September|October|November|December) (\d{4}) at (\d{1,2}):(\d{2})$/i.exec(t);
+  if (m) {
+    var d = new Date(parseInt(m[3], 10), MONTHS[m[2].toLowerCase()], parseInt(m[1], 10), parseInt(m[4], 10), parseInt(m[5], 10), 0, 0);
+    return d.toISOString();
+  }
+  // "DD Month at HH:MM" (no year — the post header shows this form):
+  // assume the current year; if that lands in the future, last year.
+  m = /^(?:[A-Za-z]+,?\s+)?(\d{1,2}) (January|February|March|April|May|June|July|August|September|October|November|December) at (\d{1,2}):(\d{2})$/i.exec(t);
+  if (m) {
+    var y = new Date(now).getFullYear();
+    var d2 = new Date(y, MONTHS[m[2].toLowerCase()], parseInt(m[1], 10), parseInt(m[3], 10), parseInt(m[4], 10), 0, 0);
+    if (d2.getTime() > now) d2 = new Date(y - 1, MONTHS[m[2].toLowerCase()], parseInt(m[1], 10), parseInt(m[3], 10), parseInt(m[4], 10), 0, 0);
+    return d2.toISOString();
+  }
+  return null;
+}
+
+// Exact time for one comment/reply article, from the timestamp
+// element's title / aria-describedby / aria-label. Scans leaf
+// elements whose text is a timestamp label, then checks the leaf and
+// up to 3 ancestors (the title usually sits on the timestamp link
+// itself or a wrapper). Returns an ISO string or null.
+function exactTimestampFromArticle(art) {
+  if (typeof document === 'undefined' || !art || !art.querySelectorAll) return null;
+  try {
+    var els = art.querySelectorAll('a, span, time, abbr');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.children && el.children.length > 0) continue;
+      var txt = (el.textContent || '').trim();
+      if (!isTimestampLabel(txt)) continue;
+      var node = el;
+      for (var depth = 0; depth < 4 && node; depth++) {
+        var title = '';
+        try { title = node.getAttribute ? (node.getAttribute('title') || '') : ''; } catch (e) {}
+        var exact = parseExactTimestamp(title);
+        if (exact) return exact;
+        var descId = '';
+        try { descId = node.getAttribute ? (node.getAttribute('aria-describedby') || '') : ''; } catch (e) {}
+        if (descId) {
+          var descEl = null;
+          try { descEl = document.getElementById(descId.split(/\s+/)[0]); } catch (e) {}
+          if (descEl) {
+            exact = parseExactTimestamp(descEl.textContent || '');
+            if (exact) return exact;
+          }
+        }
+        var al = '';
+        try { al = node.getAttribute ? (node.getAttribute('aria-label') || '') : ''; } catch (e) {}
+        exact = parseExactTimestamp(al);
+        if (exact) return exact;
+        node = node.parentElement;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
 
 function extractStructuredPosts() {
   var NAV = new Set(['search','groups','pages','events','marketplace','watch','login','settings','notifications','messages','friends','photos','videos','reels','reel','video','photo','story','gaming','fundraisers','saved','bookmarks','home','privacy','help','about','ads','business','developers','policies','dialog','plugins','sharer','tr','campaign','boost','live','stories','groups_feed','profile.php','professional_dashboard','creator_studio','monetization','creator','insights','publishing_tools','ads_manager']);
@@ -138,6 +258,29 @@ function extractStructuredPosts() {
     if (m) return { kind: 'comment', author: stripTimestamp(m[1]), parent: null };
     return { kind: 'unknown', author: null, parent: null };
   }
+  // Timestamp for one comment/reply article. postedAtLabel is the
+  // visible relative label ("5d"); postedAt prefers the exact time
+  // from the timestamp element's title/description, and falls back
+  // to computing from the label against the collection time.
+  function timestampForArticle(art, artText, nowMs) {
+    var label = '';
+    var lines = (artText || '').split('\n').map(function (s) { return s.trim(); })
+      .filter(function (s) { return s.length > 0; });
+    for (var i = 0; i < Math.min(lines.length, 8); i++) {
+      if (isTimestampLabel(lines[i])) { label = lines[i]; break; }
+    }
+    if (!label) {
+      // Fallback: the article's aria-label can carry a trailing
+      // timestamp ("Comment by Sharpeiq 5 days ago").
+      var al = '';
+      try { al = art.getAttribute('aria-label') || ''; } catch (e) {}
+      var m = /\s(\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago|\d+[smhdw]|Yesterday|Just now)\s*$/i.exec(al);
+      if (m) label = m[1];
+    }
+    var exact = exactTimestampFromArticle(art);
+    var postedAt = exact || (label ? postedAtFromLabel(label, nowMs) : null);
+    return { postedAt: postedAt, postedAtLabel: label };
+  }
   // Build the comment/reply tree from a list of article elements in
   // DOM order. A reply attaches to the most recent preceding node
   // (comment or reply) whose author matches the "to Y's comment" in
@@ -147,6 +290,7 @@ function extractStructuredPosts() {
   function buildCommentTree(articles) {
     var roots = [];
     var flat = []; // all nodes in DOM order, for parent lookup
+    var nowMs = Date.now(); // one collection instant for the label fallback
     for (var i = 0; i < articles.length; i++) {
       var art = articles[i];
       var author = firstProfileLink(art);
@@ -155,10 +299,12 @@ function extractStructuredPosts() {
         if (kind0.author) author = { name: kind0.author, url: null };
       }
       if (!author) continue;
-      var ctext = cleanCommentText(ownText(art), author.name);
+      var artText = ownText(art);
+      var ctext = cleanCommentText(artText, author.name);
       if (!ctext) continue;
       var kind = articleKind(art);
-      var node = { author: author, text: ctext, replies: [] };
+      var ts = timestampForArticle(art, artText, nowMs);
+      var node = { author: author, text: ctext, postedAt: ts.postedAt, postedAtLabel: ts.postedAtLabel, replies: [] };
       if (kind.kind === 'reply') {
         var parent = null;
         for (var j = flat.length - 1; j >= 0; j--) {
@@ -357,7 +503,7 @@ function renderStructuredText(posts) {
     function renderComment(c, depth) {
       var indent = '  '.repeat(depth);
       var label = depth === 0 ? 'Comment' : 'Reply';
-      out.push(indent + label + ' by ' + c.author.name + (c.author.url ? ' — ' + c.author.url : ''));
+      out.push(indent + label + ' by ' + c.author.name + (c.postedAtLabel ? ' · ' + c.postedAtLabel : '') + (c.author.url ? ' — ' + c.author.url : ''));
       out.push(indent + label + ': ' + c.text);
       c.replies.forEach(function (r) { renderComment(r, depth + 1); });
     }
@@ -372,5 +518,5 @@ function renderStructuredText(posts) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { extractStructuredPosts: extractStructuredPosts, renderStructuredText: renderStructuredText };
+  module.exports = { extractStructuredPosts: extractStructuredPosts, renderStructuredText: renderStructuredText, postedAtFromLabel: postedAtFromLabel, parseExactTimestamp: parseExactTimestamp, isTimestampLabel: isTimestampLabel };
 }

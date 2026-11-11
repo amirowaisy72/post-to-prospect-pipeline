@@ -30,3 +30,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# LeadHunter scraping agent (local-only: DB + persistent Chrome profile)
+agent/*.db
+agent/.chrome-profile/

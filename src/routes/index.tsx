@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { BrainCircuit, Database, FileText, Star, UserPlus, UserSearch, Users, X } from "lucide-react";
+import { BrainCircuit, Database, Download, FileText, RefreshCw, Star, UserPlus, UserSearch, Users, X } from "lucide-react";
 
 import { AccountStatusBadge } from "@/components/badges";
 import { PageHeader } from "@/components/page-header";
@@ -32,6 +32,8 @@ const ACTIVITY_ICON: Record<ActivityType, typeof Users> = {
   "analysis-finished": BrainCircuit,
   "lead-shortlisted": Star,
   "lead-rejected": X,
+  "source-scraped": Download,
+  "source-synced": RefreshCw,
 };
 
 function Dashboard() {

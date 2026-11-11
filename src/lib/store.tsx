@@ -7,6 +7,14 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { toast } from "sonner";
 
 import * as svc from "./leadhunter-service";
+import {
+  AGENT_NOT_RUNNING_MESSAGE,
+  AgentUnreachableError,
+  getAgentJob,
+  startAgentScrape,
+  startAgentSync,
+  stopAgentJob,
+} from "./agent-client";
 import { createDefaultSettings, createSeedState } from "./seed";
 import type { AccountStatus, AgentTask, AppState, Lead, LeadStatus, Settings, SourceType } from "./types";
 
@@ -37,6 +45,14 @@ interface StoreValue {
   startAgentTask: (accountId: string, task: Omit<AgentTask, "startedAt">) => boolean;
   /** Finish or stop the agent's current task. */
   finishAgentTask: (accountId: string, opts?: { stopped?: boolean }) => void;
+  /** Start a Scrap job for one source (new posts only). False when the agent is unreachable or a job is already running. */
+  startScrape: (sourceId: string) => Promise<boolean>;
+  /** Start a Sync job for one source (re-visit its collected posts). */
+  startSync: (sourceId: string) => Promise<boolean>;
+  /** Start a Sync job for one post. */
+  startPostSync: (postId: string) => Promise<boolean>;
+  /** Graceful stop: the agent finishes the current post, saves it, then terminates. */
+  stopJob: (jobId: string) => Promise<void>;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -81,6 +97,121 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }, 1000);
     return () => window.clearInterval(t);
   }, [hydrated]);
+
+  // Scrap/Sync jobs: poll the local agent while a job is active, import
+  // its results when it finishes, and surface count mismatches plainly.
+  const jobPollFailures = useRef<Record<string, number>>({});
+  const pollingRef = useRef(false);
+  const pollJobs = useCallback(async () => {
+    if (pollingRef.current) return;
+    const s = stateRef.current;
+    const jobs = s.jobs.filter((j) => j.status === "running" || j.status === "stop-requested");
+    if (jobs.length === 0) return;
+    pollingRef.current = true;
+    try {
+      for (const job of jobs) {
+        let res: Awaited<ReturnType<typeof getAgentJob>>;
+        try {
+          res = await getAgentJob(s.settings.agentUrl, job.id);
+          jobPollFailures.current[job.id] = 0;
+        } catch {
+          const fails = (jobPollFailures.current[job.id] ?? 0) + 1;
+          jobPollFailures.current[job.id] = fails;
+          if (fails >= 3) {
+            setState((prev) =>
+              svc.updateSourceJob(prev, job.id, {
+                status: "failed",
+                finishedAt: nowIso(),
+                error: AGENT_NOT_RUNNING_MESSAGE,
+              }).state,
+            );
+            toast.error(AGENT_NOT_RUNNING_MESSAGE);
+          }
+          continue;
+        }
+        const aj = res.job;
+        if (aj.status === "done" || aj.status === "stopped" || aj.status === "failed" || aj.status === "incomplete") {
+          // Import the collected posts, then finish the local job.
+          const parsed = svc.parsePostDataJson(JSON.stringify({ posts: res.posts }), stateRef.current, {
+            allowExisting: job.kind === "sync",
+          });
+          setState((prev) => {
+            let next = prev;
+            if (job.kind === "scrape" && job.sourceId) {
+              const r = svc.addPosts(next, parsed.drafts, job.sourceId, job.accountId, () => newId("post"), nowIso());
+              next = r.state;
+            } else {
+              for (const draft of parsed.drafts) {
+                const existing = next.posts.find((p) => svc.sameUrl(p.postUrl, draft.postUrl));
+                if (existing) next = svc.mergePostActivity(next, existing.id, draft, nowIso()).state;
+              }
+            }
+            if (aj.status === "done" || aj.status === "stopped" || aj.status === "incomplete") {
+              const name = next.sources.find((x) => x.id === job.sourceId)?.name ?? "source";
+              next = svc.logActivity(
+                next,
+                job.kind === "scrape" ? "source-scraped" : "source-synced",
+                job.accountId,
+                `${job.kind === "scrape" ? "Scraped" : "Synced"} ${name} — ${aj.newPosts} new post(s), ${aj.postsProcessed} processed`,
+                `act-${job.id}`,
+                nowIso(),
+              );
+            }
+            return svc.updateSourceJob(next, job.id, {
+              status: aj.status,
+              postsProcessed: aj.postsProcessed,
+              newPosts: aj.newPosts,
+              finishedAt: aj.finishedAt ?? nowIso(),
+              error: aj.error ?? null,
+              verification: aj.verification ?? [],
+            }).state;
+          });
+          const sourceName =
+            stateRef.current.sources.find((x) => x.id === job.sourceId)?.name ?? "source";
+          const missing = (aj.verification ?? []).filter((v) => !v.complete);
+          if (aj.status === "failed") {
+            toast.error(`Job failed — ${aj.error ?? "unknown error"}`);
+          } else if (aj.status === "incomplete" || missing.length > 0) {
+            const detail =
+              aj.message ??
+              missing
+                .map(
+                  (v) =>
+                    `collected ${v.collectedComments} of ${v.expectedComments ?? "?"} — ${v.missing ?? "?"} missing`,
+                )
+                .join("; ");
+            toast.warning(`Finished with gaps — ${detail}`, {
+              description: `${job.kind === "scrape" ? "Scrape" : "Sync"} of ${sourceName}`,
+            });
+          } else if (aj.status === "stopped") {
+            toast(`Stopped — ${aj.postsProcessed} post(s) processed, ${aj.newPosts} new`, {
+              description: sourceName,
+            });
+          } else if (job.kind === "scrape") {
+            toast.success(`Scrape finished — ${aj.newPosts} new post(s) from ${sourceName}`);
+          } else {
+            toast.success(`Sync finished — ${aj.postsProcessed} post(s) re-checked in ${sourceName}`);
+          }
+        } else {
+          setState((prev) =>
+            svc.updateSourceJob(prev, job.id, {
+              status: aj.status,
+              postsProcessed: aj.postsProcessed,
+              newPosts: aj.newPosts,
+            }).state,
+          );
+        }
+      }
+    } finally {
+      pollingRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const t = window.setInterval(() => void pollJobs(), 2000);
+    return () => window.clearInterval(t);
+  }, [hydrated, pollJobs]);
 
   const apply = useCallback((r: svc.Result<AppState>, success?: string) => {
     if (!r.ok) {
@@ -137,6 +268,108 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const label = svc.agentFor(stateRef.current, accountId).task?.label;
         setState((s) => svc.finishAgentTask(s, accountId, nowIso()));
         if (opts?.stopped && label) toast(`Stopped: ${label}`);
+      },
+      startScrape: async (sourceId) => {
+        const s = stateRef.current;
+        const source = s.sources.find((x) => x.id === sourceId);
+        if (!source) return false;
+        if (svc.runningJobForSource(s, sourceId)) {
+          toast.info("A job is already running for this source");
+          return false;
+        }
+        const accountId = source.joinedByAccountId ?? s.activeAccountId;
+        let jobId: string;
+        try {
+          ({ jobId } = await startAgentScrape(s.settings.agentUrl, {
+            sourceId,
+            sourceUrl: source.url,
+            sourceName: source.name,
+            accountId,
+          }));
+        } catch (e) {
+          toast.error(e instanceof AgentUnreachableError ? AGENT_NOT_RUNNING_MESSAGE : (e as Error).message);
+          return false;
+        }
+        setState((prev) =>
+          svc.startSourceJob(prev, { id: jobId, kind: "scrape", sourceId, postId: null, accountId, startedAt: nowIso() }).state,
+        );
+        toast(`Scraping ${source.name} — new posts only`);
+        void pollJobs();
+        return true;
+      },
+      startSync: async (sourceId) => {
+        const s = stateRef.current;
+        const source = s.sources.find((x) => x.id === sourceId);
+        if (!source) return false;
+        if (svc.runningJobForSource(s, sourceId)) {
+          toast.info("A job is already running for this source");
+          return false;
+        }
+        if (svc.scrapedCount(s, sourceId) === 0) {
+          toast.info("No collected posts to sync yet");
+          return false;
+        }
+        const accountId = source.joinedByAccountId ?? s.activeAccountId;
+        let jobId: string;
+        try {
+          ({ jobId } = await startAgentSync(s.settings.agentUrl, {
+            sourceId,
+            sourceUrl: source.url,
+            accountId,
+          }));
+        } catch (e) {
+          toast.error(e instanceof AgentUnreachableError ? AGENT_NOT_RUNNING_MESSAGE : (e as Error).message);
+          return false;
+        }
+        setState((prev) =>
+          svc.startSourceJob(prev, { id: jobId, kind: "sync", sourceId, postId: null, accountId, startedAt: nowIso() }).state,
+        );
+        toast(`Syncing ${source.name} — re-visiting collected posts`);
+        void pollJobs();
+        return true;
+      },
+      startPostSync: async (postId) => {
+        const s = stateRef.current;
+        const post = s.posts.find((p) => p.id === postId);
+        if (!post) return false;
+        if (svc.runningJobForPost(s, postId)) {
+          toast.info("A job is already running for this post");
+          return false;
+        }
+        let jobId: string;
+        try {
+          ({ jobId } = await startAgentSync(s.settings.agentUrl, {
+            postId,
+            postUrl: post.postUrl,
+            accountId: post.accountId,
+          }));
+        } catch (e) {
+          toast.error(e instanceof AgentUnreachableError ? AGENT_NOT_RUNNING_MESSAGE : (e as Error).message);
+          return false;
+        }
+        setState((prev) =>
+          svc.startSourceJob(prev, {
+            id: jobId,
+            kind: "sync",
+            sourceId: post.sourceId,
+            postId,
+            accountId: post.accountId,
+            startedAt: nowIso(),
+          }).state,
+        );
+        toast("Syncing this post — re-visiting it for new activity");
+        void pollJobs();
+        return true;
+      },
+      stopJob: async (jobId) => {
+        const s = stateRef.current;
+        try {
+          await stopAgentJob(s.settings.agentUrl, jobId);
+          setState((prev) => svc.requestSourceJobStop(prev, jobId).state);
+          toast("Stopping after the current post finishes…");
+        } catch (e) {
+          toast.error(e instanceof AgentUnreachableError ? AGENT_NOT_RUNNING_MESSAGE : (e as Error).message);
+        }
       },
       resetDemoData: () => {
         setState(createSeedState());

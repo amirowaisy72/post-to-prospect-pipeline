@@ -268,11 +268,12 @@
     });
   }
 
-  // Click "View N replies" / "View more comments" toggles so replies
-  // (and further comments) enter the DOM before the structured scan.
-  // Replies are collapsed behind these buttons and are not articles
-  // until clicked — without this every reply is missed. Capped so one
-  // pass cannot click hundreds of toggles.
+  // Click "View N replies" / "View more comments" / "View more answers"
+  // toggles so replies (and further comments) enter the DOM before the
+  // structured scan. Replies are collapsed behind these buttons and are
+  // not articles until clicked — without this every reply is missed.
+  // Capped per pass so one pass cannot click hundreds of toggles; the
+  // caller loops passes until a pass clicks nothing.
   function expandReplies() {
     let clicked = 0;
     try {
@@ -280,7 +281,7 @@
       for (const el of els) {
         if (clicked >= 20) break;
         const t = (el.innerText || '').trim();
-        if (/^View \d+ repl(?:y|ies)$/i.test(t) || /^View more comments$/i.test(t)) {
+        if (/^View \d+ repl(?:y|ies)$/i.test(t) || /^View more comments$/i.test(t) || /^View more answers$/i.test(t)) {
           try { el.click(); clicked++; } catch (e) {}
         }
       }
@@ -292,18 +293,29 @@
     stopObserver();
     running = false;
     dirty = false;
-    // Expand collapsed replies first, then take the final structured
-    // pass after they have had a moment to render.
-    expandReplies();
-    setTimeout(() => {
-      extractStructured();
-      persist();
-      // Structured files first (the AI-ready format); the flat .txt too
-      // when there is flat data but no structured posts (other sites).
-      const hadStructured = downloadStructured();
-      if (!hadStructured) downloadTxt();
-      else if (captured.length) downloadTxt();
-    }, 1500);
+    // Completeness (hard rule): expanding replies can reveal further
+    // nested "View N replies" buttons, so keep expanding until a full
+    // pass clicks nothing (bounded — at most 10 passes), then take the
+    // final structured pass after they have had a moment to render.
+    let passes = 0;
+    function expandPass() {
+      passes++;
+      const clicked = expandReplies();
+      if (clicked > 0 && passes < 10) {
+        setTimeout(expandPass, 1200);
+        return;
+      }
+      setTimeout(() => {
+        extractStructured();
+        persist();
+        // Structured files first (the AI-ready format); the flat .txt too
+        // when there is flat data but no structured posts (other sites).
+        const hadStructured = downloadStructured();
+        if (!hadStructured) downloadTxt();
+        else if (captured.length) downloadTxt();
+      }, 1500);
+    }
+    expandPass();
   }
 
   // -- messages from the popup ---------------------------------------

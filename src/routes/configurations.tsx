@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { BrainCircuit, Database, Eye, EyeOff, Filter, RotateCcw, Save, ShieldCheck } from "lucide-react";
+import { Bot, BrainCircuit, Database, Eye, EyeOff, Filter, RotateCcw, Save, ShieldCheck } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { PageHeader } from "@/components/page-header";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { createDefaultSettings, DEFAULT_CRITERIA, DEFAULT_OLLAMA_URL } from "@/lib/seed";
+import { createDefaultSettings, DEFAULT_AGENT_URL, DEFAULT_CRITERIA, DEFAULT_OLLAMA_URL } from "@/lib/seed";
 import { useStore } from "@/lib/store";
 import type { AiProvider, DatabaseKind, Settings } from "@/lib/types";
 
@@ -248,6 +248,23 @@ function ConfigurationsPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <NumberField id="cfg-min-comments" label="Min comments" value={form.sourcing.minComments} onChange={(n) => patch("sourcing", { minComments: n })} hint="Per post, before joining." />
             <NumberField id="cfg-min-members" label="Min members" value={form.sourcing.minMembers} onChange={(n) => patch("sourcing", { minMembers: n })} hint="Group or page size." />
+          </div>
+        </Section>
+
+        <Section icon={<Bot className="size-4" />} title="Scraping agent" description="Local agent on your PC that runs Scrap and Sync.">
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="cfg-agent">Agent URL</Label>
+              {form.agentUrl !== DEFAULT_AGENT_URL && (
+                <button type="button" className="text-xs font-semibold text-primary hover:underline" onClick={() => set("agentUrl", DEFAULT_AGENT_URL)}>
+                  Use default
+                </button>
+              )}
+            </div>
+            <Input id="cfg-agent" value={form.agentUrl} onChange={(e) => set("agentUrl", e.target.value)} placeholder={DEFAULT_AGENT_URL} className="font-mono text-sm" />
+            <p className="text-xs text-muted-foreground">
+              Start it with agent/run-agent.bat on your PC. It uses your own Chrome profile — sign in to Facebook once in that window. The agent never stores a password.
+            </p>
           </div>
         </Section>
 

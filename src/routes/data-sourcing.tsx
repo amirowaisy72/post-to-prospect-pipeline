@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { ExternalLink, Plus, Upload } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
@@ -14,10 +14,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { accountName, countReplies, parsePostDataJson, SAMPLE_POST_JSON } from "@/lib/leadhunter-service";
+import { AGENT_NOT_RUNNING_MESSAGE } from "@/lib/agent-client";
+import { accountName, countReplies, parsePostDataJson, runningJobForSource, scrapedCount, SAMPLE_POST_JSON } from "@/lib/leadhunter-service";
 import type { PostImportResult } from "@/lib/leadhunter-service";
 import { fmtDate, fmtNumber, shortUrl } from "@/lib/format";
 import { useActiveAccountData, useStore } from "@/lib/store";
+import { useAgentHealth } from "@/lib/use-agent-health";
 import type { SourceType } from "@/lib/types";
 
 export const Route = createFileRoute("/data-sourcing")({
@@ -53,6 +55,7 @@ function DataSourcingPage() {
 
 function SourcesSection() {
   const { state } = useStore();
+  const { reachable, refresh } = useAgentHealth();
   const accountId = state.activeAccountId;
   const [filter, setFilter] = useState<"all" | "mine">("all");
   const [open, setOpen] = useState(false);
@@ -86,6 +89,14 @@ function SourcesSection() {
         </div>
       </CardHeader>
       <CardContent className="px-0">
+        {reachable === false && (
+          <div className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <span>{AGENT_NOT_RUNNING_MESSAGE}</span>
+            <Button variant="outline" size="sm" onClick={() => void refresh()}>
+              Recheck
+            </Button>
+          </div>
+        )}
         {rows.length === 0 ? (
           <div className="px-6">
             <EmptyState title="No sources here yet" />
@@ -100,12 +111,15 @@ function SourcesSection() {
                 <TableHead className="text-right">Members</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Joined by</TableHead>
-                <TableHead className="pr-6">Last scraped</TableHead>
+                <TableHead>Last scraped</TableHead>
+                <TableHead className="text-right">Scraped</TableHead>
+                <TableHead className="pr-6">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.map((s) => {
                 const mine = s.joinedByAccountId === accountId;
+                const count = scrapedCount(state, s.id);
                 return (
                   <TableRow key={s.id}>
                     <TableCell className="pl-6">
@@ -132,7 +146,24 @@ function SourcesSection() {
                         <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
-                    <TableCell className="whitespace-nowrap pr-6 text-sm text-muted-foreground">{fmtDate(s.lastScrapedAt)}</TableCell>
+                    <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{fmtDate(s.lastScrapedAt)}</TableCell>
+                    <TableCell className="text-right tabular">
+                      {count > 0 ? (
+                        <Link
+                          to="/data-sourcing/$sourceId"
+                          params={{ sourceId: s.id }}
+                          className="font-medium text-primary hover:underline"
+                          title="View scraped posts"
+                        >
+                          {count} post{count === 1 ? "" : "s"}
+                        </Link>
+                      ) : (
+                        <span className="text-muted-foreground">0</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="pr-6">
+                      <SourceActions sourceId={s.id} reachable={reachable} />
+                    </TableCell>
                   </TableRow>
                 );
               })}
@@ -142,6 +173,65 @@ function SourcesSection() {
       </CardContent>
       <AddSourceDialog open={open} onOpenChange={setOpen} />
     </Card>
+  );
+}
+
+/** Per-row Scrap / Sync / Stop. While a job runs for this source the
+ * buttons are replaced by its progress and a Stop button. */
+function SourceActions({ sourceId, reachable }: { sourceId: string; reachable: boolean | null }) {
+  const { state, startScrape, startSync, stopJob } = useStore();
+  const job = runningJobForSource(state, sourceId);
+  const count = scrapedCount(state, sourceId);
+  // Most recent job for this source, so an incomplete run stays
+  // visible after its toast disappears — until a later run succeeds.
+  const latestJob = state.jobs.find((j) => j.sourceId === sourceId);
+  const lastJob =
+    latestJob && (latestJob.status === "incomplete" || latestJob.status === "failed") ? latestJob : undefined;
+  if (job) {
+    return (
+      <div className="flex flex-col gap-1">
+        <span className="whitespace-nowrap text-xs text-muted-foreground">
+          {job.kind === "scrape" ? "Scraping" : "Syncing"}… {job.postsProcessed} processed, {job.newPosts} new
+        </span>
+        <div>
+          <Button variant="outline" size="sm" onClick={() => void stopJob(job.id)}>
+            Stop
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  const agentDown = reachable === false;
+  const agentReason = agentDown ? AGENT_NOT_RUNNING_MESSAGE : undefined;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex gap-1.5">
+        <Button variant="outline" size="sm" disabled={agentDown} title={agentReason} onClick={() => void startScrape(sourceId)}>
+          Scrap
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={agentDown || count === 0}
+          title={agentDown ? agentReason : count === 0 ? "No collected posts to sync yet" : undefined}
+          onClick={() => void startSync(sourceId)}
+        >
+          Sync
+        </Button>
+      </div>
+      {lastJob?.status === "incomplete" && (
+        <span className="max-w-56 text-xs text-amber-600">
+          Last {lastJob.kind}:{" "}
+          {lastJob.verification
+            .filter((v) => !v.complete)
+            .map((v) => `collected ${v.collectedComments} of ${v.expectedComments ?? "?"} — ${v.missing ?? "?"} missing`)
+            .join("; ")}
+        </span>
+      )}
+      {lastJob?.status === "failed" && (
+        <span className="max-w-56 text-xs text-destructive">Last {lastJob.kind} failed: {lastJob.error ?? "unknown error"}</span>
+      )}
+    </div>
   );
 }
 

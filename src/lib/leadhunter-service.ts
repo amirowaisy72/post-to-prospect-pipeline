@@ -20,6 +20,8 @@ import type {
   PostData,
   Settings,
   Source,
+  SourceJob,
+  SourceJobKind,
   SourceType,
 } from "./types";
 
@@ -49,6 +51,18 @@ function activity(
 
 function withActivity(state: AppState, entry: Activity): AppState {
   return { ...state, activity: [entry, ...state.activity].slice(0, 100) };
+}
+
+/** Append one activity entry (newest first, capped at 100). */
+export function logActivity(
+  state: AppState,
+  type: ActivityType,
+  accountId: string,
+  message: string,
+  id: string,
+  at: string,
+): AppState {
+  return withActivity(state, activity(type, accountId, message, id, at));
 }
 
 export const accountName = (state: AppState, id: string | null | undefined) =>
@@ -199,6 +213,8 @@ interface Loose {
   replies?: unknown;
   sourceId?: unknown;
   posts?: unknown;
+  postedAt?: unknown;
+  postedAtLabel?: unknown;
 }
 
 export interface PostImportResult {
@@ -224,6 +240,16 @@ function readPerson(value: unknown, path: string, errors: string[]): Person | nu
   }
   if (typeof v.name !== "string") return null;
   return { name: v.name.trim(), url: typeof v.url === "string" ? v.url.trim() : "" };
+}
+
+/** Timestamps: postedAt is an ISO string when present, else null;
+ * postedAtLabel is the visible relative label ("5d"), else "".
+ * Older files without them parse fine — both default. */
+function readPostedAt(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+function readPostedAtLabel(v: unknown): string {
+  return typeof v === "string" ? v : "";
 }
 
 /** Validate one PostData object. `label` identifies the post in errors. */
@@ -261,10 +287,23 @@ function parseOnePost(
           const rr = (r ?? {}) as Loose;
           const rAuthor = readPerson(rr.author, `comments[${i}].replies[${j}].author`, errors);
           if (typeof rr.text !== "string") errors.push(`comments[${i}].replies[${j}].text is required.`);
-          if (rAuthor && typeof rr.text === "string") replies.push({ author: rAuthor, text: rr.text });
+          if (rAuthor && typeof rr.text === "string")
+            replies.push({
+              author: rAuthor,
+              text: rr.text,
+              postedAt: readPostedAt(rr.postedAt),
+              postedAtLabel: readPostedAtLabel(rr.postedAtLabel),
+            });
         });
       }
-      if (cAuthor && typeof cc.text === "string") comments.push({ author: cAuthor, text: cc.text, replies });
+      if (cAuthor && typeof cc.text === "string")
+        comments.push({
+          author: cAuthor,
+          text: cc.text,
+          postedAt: readPostedAt(cc.postedAt),
+          postedAtLabel: readPostedAtLabel(cc.postedAtLabel),
+          replies,
+        });
     });
   }
 
@@ -291,8 +330,15 @@ function parseOnePost(
  * Validate pasted / uploaded PostData JSON. Nothing is saved here.
  * Accepts all three shapes the collector produces:
  * (a) a single PostData object, (b) {"posts": [...]}, (c) a bare array.
+ * With options.allowExisting, already-collected URLs are returned as
+ * drafts instead of being reported (Sync re-imports known posts to
+ * merge new activity into them).
  */
-export function parsePostDataJson(raw: string, state: AppState): PostImportResult {
+export function parsePostDataJson(
+  raw: string,
+  state: AppState,
+  options?: { allowExisting?: boolean },
+): PostImportResult {
   const result: PostImportResult = { drafts: [], errors: [], alreadyCollected: [] };
   let json: unknown;
   try {
@@ -319,8 +365,8 @@ export function parsePostDataJson(raw: string, state: AppState): PostImportResul
   items.forEach((item, i) => {
     const label = labelFor(i, item);
     const parsed = parseOnePost(item, label, state);
-    if (parsed.draft && !parsed.alreadyCollected) result.drafts.push(parsed.draft);
-    if (parsed.alreadyCollected) result.alreadyCollected.push(parsed.alreadyCollected);
+    if (parsed.draft && (!parsed.alreadyCollected || options?.allowExisting)) result.drafts.push(parsed.draft);
+    if (parsed.alreadyCollected && !options?.allowExisting) result.alreadyCollected.push(parsed.alreadyCollected);
     for (const e of parsed.errors) result.errors.push({ label, reason: e });
   });
   return result;
@@ -355,6 +401,7 @@ export function addPost(
     text: draft.text,
     comments: draft.comments,
     collectedAt: now,
+    lastSyncedAt: null,
   };
   const next: AppState = {
     ...state,
@@ -409,6 +456,131 @@ export function addPosts(
     added++;
   }
   return { state: next, added, skipped, alreadyCollected };
+}
+
+/* ---------------- Data Sourcing v2: titles, counts, sync merge, jobs ---------------- */
+
+/** Display title for a scraped post: first ~60 chars of its text, one line. */
+export function postTitle(post: { text: string }): string {
+  const single = post.text.replace(/\s+/g, " ").trim();
+  return single.length > 60 ? `${single.slice(0, 60)}…` : single;
+}
+
+export function postsForSource(state: AppState, sourceId: string): PostData[] {
+  return state.posts.filter((p) => p.sourceId === sourceId);
+}
+
+/** Number of collected posts for one source (the "Scraped" column). */
+export function scrapedCount(state: AppState, sourceId: string): number {
+  return postsForSource(state, sourceId).length;
+}
+
+const activityKey = (authorName: string, text: string) =>
+  `${authorName.trim().toLowerCase()}\n${text.trim()}`;
+
+/**
+ * Merge a freshly re-scraped post into the stored one (Sync).
+ * New comments/replies (dedupe by author + text) are appended;
+ * already-known ones are never duplicated. The post text is updated
+ * when the author edited it. lastSyncedAt is always set to now — a
+ * sync re-visited the post even when nothing new was found.
+ */
+export function mergePostActivity(
+  state: AppState,
+  postId: string,
+  incoming: PostDraft,
+  now: string,
+): { state: AppState; addedComments: number; addedReplies: number; changed: boolean } {
+  const idx = state.posts.findIndex((p) => p.id === postId);
+  if (idx === -1) return { state, addedComments: 0, addedReplies: 0, changed: false };
+  const post = state.posts[idx]!;
+  let addedComments = 0;
+  let addedReplies = 0;
+  const comments = post.comments.map((c) => ({ ...c, replies: [...c.replies] }));
+  for (const inc of incoming.comments) {
+    const key = activityKey(inc.author.name, inc.text);
+    const existing = comments.find((c) => activityKey(c.author.name, c.text) === key);
+    if (!existing) {
+      comments.push({ ...inc, replies: inc.replies.map((r) => ({ ...r })) });
+      addedComments += 1;
+      addedReplies += inc.replies.length;
+      continue;
+    }
+    for (const r of inc.replies) {
+      const rkey = activityKey(r.author.name, r.text);
+      if (!existing.replies.some((er) => activityKey(er.author.name, er.text) === rkey)) {
+        existing.replies.push({ ...r });
+        addedReplies += 1;
+      }
+    }
+  }
+  const textChanged = incoming.text.trim() !== "" && incoming.text !== post.text;
+  const changed = addedComments > 0 || addedReplies > 0 || textChanged;
+  const next: PostData = {
+    ...post,
+    text: textChanged ? incoming.text : post.text,
+    comments,
+    lastSyncedAt: now,
+  };
+  const posts = [...state.posts];
+  posts[idx] = next;
+  return { state: { ...state, posts }, addedComments, addedReplies, changed };
+}
+
+/* ---------------- Source scrap/sync jobs ---------------- */
+
+export function startSourceJob(
+  state: AppState,
+  job: {
+    id: string;
+    kind: SourceJobKind;
+    sourceId: string | null;
+    postId: string | null;
+    accountId: string;
+    startedAt: string;
+  },
+): { state: AppState } {
+  const entry: SourceJob = {
+    ...job,
+    status: "running",
+    postsProcessed: 0,
+    newPosts: 0,
+    finishedAt: null,
+    error: null,
+    verification: [],
+  };
+  return { state: { ...state, jobs: [entry, ...state.jobs] } };
+}
+
+export function updateSourceJob(
+  state: AppState,
+  jobId: string,
+  patch: Partial<
+    Pick<SourceJob, "status" | "postsProcessed" | "newPosts" | "finishedAt" | "error" | "verification">
+  >,
+): { state: AppState } {
+  return {
+    state: { ...state, jobs: state.jobs.map((j) => (j.id === jobId ? { ...j, ...patch } : j)) },
+  };
+}
+
+/**
+ * Graceful stop: marks the job "stop-requested". The agent only ever
+ * checks this flag BETWEEN posts — it finishes the current post
+ * fully, saves it, then terminates.
+ */
+export function requestSourceJobStop(state: AppState, jobId: string): { state: AppState } {
+  return updateSourceJob(state, jobId, { status: "stop-requested" });
+}
+
+const isJobActive = (j: SourceJob) => j.status === "running" || j.status === "stop-requested";
+
+export function runningJobForSource(state: AppState, sourceId: string): SourceJob | undefined {
+  return state.jobs.find((j) => j.sourceId === sourceId && isJobActive(j));
+}
+
+export function runningJobForPost(state: AppState, postId: string): SourceJob | undefined {
+  return state.jobs.find((j) => j.postId === postId && isJobActive(j));
 }
 
 /* ---------------- Analysis (simulated AI) ---------------- */
@@ -709,6 +881,7 @@ export function validateSettings(input: Settings): Result<Settings> {
     model: input.model.trim(),
     ollamaUrl: input.ollamaUrl.trim().replace(/\/+$/, ""),
     geminiApiKey: input.geminiApiKey.trim(),
+    agentUrl: input.agentUrl.trim().replace(/\/+$/, ""),
     database: {
       ...input.database,
       supabaseUrl: input.database.supabaseUrl.trim().replace(/\/+$/, ""),
@@ -718,6 +891,7 @@ export function validateSettings(input: Settings): Result<Settings> {
   };
   if (!s.model) return { ok: false, error: "Enter a model name." };
   if (!isHttpUrl(s.ollamaUrl)) return { ok: false, error: "Ollama server URL must start with http:// or https://." };
+  if (!isHttpUrl(s.agentUrl)) return { ok: false, error: "Agent URL must start with http:// or https://." };
   const { defaultLeadsCount, preferredMinAge, gentleMinAge } = s.leadRules;
   if (!isWhole(defaultLeadsCount, 1)) return { ok: false, error: "Default leads count must be a whole number, 1 or more." };
   if (!isWhole(gentleMinAge, 1) || !isWhole(preferredMinAge, 1))

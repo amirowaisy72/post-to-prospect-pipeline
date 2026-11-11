@@ -35,11 +35,17 @@ export interface Person {
 export interface Reply {
   author: Person;
   text: string;
+  postedAt: string | null;
+  postedAtLabel: string;
 }
 
 export interface Comment {
   author: Person;
   text: string;
+  /** Exact time when Facebook exposes it (timestamp tooltip), else the relative label computed against collection time (approximate). */
+  postedAt: string | null;
+  /** The visible relative label as shown, e.g. "5d". Always kept, even when postedAt is exact. */
+  postedAtLabel: string;
   replies: Reply[];
 }
 
@@ -52,6 +58,8 @@ export interface PostData {
   text: string;
   comments: Comment[];
   collectedAt: string;
+  /** Last time a Sync re-visited this post and merged new activity (null = never synced). */
+  lastSyncedAt: string | null;
 }
 
 export type LeadPriority = "rich-beginner" | "rich-experienced" | "other";
@@ -111,6 +119,8 @@ export interface Settings {
   leadRules: LeadRules;
   sourcing: SourcingRules;
   database: DatabaseConfig;
+  /** Local scraping agent on the user's PC (Python + Playwright). */
+  agentUrl: string;
 }
 
 export type ActivityType =
@@ -120,7 +130,9 @@ export type ActivityType =
   | "post-collected"
   | "analysis-finished"
   | "lead-shortlisted"
-  | "lead-rejected";
+  | "lead-rejected"
+  | "source-scraped"
+  | "source-synced";
 
 export interface Activity {
   id: string;
@@ -139,8 +151,52 @@ export interface AppState {
   settings: Settings;
   /** One entry per account that has run (or is running) a task; missing accounts are free. */
   agents: AgentState[];
+  /** Scrap/Sync jobs run against the local agent (newest first). */
+  jobs: SourceJob[];
   activeAccountId: string;
   defaultAccountId: string;
+}
+
+/* ---------------- Source scrap/sync jobs ---------------- */
+
+/** Kind of job the local scraping agent runs. */
+export type SourceJobKind = "scrape" | "sync";
+
+/**
+ * Job status. "stop-requested" is the graceful-stop flag: the agent
+ * finishes the current post fully, saves it, then terminates — the
+ * flag is only ever checked BETWEEN posts, never mid-post.
+ * "incomplete" means the run finished but at least one post's
+ * collected comment count did not match its stated total (see
+ * verification on the job).
+ */
+export type SourceJobStatus = "running" | "stop-requested" | "done" | "stopped" | "failed" | "incomplete";
+
+/** Per-post completeness check: collected comments+replies vs the post's stated total. */
+export interface PostVerification {
+  postUrl: string;
+  /** Stated total from the post (null when Facebook never showed one). */
+  expectedComments: number | null;
+  collectedComments: number;
+  /** expectedComments - collectedComments (null when expected is unknown). */
+  missing: number | null;
+  complete: boolean;
+}
+
+export interface SourceJob {
+  id: string;
+  kind: SourceJobKind;
+  sourceId: string | null;
+  postId: string | null;
+  accountId: string;
+  status: SourceJobStatus;
+  postsProcessed: number;
+  newPosts: number;
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+  /** Count verification, one entry per post the job touched. */
+  verification: PostVerification[];
 }
 
 /* ---------------- Account agents ---------------- */

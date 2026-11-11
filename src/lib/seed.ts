@@ -16,6 +16,9 @@ export const DEFAULT_CRITERIA = {
 
 export const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
 
+/** Local scraping agent on the user's PC (Python + Playwright). */
+export const DEFAULT_AGENT_URL = "http://127.0.0.1:8001";
+
 /** Factory defaults for the Configurations page. */
 export function createDefaultSettings(): Settings {
   return {
@@ -27,6 +30,7 @@ export function createDefaultSettings(): Settings {
     leadRules: { defaultLeadsCount: 5, preferredMinAge: 35, gentleMinAge: 32 },
     sourcing: { minComments: 3, minMembers: 100 },
     database: { kind: "supabase", supabaseUrl: "", supabaseKey: "", connectionString: "" },
+    agentUrl: DEFAULT_AGENT_URL,
   };
 }
 
@@ -47,6 +51,7 @@ export function createSeedState(): AppState {
         lastFinishedAt: "2026-11-09T18:05:00.000Z",
       },
     ],
+    jobs: [],
     activeAccountId: "acc-1",
     defaultAccountId: "acc-1",
     accounts: [
@@ -126,49 +131,68 @@ export function createSeedState(): AppState {
         author: p("Usman Tariq", "usman.tariq.pk"),
         text: "Planning to put fresh money into PSX before the year ends. Which sectors are you all watching for 2027 — banks, cement or fertiliser? Share your thinking below.",
         collectedAt: "2026-11-10T14:20:00.000Z",
+        lastSyncedAt: null,
         comments: [
           {
             author: p("Sana Mirza", "sana.mirza.88"),
             text: "I just sold a plot in DHA and have around 2 crore sitting in my account. Completely new to stocks though — where do I even start?",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [
               {
                 author: p("Usman Tariq", "usman.tariq.pk"),
                 text: "Start with a broker account and blue chips, Sana.",
+                postedAt: null,
+                postedAtLabel: "",
               },
               {
                 author: p("Sana Mirza", "sana.mirza.88"),
                 text: "Thanks! Is 2 crore too much to put in at once?",
+                postedAt: null,
+                postedAtLabel: "",
               },
             ],
           },
           {
             author: p("Hamza Qureshi", "hamza.qureshi.lhr"),
             text: "Been investing in PSX for 6 years, my portfolio is mostly banks and OGDC. Recently exited a textile business so I have extra cash to diversify.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
           {
             author: p("Signals King PK", "signalskingpk"),
             text: "Join my Telegram channel for daily guaranteed signals 💯 t.me/signalsking",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [
               {
                 author: p("Faraz Ali", "faraz.ali.khi"),
                 text: "Reported. Stop spamming please.",
+                postedAt: null,
+                postedAtLabel: "",
               },
             ],
           },
           {
             author: p("Nida Hassan", "nida.hassan.lhr"),
             text: "My husband and I run two pharmacies in Lahore. Never invested before but want our savings working. Is PSX safe for beginners?",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [
               {
                 author: p("Kamran Shah", "kamran.shah.isb"),
                 text: "I have held mutual funds and stocks for 10 years, PSX is fine if you stay diversified.",
+                postedAt: null,
+                postedAtLabel: "",
               },
             ],
           },
           {
             author: p("Ali Raza", "ali.raza.2004"),
             text: "Where do I start? Just graduated, total beginner.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
         ],
@@ -181,34 +205,47 @@ export function createSeedState(): AppState {
         author: p("Zainab Akhtar", "zainab.akhtar.khi"),
         text: "Business owners — where are you parking your extra cash these days? Bank deposits feel like they're losing to inflation.",
         collectedAt: "2026-11-09T18:05:00.000Z",
+        lastSyncedAt: null,
         comments: [
           {
             author: p("Omar Siddiqui", "omar.siddiqui.exports"),
             text: "We export garments and have a healthy cash reserve. I already invest in mutual funds and a few PSX stocks, looking to diversify into something new.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
           {
             author: p("Mehwish Iqbal", "mehwish.iqbal.salons"),
             text: "Own a chain of three salons in Clifton. Honestly I've never invested anything, it's all in savings accounts. Want to learn.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [
               {
                 author: p("Zainab Akhtar", "zainab.akhtar.khi"),
                 text: "Same boat Mehwish!",
+                postedAt: null,
+                postedAtLabel: "",
               },
               {
                 author: p("Rizwan Malik", "rizwan.malik.trader"),
                 text: "DM me for my investment course, 50% off this week only",
+                postedAt: null,
+                postedAtLabel: "",
               },
             ],
           },
           {
             author: p("Tariq Jameel", "tariq.jameel.realty"),
             text: "Real estate is still king. I have rental income from 4 apartments and I've been investing in property for 15 years.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
           {
             author: p("Hira Baig", "hira.baig.92"),
             text: "Interesting thread. Following.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
         ],
@@ -221,30 +258,41 @@ export function createSeedState(): AppState {
         author: p("Faisal Nadeem", "faisal.nadeem.dxb"),
         text: "Off-plan vs ready property in Dubai Marina — what's giving better returns in 2026?",
         collectedAt: "2026-11-08T10:45:00.000Z",
+        lastSyncedAt: null,
         comments: [
           {
             author: p("Ahmed Khalid", "ahmed.khalid.uae"),
             text: "First time buyer here. Sold my family business last year and want to put money into a villa. No idea how off-plan works.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [
               {
                 author: p("Faisal Nadeem", "faisal.nadeem.dxb"),
                 text: "Ahmed, happy to share what worked for me.",
+                postedAt: null,
+                postedAtLabel: "",
               },
             ],
           },
           {
             author: p("Rabia Anwar", "rabia.anwar.invest"),
             text: "I've held three off-plan units since 2019 and already flipped two. Looking for my next project around 3M AED.",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
           {
             author: p("Bilal Promotions", "bilal.promotions.official"),
             text: "Free WhatsApp group for property tips, join now!!!",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
           {
             author: p("Saad Hussain", "saad.hussain.dxb"),
             text: "Is it worth it for someone on a regular salary just starting out?",
+            postedAt: null,
+            postedAtLabel: "",
             replies: [],
           },
         ],
