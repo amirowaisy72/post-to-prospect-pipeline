@@ -1,0 +1,13 @@
+[
+ {"capability":"code","source":"TanStack Start app (LeadHunter): 7 pages, components, styles","outcome":"migrate","status":"in_progress","next_action":"copy source into project"},
+ {"capability":"schema","source":"none - no database; state persisted to browser storage (localStorage key leadhunter:v1)","outcome":"not_applicable","status":"verified","next_action":"none; optional move to Lovable Cloud on request"},
+ {"capability":"records","source":"built-in demo seed data (src/lib/seed.ts)","outcome":"migrate","status":"in_progress","next_action":"copied with code"},
+ {"capability":"auth identities","source":"none detected","outcome":"not_applicable","status":"verified","next_action":"none"},
+ {"capability":"authorization","source":"none detected","outcome":"not_applicable","status":"verified","next_action":"none"},
+ {"capability":"uploaded file bytes","source":"none detected","outcome":"not_applicable","status":"verified","next_action":"none"},
+ {"capability":"external providers","source":"AI provider settings (Ollama/Gemini) are UI only; analysis is simulated locally","outcome":"migrate","status":"in_progress","next_action":"preserve as-is"},
+ {"capability":"public endpoints/callbacks/webhooks/schedules","source":"none detected","outcome":"not_applicable","status":"verified","next_action":"none"},
+ {"capability":"secrets","source":"none required","outcome":"not_applicable","status":"verified","next_action":"none"},
+ {"capability":"cutover","source":"not published","outcome":"none","status":"verified","next_action":"publish when ready"},
+ {"capability":"verification","source":"build, routes, core flows","outcome":"verify","status":"pending","next_action":"run build check and browser test"}
+]

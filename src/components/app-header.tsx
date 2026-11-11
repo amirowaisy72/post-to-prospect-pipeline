@@ -1,0 +1,47 @@
+import { Link } from "@tanstack/react-router";
+import { Star } from "lucide-react";
+
+import { AccountStatusBadge } from "@/components/badges";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SidebarTrigger } from "@/components/ui/sidebar";
+import { useStore } from "@/lib/store";
+
+export function AppHeader() {
+  const { state, activeAccount, setActiveAccount } = useStore();
+
+  return (
+    <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b bg-card/90 px-3 backdrop-blur sm:px-5">
+      <SidebarTrigger />
+      <div className="h-5 w-px bg-border" />
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <span className="hidden text-xs font-semibold uppercase tracking-wider text-muted-foreground sm:inline">
+          Working as
+        </span>
+        <Select value={state.activeAccountId} onValueChange={setActiveAccount}>
+          <SelectTrigger className="h-9 w-[220px] max-w-full bg-card font-semibold" aria-label="Active account">
+            <SelectValue placeholder="Pick account" />
+          </SelectTrigger>
+          <SelectContent>
+            {state.accounts.map((a) => (
+              <SelectItem key={a.id} value={a.id}>
+                <span className="flex items-center gap-2">
+                  {a.name}
+                  {a.id === state.defaultAccountId && <Star className="size-3 fill-current text-primary" />}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {activeAccount && (
+          <span className="hidden items-center gap-2 md:flex">
+            <AccountStatusBadge status={activeAccount.status} />
+            <span className="text-xs text-muted-foreground">as {activeAccount.facebookName}</span>
+          </span>
+        )}
+      </div>
+      <Link to="/accounts" className="text-xs font-semibold text-primary hover:underline">
+        Manage accounts
+      </Link>
+    </header>
+  );
+}
