@@ -28,3 +28,7 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+
+## Project rules
+
+- All LeadHunter business rules live as pure functions in `src/lib/leadhunter-service.ts`; `src/lib/store.tsx` is the only data layer the UI uses and persists to browser storage. Why: swapping storage for a backend later touches one file.
