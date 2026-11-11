@@ -279,7 +279,7 @@ function ConfigurationsPage() {
               <SecretInput id="cfg-db-url" value={form.database.connectionString} onChange={(v) => patch("database", { connectionString: v })} placeholder="postgresql://user:password@host:5432/db" />
             </div>
           )}
-          <p className="rounded-md bg-warning/10 px-3 py-2 text-xs text-foreground">
+          <p className="rounded-md bg-warning-soft px-3 py-2 text-xs text-foreground">
             Keys here are kept in this browser only. Use the public (anon / publishable) key — never a service role key or admin password.
           </p>
         </Section>

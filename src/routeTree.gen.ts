@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccountsRouteImport } from './routes/accounts'
 import { Route as AnalysisRouteImport } from './routes/analysis'
+import { Route as ConfigurationsRouteImport } from './routes/configurations'
 import { Route as DataSourcingRouteImport } from './routes/data-sourcing'
 import { Route as LeadsRouteImport } from './routes/leads'
 import { Route as SettingsRouteImport } from './routes/settings'
@@ -30,6 +31,11 @@ const AccountsRoute = AccountsRouteImport.update({
 const AnalysisRoute = AnalysisRouteImport.update({
   id: '/analysis',
   path: '/analysis',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ConfigurationsRoute = ConfigurationsRouteImport.update({
+  id: '/configurations',
+  path: '/configurations',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DataSourcingRoute = DataSourcingRouteImport.update({
@@ -57,6 +63,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/analysis': typeof AnalysisRoute
+  '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
@@ -66,6 +73,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/analysis': typeof AnalysisRoute
+  '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
@@ -76,6 +84,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/analysis': typeof AnalysisRoute
+  '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
@@ -87,6 +96,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accounts'
     | '/analysis'
+    | '/configurations'
     | '/data-sourcing'
     | '/leads'
     | '/settings'
@@ -96,6 +106,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accounts'
     | '/analysis'
+    | '/configurations'
     | '/data-sourcing'
     | '/leads'
     | '/settings'
@@ -105,6 +116,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accounts'
     | '/analysis'
+    | '/configurations'
     | '/data-sourcing'
     | '/leads'
     | '/settings'
@@ -115,6 +127,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AccountsRoute: typeof AccountsRoute
   AnalysisRoute: typeof AnalysisRoute
+  ConfigurationsRoute: typeof ConfigurationsRoute
   DataSourcingRoute: typeof DataSourcingRoute
   LeadsRoute: typeof LeadsRoute
   SettingsRoute: typeof SettingsRoute
@@ -142,6 +155,13 @@ declare module '@tanstack/react-router' {
       path: '/analysis'
       fullPath: '/analysis'
       preLoaderRoute: typeof AnalysisRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/configurations': {
+      id: '/configurations'
+      path: '/configurations'
+      fullPath: '/configurations'
+      preLoaderRoute: typeof ConfigurationsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/data-sourcing': {
@@ -179,6 +199,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccountsRoute: AccountsRoute,
   AnalysisRoute: AnalysisRoute,
+  ConfigurationsRoute: ConfigurationsRoute,
   DataSourcingRoute: DataSourcingRoute,
   LeadsRoute: LeadsRoute,
   SettingsRoute: SettingsRoute,
