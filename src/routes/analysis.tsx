@@ -131,7 +131,7 @@ function AnalysisPage() {
         <Card className="h-fit shadow-card">
           <CardHeader>
             <CardTitle className="text-base">2. AI model</CardTitle>
-            <CardDescription>Defaults come from Settings.</CardDescription>
+            <CardDescription>Defaults come from Configurations.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
