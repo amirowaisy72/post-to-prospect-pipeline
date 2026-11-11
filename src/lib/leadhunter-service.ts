@@ -188,14 +188,6 @@ export interface PostDraft {
   sourceId: string | null;
 }
 
-export interface PostParseResult {
-  ok: boolean;
-  errors: string[];
-  draft: PostDraft | null;
-  /** Set when the same post URL was already collected (by any account). */
-  alreadyCollected: { accountName: string } | null;
-}
-
 /** Unvalidated JSON shape: every field optional and unknown until checked. */
 interface Loose {
   name?: unknown;
@@ -206,6 +198,16 @@ interface Loose {
   comments?: unknown;
   replies?: unknown;
   sourceId?: unknown;
+  posts?: unknown;
+}
+
+export interface PostImportResult {
+  /** Drafts that parsed cleanly and are ready to save. */
+  drafts: PostDraft[];
+  /** One entry per post that failed to parse: which post, and why. */
+  errors: { label: string; reason: string }[];
+  /** Posts whose URL was already collected (by any account). */
+  alreadyCollected: { postUrl: string; accountName: string }[];
 }
 
 function readPerson(value: unknown, path: string, errors: string[]): Person | null {
@@ -215,34 +217,26 @@ function readPerson(value: unknown, path: string, errors: string[]): Person | nu
   }
   const v = value as Loose;
   if (typeof v.name !== "string" || !v.name.trim()) errors.push(`${path}.name is required.`);
-  if (typeof v.url !== "string" || !v.url.trim()) errors.push(`${path}.url is required.`);
-  if (typeof v.name !== "string" || typeof v.url !== "string") return null;
-  return { name: v.name.trim(), url: v.url.trim() };
+  // Anonymous participants have no profile link: a null / missing url is
+  // accepted as "" (they can never become leads — see analysePosts).
+  if (v.url !== null && v.url !== undefined && typeof v.url !== "string") {
+    errors.push(`${path}.url must be a string or null.`);
+  }
+  if (typeof v.name !== "string") return null;
+  return { name: v.name.trim(), url: typeof v.url === "string" ? v.url.trim() : "" };
 }
 
-/** Validate pasted / uploaded PostData JSON. Nothing is saved here. */
-export function parsePostDataJson(raw: string, state: AppState): PostParseResult {
+/** Validate one PostData object. `label` identifies the post in errors. */
+function parseOnePost(
+  value: unknown,
+  label: string,
+  state: AppState,
+): { draft: PostDraft | null; errors: string[]; alreadyCollected: { postUrl: string; accountName: string } | null } {
   const errors: string[] = [];
-  let json: unknown;
-  try {
-    json = JSON.parse(raw);
-  } catch (e) {
-    return {
-      ok: false,
-      errors: [`Invalid JSON: ${(e as Error).message}`],
-      draft: null,
-      alreadyCollected: null,
-    };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { draft: null, errors: [`${label}: expected a PostData object.`], alreadyCollected: null };
   }
-  if (!json || typeof json !== "object" || Array.isArray(json)) {
-    return {
-      ok: false,
-      errors: ["Expected one PostData object ({ ... }), not an array or value."],
-      draft: null,
-      alreadyCollected: null,
-    };
-  }
-  const o = json as Loose;
+  const o = value as Loose;
   if (typeof o.postUrl !== "string" || !o.postUrl.trim()) errors.push("postUrl is required.");
   if (typeof o.text !== "string") errors.push("text is required.");
   const author = readPerson(o.author, "author", errors);
@@ -281,14 +275,61 @@ export function parsePostDataJson(raw: string, state: AppState): PostParseResult
 
   const postUrl = typeof o.postUrl === "string" ? o.postUrl.trim() : "";
   const existing = postUrl ? findCollectedPost(state, postUrl) : undefined;
-  const alreadyCollected = existing ? { accountName: accountName(state, existing.accountId) } : null;
+  const alreadyCollected = existing
+    ? { postUrl: existing.postUrl, accountName: accountName(state, existing.accountId) }
+    : null;
 
   const draft =
     errors.length === 0 && author
       ? { postUrl, author, text: String(o.text), comments, sourceId }
       : null;
 
-  return { ok: errors.length === 0 && !alreadyCollected, errors, draft, alreadyCollected };
+  return { draft, errors, alreadyCollected };
+}
+
+/**
+ * Validate pasted / uploaded PostData JSON. Nothing is saved here.
+ * Accepts all three shapes the collector produces:
+ * (a) a single PostData object, (b) {"posts": [...]}, (c) a bare array.
+ */
+export function parsePostDataJson(raw: string, state: AppState): PostImportResult {
+  const result: PostImportResult = { drafts: [], errors: [], alreadyCollected: [] };
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch (e) {
+    result.errors.push({ label: "File", reason: `Invalid JSON: ${(e as Error).message}` });
+    return result;
+  }
+  let items: unknown[];
+  let labelFor: (i: number, item: unknown) => string;
+  if (Array.isArray(json)) {
+    items = json;
+    labelFor = (i, item) => postLabel(item, i);
+  } else if (json && typeof json === "object" && Array.isArray((json as Loose).posts)) {
+    items = (json as Loose).posts as unknown[];
+    labelFor = (i, item) => postLabel(item, i);
+  } else if (json && typeof json === "object") {
+    items = [json];
+    labelFor = (_i, item) => postLabel(item, 0);
+  } else {
+    result.errors.push({ label: "File", reason: "Expected a PostData object, a {\"posts\": [...]} wrapper, or an array of posts." });
+    return result;
+  }
+  items.forEach((item, i) => {
+    const label = labelFor(i, item);
+    const parsed = parseOnePost(item, label, state);
+    if (parsed.draft && !parsed.alreadyCollected) result.drafts.push(parsed.draft);
+    if (parsed.alreadyCollected) result.alreadyCollected.push(parsed.alreadyCollected);
+    for (const e of parsed.errors) result.errors.push({ label, reason: e });
+  });
+  return result;
+}
+
+/** Human label for one post in the import preview: its URL, else "Post N". */
+function postLabel(item: unknown, index: number): string {
+  const url = (item as Loose)?.postUrl;
+  return typeof url === "string" && url.trim() ? url.trim() : `Post ${index + 1}`;
 }
 
 export function addPost(
@@ -327,6 +368,47 @@ export function addPost(
       activity("post-collected", accountId, `Collected a post from ${source.name}`, `act-${id}`, now),
     ),
   };
+}
+
+export interface AddPostsResult {
+  added: number;
+  skipped: number;
+  alreadyCollected: { postUrl: string; accountName: string }[];
+}
+
+/**
+ * Import several parsed drafts for one source in a single call.
+ * Posts already collected (by any account, or twice in this batch) are
+ * skipped and reported instead of saved.
+ */
+export function addPosts(
+  state: AppState,
+  drafts: PostDraft[],
+  sourceId: string,
+  accountId: string,
+  makeId: () => string,
+  now: string,
+): { state: AppState } & AddPostsResult {
+  let next = state;
+  let added = 0;
+  let skipped = 0;
+  const alreadyCollected: AddPostsResult["alreadyCollected"] = [];
+  for (const draft of drafts) {
+    const existing = findCollectedPost(next, draft.postUrl);
+    if (existing) {
+      skipped++;
+      alreadyCollected.push({ postUrl: existing.postUrl, accountName: accountName(next, existing.accountId) });
+      continue;
+    }
+    const r = addPost(next, draft, sourceId, accountId, makeId(), now);
+    if (!r.ok) {
+      skipped++;
+      continue;
+    }
+    next = r.value;
+    added++;
+  }
+  return { state: next, added, skipped, alreadyCollected };
 }
 
 /* ---------------- Analysis (simulated AI) ---------------- */
@@ -460,6 +542,8 @@ export function analysePosts(
       ...c.replies.map((r) => ({ author: r.author, text: r.text })),
     ]);
     for (const v of voices) {
+      // Anonymous commenters have no profile link and can never become leads.
+      if (!v.author.url.trim()) continue;
       // Post authors are discussion starters, not leads.
       if (sameUrl(v.author.url, post.author.url)) continue;
       const key = normalizeUrl(v.author.url);

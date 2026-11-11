@@ -26,6 +26,8 @@ interface StoreValue {
   addSource: (input: { name: string; type: SourceType; quantity: number }) => boolean;
   joinSource: (sourceId: string) => void;
   addPost: (draft: svc.PostDraft, sourceId: string) => boolean;
+  /** Import several parsed posts at once; one summary toast for the batch. */
+  addPosts: (drafts: svc.PostDraft[], sourceId: string) => void;
   runAnalysis: (postIds: string[]) => svc.AnalysisResult;
   saveLeads: (leads: Lead[], postCount: number) => void;
   setLeadStatus: (leadId: string, status: LeadStatus) => void;
@@ -109,6 +111,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       },
       addPost: (draft, sourceId) =>
         apply(svc.addPost(stateRef.current, draft, sourceId, activeId, newId("post"), nowIso()), "Post data saved"),
+      addPosts: (drafts, sourceId) => {
+        const r = svc.addPosts(stateRef.current, drafts, sourceId, activeId, () => newId("post"), nowIso());
+        setState(r.state);
+        const parts = [`Imported ${r.added} post${r.added === 1 ? "" : "s"}`];
+        if (r.skipped) parts.push(`${r.skipped} already collected`);
+        toast.success(parts.join(", "));
+      },
       runAnalysis: (postIds) => svc.analysePosts(stateRef.current, postIds, activeId, () => newId("lead")),
       saveLeads: (leads, postCount) =>
         setState((s) => svc.addLeads(s, leads, activeId, postCount, nowIso()).state),
