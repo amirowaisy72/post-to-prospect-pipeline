@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { BrainCircuit, CheckCircle2, CopyX, ExternalLink, Loader2, ShieldX, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { AgentDot } from "@/components/agent-status";
 import { AiChat } from "@/components/ai-chat";
 import { PriorityBadge } from "@/components/badges";
 import { EmptyState, PageHeader } from "@/components/page-header";
@@ -13,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { accountName, countReplies, type AnalysisResult } from "@/lib/leadhunter-service";
+import { accountName, agentFor, agentStatus, countReplies, type AnalysisResult } from "@/lib/leadhunter-service";
 import { useActiveAccountData, useStore } from "@/lib/store";
 import type { AiProvider } from "@/lib/types";
 
@@ -35,7 +36,7 @@ const STEPS = ["Loading post data", "Reading comments and replies", "Applying le
 const STEP_MS = 650;
 
 function AnalysisPage() {
-  const { state, runAnalysis, saveLeads } = useStore();
+  const { state, runAnalysis, saveLeads, startAgentTask, finishAgentTask } = useStore();
   const { posts, accountId } = useActiveAccountData();
   const [selected, setSelected] = useState<string[]>([]);
   const [provider, setProvider] = useState<AiProvider>(state.settings.provider);
@@ -53,13 +54,20 @@ function AnalysisPage() {
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   const running = step >= 0;
+  const agent = agentStatus(state, accountId);
+  const agentTask = agentFor(state, accountId).task;
+  const agentBlocked = !running && agent !== "free";
   const sourceName = (id: string) => state.sources.find((s) => s.id === id)?.name ?? "";
   const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
   const analyse = () => {
+    const ids = [...selected];
+    const total = STEPS.length * STEP_MS;
+    // The account's agent does the analysis, so it is busy until the run ends.
+    const label = `Analysing ${ids.length} post${ids.length === 1 ? "" : "s"}`;
+    if (!startAgentTask(accountId, { kind: "analysing", label, expectedMs: total + 1000 })) return;
     setResult(null);
     setStep(0);
-    const ids = [...selected];
     STEPS.forEach((_, i) => {
       timers.current.push(window.setTimeout(() => setStep(i), i * STEP_MS));
     });
@@ -69,7 +77,8 @@ function AnalysisPage() {
         saveLeads(r.found, ids.length);
         setResult(r);
         setStep(-1);
-      }, STEPS.length * STEP_MS),
+        finishAgentTask(accountId);
+      }, total),
     );
   };
 
@@ -149,10 +158,20 @@ function AnalysisPage() {
               <Label htmlFor="model">Model name</Label>
               <Input id="model" value={model} onChange={(e) => setModel(e.target.value)} className="font-mono text-sm" disabled={running} />
             </div>
-            <Button className="w-full" size="lg" onClick={analyse} disabled={running || selected.length === 0 || !model.trim()}>
+            <Button className="w-full" size="lg" onClick={analyse} disabled={running || agentBlocked || selected.length === 0 || !model.trim()}>
               {running ? <Loader2 className="animate-spin" /> : <BrainCircuit />}
               {running ? "Analysing…" : `Analyse ${selected.length || ""} post${selected.length === 1 ? "" : "s"}`}
             </Button>
+            {agentBlocked && (
+              <div className="flex gap-2 rounded-lg border border-primary/25 bg-accent/60 p-3 text-xs text-accent-foreground">
+                <AgentDot status={agent} className="mt-1" />
+                <p>
+                  {agent === "busy"
+                    ? <>This account's agent is busy: <span className="font-semibold">{agentTask?.label}</span>. Wait for it to finish, or stop it from the agent button in the top bar.</>
+                    : "This account is paused or blocked, so its agent is offline. Set it to Active on the Accounts page."}
+                </p>
+              </div>
+            )}
             <p className="text-xs text-muted-foreground">Simulated for now — real AI calls arrive with the backend.</p>
           </CardContent>
         </Card>

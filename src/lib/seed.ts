@@ -31,7 +31,22 @@ export function createDefaultSettings(): Settings {
 }
 
 export function createSeedState(): AppState {
+  const now = Date.now();
   return {
+    // Demo: Ayesha's agent is mid-way through a scrape, so the busy state is visible on first open.
+    agents: [
+      {
+        accountId: "acc-1",
+        task: {
+          kind: "scraping",
+          label: "Scraping posts from PSX Investors Pakistan",
+          startedAt: new Date(now - 15_000).toISOString(),
+          expectedMs: 75_000,
+        },
+        lastTaskLabel: "Joined Karachi Business Owners Network",
+        lastFinishedAt: "2026-11-09T18:05:00.000Z",
+      },
+    ],
     activeAccountId: "acc-1",
     defaultAccountId: "acc-1",
     accounts: [

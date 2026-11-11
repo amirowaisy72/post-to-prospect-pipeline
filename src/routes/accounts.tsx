@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Plus, Star } from "lucide-react";
 import { useState } from "react";
 
+import { AgentStatusTag } from "@/components/agent-status";
 import { AccountStatusBadge } from "@/components/badges";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -82,6 +83,7 @@ function AccountsPage() {
                 <TableRow>
                   <TableHead className="pl-6">Account</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Agent</TableHead>
                   <TableHead className="text-right">Sources</TableHead>
                   <TableHead className="text-right">Posts</TableHead>
                   <TableHead className="text-right">Leads</TableHead>
@@ -122,6 +124,9 @@ function AccountsPage() {
                             </SelectContent>
                           </Select>
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        <AgentStatusTag accountId={a.id} />
                       </TableCell>
                       <TableCell className="text-right tabular">{s.sources}</TableCell>
                       <TableCell className="text-right tabular">{s.posts}</TableCell>

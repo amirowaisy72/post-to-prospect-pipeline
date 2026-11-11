@@ -137,6 +137,31 @@ export interface AppState {
   leads: Lead[];
   activity: Activity[];
   settings: Settings;
+  /** One entry per account that has run (or is running) a task; missing accounts are free. */
+  agents: AgentState[];
   activeAccountId: string;
   defaultAccountId: string;
 }
+
+/* ---------------- Account agents ---------------- */
+
+/** Each account has exactly one agent that does its work (scraping, joining, analysis). */
+export type AgentTaskKind = "scraping" | "joining" | "analysing";
+
+export interface AgentTask {
+  kind: AgentTaskKind;
+  label: string;
+  startedAt: string;
+  /** Simulated duration so demo tasks finish on their own; the real agent API will report progress instead. */
+  expectedMs: number | null;
+}
+
+export interface AgentState {
+  accountId: string;
+  task: AgentTask | null;
+  lastTaskLabel: string | null;
+  lastFinishedAt: string | null;
+}
+
+/** busy = working on a task, free = ready, offline = the account is paused or blocked. */
+export type AgentStatus = "busy" | "free" | "offline";

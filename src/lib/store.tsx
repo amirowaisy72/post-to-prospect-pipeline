@@ -8,7 +8,7 @@ import { toast } from "sonner";
 
 import * as svc from "./leadhunter-service";
 import { createDefaultSettings, createSeedState } from "./seed";
-import type { AccountStatus, AppState, Lead, LeadStatus, Settings, SourceType } from "./types";
+import type { AccountStatus, AgentTask, AppState, Lead, LeadStatus, Settings, SourceType } from "./types";
 
 const STORAGE_KEY = "leadhunter:v1";
 
@@ -31,6 +31,10 @@ interface StoreValue {
   setLeadStatus: (leadId: string, status: LeadStatus) => void;
   updateSettings: (settings: Settings) => boolean;
   resetDemoData: () => void;
+  /** Give an account's agent a task; false (with a toast) when it is busy or offline. */
+  startAgentTask: (accountId: string, task: Omit<AgentTask, "startedAt">) => boolean;
+  /** Finish or stop the agent's current task. */
+  finishAgentTask: (accountId: string, opts?: { stopped?: boolean }) => void;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -59,6 +63,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (hydrated) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [state, hydrated]);
+
+  // Simulated agents: finish demo tasks once their expected time has passed.
+  // The real agent API will push status updates instead.
+  useEffect(() => {
+    if (!hydrated) return;
+    const t = window.setInterval(() => {
+      const due = svc.dueAgentTasks(stateRef.current, Date.now());
+      if (due.length === 0) return;
+      setState((s) => svc.finishDueAgentTasks(s, Date.now()));
+      for (const a of due) {
+        if (a.task?.kind === "analysing") continue; // the analysis page reports its own result
+        toast.success(`${svc.accountName(stateRef.current, a.accountId)}'s agent is free`, { description: `Done: ${a.task?.label}` });
+      }
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [hydrated]);
 
   const apply = useCallback((r: svc.Result<AppState>, success?: string) => {
     if (!r.ok) {
@@ -102,6 +122,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setState((s) => ({ ...s, settings: r.value }));
         toast.success("Configurations saved on this device");
         return true;
+      },
+      startAgentTask: (accountId, task) => apply(svc.startAgentTask(stateRef.current, accountId, task, nowIso())),
+      finishAgentTask: (accountId, opts) => {
+        const label = svc.agentFor(stateRef.current, accountId).task?.label;
+        setState((s) => svc.finishAgentTask(s, accountId, nowIso()));
+        if (opts?.stopped && label) toast(`Stopped: ${label}`);
       },
       resetDemoData: () => {
         setState(createSeedState());
