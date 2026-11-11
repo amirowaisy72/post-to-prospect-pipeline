@@ -77,11 +77,40 @@ export interface LeadCriteria {
   reject: string;
 }
 
+export interface LeadRules {
+  /** How many leads to aim for in one analysis run. */
+  defaultLeadsCount: number;
+  /** People this age or older are a full match. */
+  preferredMinAge: number;
+  /** From this age up to preferredMinAge - 1 is a gentle match; younger is rejected. */
+  gentleMinAge: number;
+}
+
+export interface SourcingRules {
+  /** Minimum comments a group/page should show before joining it. */
+  minComments: number;
+  /** Minimum members a group/page should have before joining it. */
+  minMembers: number;
+}
+
+export type DatabaseKind = "supabase" | "connection-string";
+
+export interface DatabaseConfig {
+  kind: DatabaseKind;
+  supabaseUrl: string;
+  supabaseKey: string;
+  connectionString: string;
+}
+
 export interface Settings {
   provider: AiProvider;
   model: string;
+  ollamaUrl: string;
   geminiApiKey: string;
   criteria: LeadCriteria;
+  leadRules: LeadRules;
+  sourcing: SourcingRules;
+  database: DatabaseConfig;
 }
 
 export type ActivityType =
