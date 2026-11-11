@@ -634,7 +634,7 @@ export function validateSettings(input: Settings): Result<Settings> {
   if (!isWhole(gentleMinAge, 1) || !isWhole(preferredMinAge, 1))
     return { ok: false, error: "Ages must be whole numbers, 1 or more." };
   if (gentleMinAge > preferredMinAge)
-    return { ok: false, error: "The gentle age must be lower than or equal to the preferred age." };
+    return { ok: false, error: "The gentle age must be lower than or equal to the full-match age." };
   if (!isWhole(s.sourcing.minComments, 0)) return { ok: false, error: "Min comments must be a whole number, 0 or more." };
   if (!isWhole(s.sourcing.minMembers, 0)) return { ok: false, error: "Min members must be a whole number, 0 or more." };
   if (s.database.kind === "supabase" && s.database.supabaseUrl && !s.database.supabaseUrl.startsWith("https://"))
