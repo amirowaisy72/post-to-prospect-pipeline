@@ -15,6 +15,7 @@ import type {
   LeadStatus,
   Person,
   PostData,
+  Settings,
   Source,
   SourceType,
 } from "./types";
@@ -582,3 +583,82 @@ export const SAMPLE_POST_JSON = JSON.stringify(
   null,
   2,
 );
+
+// ---------------------------------------------------------------------------
+// Configurations
+// ---------------------------------------------------------------------------
+
+type Partial2<T> = { [K in keyof T]?: T[K] extends object ? Partial<T[K]> : T[K] };
+
+/** Fill any missing fields (e.g. from data saved by an older version) with defaults. */
+export function mergeSettings(defaults: Settings, saved: Partial2<Settings> | null | undefined): Settings {
+  if (!saved || typeof saved !== "object") return defaults;
+  return {
+    ...defaults,
+    ...saved,
+    criteria: { ...defaults.criteria, ...saved.criteria },
+    leadRules: { ...defaults.leadRules, ...saved.leadRules },
+    sourcing: { ...defaults.sourcing, ...saved.sourcing },
+    database: { ...defaults.database, ...saved.database },
+  } as Settings;
+}
+
+const isWhole = (n: number, min: number) => Number.isInteger(n) && n >= min;
+const isHttpUrl = (v: string) => {
+  try {
+    const u = new URL(v);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+/** Check configurations before saving. Text fields are trimmed. */
+export function validateSettings(input: Settings): Result<Settings> {
+  const s: Settings = {
+    ...input,
+    model: input.model.trim(),
+    ollamaUrl: input.ollamaUrl.trim().replace(/\/+$/, ""),
+    geminiApiKey: input.geminiApiKey.trim(),
+    database: {
+      ...input.database,
+      supabaseUrl: input.database.supabaseUrl.trim().replace(/\/+$/, ""),
+      supabaseKey: input.database.supabaseKey.trim(),
+      connectionString: input.database.connectionString.trim(),
+    },
+  };
+  if (!s.model) return { ok: false, error: "Enter a model name." };
+  if (!isHttpUrl(s.ollamaUrl)) return { ok: false, error: "Ollama server URL must start with http:// or https://." };
+  const { defaultLeadsCount, preferredMinAge, gentleMinAge } = s.leadRules;
+  if (!isWhole(defaultLeadsCount, 1)) return { ok: false, error: "Default leads count must be a whole number, 1 or more." };
+  if (!isWhole(gentleMinAge, 1) || !isWhole(preferredMinAge, 1))
+    return { ok: false, error: "Ages must be whole numbers, 1 or more." };
+  if (gentleMinAge > preferredMinAge)
+    return { ok: false, error: "The gentle age must be lower than or equal to the preferred age." };
+  if (!isWhole(s.sourcing.minComments, 0)) return { ok: false, error: "Min comments must be a whole number, 0 or more." };
+  if (!isWhole(s.sourcing.minMembers, 0)) return { ok: false, error: "Min members must be a whole number, 0 or more." };
+  if (s.database.kind === "supabase" && s.database.supabaseUrl && !s.database.supabaseUrl.startsWith("https://"))
+    return { ok: false, error: "Supabase URL must start with https://." };
+  if (
+    s.database.kind === "connection-string" &&
+    s.database.connectionString &&
+    !/^postgres(ql)?:\/\//i.test(s.database.connectionString)
+  )
+    return { ok: false, error: "Connection string must start with postgres:// or postgresql://." };
+  return { ok: true, value: s };
+}
+
+/** How the age rule treats a person: full match, gentle match, or reject. */
+export function ageVerdict(age: number, rules: Settings["leadRules"]): "match" | "gentle" | "reject" {
+  if (age >= rules.preferredMinAge) return "match";
+  if (age >= rules.gentleMinAge) return "gentle";
+  return "reject";
+}
+
+/** Whether a group/page meets the sourcing rules for joining. */
+export function meetsSourcingRules(
+  stats: { comments: number; members: number },
+  rules: Settings["sourcing"],
+): boolean {
+  return stats.comments >= rules.minComments && stats.members >= rules.minMembers;
+}
