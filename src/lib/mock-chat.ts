@@ -50,8 +50,8 @@ export function demoConversation(model: string): ChatMessage[] {
       text: [
         "Here are your strongest leads this week:",
         "",
-        "1. **Imran Siddiqui** — *Rich Beginner*. Sold a plot for 2 crore and has never invested. Perfect first conversation.",
-        "2. **Sana Malik** — *Rich Experienced*. Runs a chain of salons and already holds mutual funds.",
+        "1. **Sana Mirza** — *Rich Beginner*. Shows real wealth and has never invested. Perfect first conversation.",
+        "2. **Hamza Qureshi** — *Rich Experienced*. Already investing and has spare cash to grow.",
         "",
         "> Tip: reach out to Rich Beginners first — they ask for guidance and reply faster.",
       ].join("\n"),
@@ -59,7 +59,7 @@ export function demoConversation(model: string): ChatMessage[] {
     {
       id: "demo-3",
       role: "user",
-      text: "Imran ke liye ek short message likh do.",
+      text: "Sana ke liye ek short message likh do.",
       at: "2026-11-11T09:01:00.000Z",
     },
     {
@@ -71,8 +71,8 @@ export function demoConversation(model: string): ChatMessage[] {
         "Sure — friendly and short, no hard selling:",
         "",
         "```text",
-        "Assalam o Alaikum Imran bhai! I saw your comment in PSX Investors Pakistan",
-        "about starting out after selling your plot. Happy to share how beginners",
+        "Assalam o Alaikum Sana! I saw your comment in PSX Investors Pakistan",
+        "about getting started with investing. Happy to share how beginners",
         "usually split their first investment — no pressure at all. 🙂",
         "```",
       ].join("\n"),
