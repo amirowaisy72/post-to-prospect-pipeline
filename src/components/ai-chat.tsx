@@ -190,12 +190,12 @@ export function AiChat() {
               ) : (
                 <div key={m.id} className="flex gap-3">
                   <HunterAvatar />
-                  <Message from="assistant" className="max-w-full">
+                  <Message from="assistant" className="min-w-0 max-w-full">
                     <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                       <span className="font-semibold text-foreground">Hunter AI</span>
                       {m.model && <span className="font-mono">{m.model}</span>}
                     </div>
-                    <MessageContent className="w-full leading-relaxed">
+                    <MessageContent className="w-full leading-relaxed [&_pre]:whitespace-pre-wrap [&_pre]:break-words">
                       <MessageResponse>{m.text}</MessageResponse>
                     </MessageContent>
                     {!(busy && m.id === last?.id) && m.text && (
@@ -230,7 +230,7 @@ export function AiChat() {
         <PromptInput onSubmit={onSubmit} className="mx-auto max-w-3xl">
           <PromptInputTextarea
             ref={textareaRef}
-            placeholder="Message Hunter AI… (Enter to send, Shift+Enter for new line)"
+            placeholder="Message Hunter AI…"
           />
           <PromptInputFooter>
             <PromptInputTools>
