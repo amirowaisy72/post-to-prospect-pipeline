@@ -22,3 +22,14 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+
+## LeadHunter — start everything with one double-click
+
+Double-click **`start.bat`** in the repo root. It starts the scraping
+agent (http://127.0.0.1:8001) in a "LeadHunter Agent" window, the app
+(http://localhost:8080) in a "LeadHunter App" window, then opens the
+app in your browser. It sets the Chrome profile itself (the
+already-signed-in Client Hunting profile, so no Facebook sign-in is
+needed) and finds `bun` / `python` on its own when they are not on
+PATH. **Close Client Hunting first** — one Chrome profile can only be
+used by one browser at a time. See `agent/README.md` for details.

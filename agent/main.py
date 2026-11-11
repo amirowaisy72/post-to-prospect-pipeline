@@ -6,8 +6,9 @@ logged-in Chrome/Facebook session via a persistent Playwright profile
 (``agent/.chrome-profile`` by default, or the dir named by the
 ``LEADHUNTER_CHROME_PROFILE`` env var — e.g. the already-signed-in
 Client Hunting profile, so no Facebook sign-in is needed). The user
-signs in to Facebook once in that Chrome window; the agent NEVER asks
-for or stores a password.
+signs in to Facebook once in that Chrome window (unless the profile
+is already signed in — see ``LEADHUNTER_CHROME_PROFILE``); the agent
+NEVER asks for or stores a password.
 
 One running job at a time globally — a second start returns 409.
 The browser is launched lazily on the first job (Playwright is
@@ -112,6 +113,8 @@ def _get_page():
 
     _playwright = sync_playwright().start()
     profile = resolve_chrome_profile()
+    print(f"[leadhunter] Chrome profile: {profile} "
+          f"(exists: {'yes' if profile.exists() else 'no'})", flush=True)
     try:
         context = _playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile),

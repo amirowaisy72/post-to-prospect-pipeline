@@ -37,20 +37,25 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Optional: reuse an already-signed-in Chrome profile instead of
-REM the agent's own fresh one — e.g. the Client Hunting profile, so
-REM no Facebook sign-in is needed. Close Client Hunting first (one
-REM profile can only be used by one browser at a time), then:
-REM   set "LEADHUNTER_CHROME_PROFILE=G:\Web Apps\client-hunting\data\profiles\Master"
+REM Tip: double-click start.bat in the repo root to start the agent
+REM AND the app together — it also sets the Chrome profile for you.
 REM See README.md ("Use an existing signed-in Chrome profile").
 REM When the var is unset, the agent uses agent\.chrome-profile as before.
 
 echo.
 echo [leadhunter] Starting the agent at http://127.0.0.1:8001
-echo [leadhunter] First run: start a Scrap/Sync in LeadHunter and a Chrome
-echo [leadhunter] window will open — sign in to Facebook there ONCE.
-echo [leadhunter] The session stays saved in agent\.chrome-profile, and the
-echo [leadhunter] agent never asks for or stores your Facebook password.
+if defined LEADHUNTER_CHROME_PROFILE (
+  echo [leadhunter] Reusing your signed-in Chrome profile:
+  echo [leadhunter]   %LEADHUNTER_CHROME_PROFILE%
+  echo [leadhunter] No Facebook sign-in needed. Close Client Hunting
+  echo [leadhunter] first if it is running — one profile can only be
+  echo [leadhunter] used by one browser at a time.
+) else (
+  echo [leadhunter] First run: start a Scrap/Sync in LeadHunter and a Chrome
+  echo [leadhunter] window will open — sign in to Facebook there ONCE.
+  echo [leadhunter] The session stays saved in agent\.chrome-profile, and the
+  echo [leadhunter] agent never asks for or stores your Facebook password.
+)
 echo [leadhunter] Keep this window open while LeadHunter is scraping.
 echo.
 %PY% -m uvicorn main:app --host 127.0.0.1 --port 8001

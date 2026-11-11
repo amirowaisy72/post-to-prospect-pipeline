@@ -1045,6 +1045,32 @@ class TestChromeProfile:
         expected = str(Path(main.__file__).resolve().parent / ".chrome-profile")
         assert kwargs["user_data_dir"] == expected
 
+    def test_launch_prints_resolved_profile(self, monkeypatch, tmp_path,
+                                            capsys):
+        pytest.importorskip("fastapi")
+        import main
+
+        # Existing dir -> "exists: yes".
+        existing = tmp_path / "prof"
+        existing.mkdir()
+        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", str(existing))
+        _install_fake_playwright(monkeypatch)
+        main._get_page()
+        out = capsys.readouterr().out
+        assert f"[leadhunter] Chrome profile: {existing}" in out
+        assert "(exists: yes)" in out
+
+        # Missing dir -> "exists: no" (the launch still proceeds; the
+        # browser creates the dir on first real use).
+        _reset_main_browser()
+        missing = tmp_path / "nope"
+        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", str(missing))
+        _install_fake_playwright(monkeypatch)
+        main._get_page()
+        out = capsys.readouterr().out
+        assert f"[leadhunter] Chrome profile: {missing}" in out
+        assert "(exists: no)" in out
+
     def test_profile_in_use_fails_job_with_plain_message(self, monkeypatch):
         pytest.importorskip("fastapi")
         pytest.importorskip("httpx")

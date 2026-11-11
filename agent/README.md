@@ -5,13 +5,32 @@ frontend (`src/`, Data Sourcing page). It runs on **your PC**, in your
 own Chrome, with your own logged-in Facebook session. The agent
 **never asks for, handles, or stores any Facebook password**.
 
+## Quick start — one double-click
+
+Double-click **`start.bat`** in the **repo root**. It does everything,
+no typing:
+
+1. Starts the agent in a "LeadHunter Agent" window
+   (http://127.0.0.1:8001).
+2. Starts the app in a "LeadHunter App" window
+   (http://localhost:8080).
+3. Opens the app in your browser.
+
+It also sets the Chrome profile for you (the already-signed-in
+Client Hunting profile, so no Facebook sign-in is needed) and finds
+`bun` / `python` by itself when they are not on PATH. **Close
+Client Hunting first** — one Chrome profile can only be used by one
+browser at a time. To stop everything, close both windows.
+
 ## Setup
 
 1. Install **Python 3.14** from https://www.python.org/downloads/
    (tick "Add python to PATH" during install).
-2. Double-click **`run-agent.bat`** in this folder. It installs the
-   dependencies, installs Chromium for Playwright (first run only),
-   then serves the agent at **http://127.0.0.1:8001**.
+2. Double-click **`start.bat`** in the repo root (preferred), or
+   **`run-agent.bat`** in this folder for the agent alone. Either
+   installs the dependencies, installs Chromium for Playwright
+   (first run only), then serves the agent at
+   **http://127.0.0.1:8001**.
 3. Keep that window open while LeadHunter is scraping.
 
 Manual equivalent (same folder):
