@@ -866,17 +866,33 @@ class FacebookWorker:
             "links": links,
         }
 
-    def verify_session(self, page: Page, ctx: dict | None) -> str:
+    def search_url(self, keyword: str, kind: str = "groups") -> str:
+        """Facebook search URL for ``keyword`` ("groups" or "pages").
+
+        Single place that builds the search URL, so the session
+        check and the search itself can never disagree about it.
+        """
+        return f"{self.base_url}/search/{kind}?q={quote(keyword)}"
+
+    def verify_session(self, page: Page, ctx: dict | None,
+                       target_url: str | None = None) -> str:
         """Classify the session, returning 'ok' when it is alive.
         Callers must STOP the job on any non-ok state. Never raises.
 
-        The page the browser is already on is checked FIRST: a
-        signed-in group/feed page proves the session without any
-        navigation — navigating to home first can hang (a slow SPA
-        load in this Chromium) and report a live session as dead.
-        Only when the current page cannot prove a live session
-        does it load home, with one extra readiness wait on a slow
-        load before giving up.
+        The Facebook home page is NEVER used as the session gate:
+        home hangs in this Chromium, so a home load cannot tell a
+        live session from a dead one. The check is, in order:
+        (1) the page the browser is already on — a loaded,
+            signed-in group/feed page proves the session with no
+            navigation at all;
+        (2) the job's own target page (the source's group/page URL
+            for scrape/sync, the search URL for collect) — if it
+            loads with a live session the job is already where it
+            needs to be, so the page is left there for the job's
+            own load to reuse;
+        (3) otherwise the actual detected state (logged_out /
+            checkpoint / blocked / empty) — an unloaded page is
+            reported as "empty", never as "not signed in".
         """
         try:
             state = self.check_session(page, ctx)
@@ -884,24 +900,26 @@ class FacebookWorker:
             state = "empty"
         if state == "ok":
             return "ok"
-        # The current page cannot prove the session (fresh tab,
-        # login wall, checkpoint, block, or an unloaded page) —
-        # try home.
-        try:
-            if self._goto(page, self.home_url, ctx, "home"):
-                if not self._wait_ready(page, ctx):
-                    # Slow SPA load: one more bounded readiness
-                    # wait before calling the page empty.
-                    self._wait_ready(page, ctx)
-                state = self.check_session(page, ctx)
-            else:
+        target = (target_url or "").strip()
+        if target:
+            # The current page cannot prove the session (fresh tab,
+            # login wall, checkpoint, block, or an unloaded page) —
+            # prove it at the job's own target instead of home.
+            try:
+                if self._goto(page, target, ctx, "session_target"):
+                    if not self._wait_ready(page, ctx):
+                        # Slow SPA load: one more bounded readiness
+                        # wait before calling the page empty.
+                        self._wait_ready(page, ctx)
+                    state = self.check_session(page, ctx)
+                else:
+                    state = "empty"
+            except Exception as exc:  # noqa: BLE001 - never raise on a check
+                _note(ctx, f"session check failed: {exc}")
                 state = "empty"
-        except Exception as exc:  # noqa: BLE001 - never raise on a check
-            _note(ctx, f"session check failed: {exc}")
-            state = "empty"
         if state != "ok":
             if state == "empty":
-                _note(ctx, "Facebook session state: empty — the home "
+                _note(ctx, "Facebook session state: empty — the target "
                            "page did not load; the browser may still "
                            "be signed in.")
             else:
@@ -1664,7 +1682,7 @@ class FacebookWorker:
         """Search groups -> [{url, name, member_count}]."""
         if _should_stop(ctx):
             return []
-        url = f"{self.base_url}/search/groups?q={quote(keyword)}"
+        url = self.search_url(keyword, "groups")
         try:
             if not self._load(page, url, ctx, "group_search"):
                 return []
@@ -1684,7 +1702,7 @@ class FacebookWorker:
         """Search pages -> [{url, name, member_count}]."""
         if _should_stop(ctx):
             return []
-        url = f"{self.base_url}/search/pages?q={quote(keyword)}"
+        url = self.search_url(keyword, "pages")
         try:
             if not self._load(page, url, ctx, "page_search"):
                 return []

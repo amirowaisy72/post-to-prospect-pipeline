@@ -47,7 +47,7 @@ _SIGN_IN_ERROR = (
 )
 
 # The job failure message names the ACTUAL detected state instead
-# of always saying "not signed in": an empty home page is a load
+# of always saying "not signed in": an unloaded page is a load
 # failure, not proof the session is dead — the browser may still
 # be signed in, so the user just retries the job.
 _SESSION_ERRORS = {
@@ -63,7 +63,7 @@ _SESSION_ERRORS = {
         "check for a warning, then run the job again."
     ),
     "empty": (
-        "Facebook home page did not load (state: empty) — the "
+        "Facebook page did not load (state: empty) — the "
         "browser may still be signed in; try the job again."
     ),
 }
@@ -243,12 +243,20 @@ def _fail(db, job_id, error):
         pass
 
 
-def _check_session_first(worker, page, db, job_id, should_stop):
+def _check_session_first(worker, page, db, job_id, should_stop,
+                         target_url=None):
     """Session check FIRST, via the worker. Returns True when the
     session is ok. On any other state the job is marked failed with
-    a message naming that state, and nothing is scraped."""
+    a message naming that state, and nothing is scraped.
+
+    ``target_url`` is the page the check may load to prove the
+    session — the job's own target (the source URL for scrape/sync,
+    the search URL for collect). The Facebook home page is never
+    used: it hangs in this Chromium and cannot tell a live session
+    from a dead one.
+    """
     try:
-        state = worker.verify_session(page, _ctx(should_stop))
+        state = worker.verify_session(page, _ctx(should_stop), target_url)
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
         return False
@@ -256,6 +264,16 @@ def _check_session_first(worker, page, db, job_id, should_stop):
         _fail(db, job_id, _session_error(state))
         return False
     return True
+
+
+def _source_target_url(db, job):
+    """The source's group/page URL for a scrape/sync job, from the
+    job row or the DB. None when the job names no source."""
+    url = (job.get("source_url") or "").strip()
+    if not url and job.get("source_id"):
+        src = db.get_source_by_id(job["source_id"])
+        url = (src["url"] if src else "") or ""
+    return url or None
 
 
 def run_scrape(worker, page, db, job, should_stop, note=None):
@@ -268,16 +286,14 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
     job_id = job["id"]
     note = _note_fn(note)
     try:
-        if not _check_session_first(worker, page, db, job_id, should_stop):
-            return
         source_id = job.get("source_id")
         account_id = job.get("account_id") or ""
-        source_url = job.get("source_url")
-        if not source_url and source_id:
-            src = db.get_source_by_id(source_id)
-            source_url = src["url"] if src else None
+        source_url = _source_target_url(db, job)
         if not source_url:
             _fail(db, job_id, "scrape job has no source URL")
+            return
+        if not _check_session_first(worker, page, db, job_id, should_stop,
+                                    source_url):
             return
         if source_id:
             db.upsert_source(
@@ -358,8 +374,6 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
     job_id = job["id"]
     note = _note_fn(note)
     try:
-        if not _check_session_first(worker, page, db, job_id, should_stop):
-            return
         keyword = (job.get("keyword") or "").strip()
         if not keyword:
             _fail(db, job_id, "collect job has no keyword")
@@ -368,6 +382,14 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
         type_ = (job.get("type") or "group").strip().lower()
         if type_ not in ("group", "page", "both"):
             type_ = "group"
+        # The session check loads the search page this job will use
+        # first (groups search for group/both, pages search for
+        # pages) — never the Facebook home page.
+        search_kind = "groups" if type_ in ("group", "both") else "pages"
+        if not _check_session_first(
+                worker, page, db, job_id, should_stop,
+                worker.search_url(keyword, search_kind)):
+            return
         try:
             max_new = int(job.get("max_new") or 10)
         except (TypeError, ValueError):
@@ -547,10 +569,16 @@ def run_sync(worker, page, db, job, should_stop, note=None):
     job_id = job["id"]
     note = _note_fn(note)
     try:
-        if not _check_session_first(worker, page, db, job_id, should_stop):
-            return
         source_id = job.get("source_id")
         account_id = job.get("account_id") or ""
+        # Session target: the source's group/page URL, or the single
+        # post URL for a one-post sync.
+        target_url = _source_target_url(db, job)
+        if not target_url and job.get("post_url"):
+            target_url = job["post_url"]
+        if not _check_session_first(worker, page, db, job_id, should_stop,
+                                    target_url):
+            return
         targets = []
         if job.get("post_id"):
             post = db.get_post_by_id(job["post_id"])

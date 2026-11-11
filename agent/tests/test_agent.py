@@ -112,7 +112,8 @@ class _FakePage:
                  article_count=1, logged_out=False, dialog=None,
                  anchors_by_url=None, gate_by_url=None, join_urls=None,
                  leave_flow=None, gate_sequence_by_url=None,
-                 feed_loading_by_url=None, goto_raises_for=None):
+                 feed_loading_by_url=None, goto_raises_for=None,
+                 blank=False):
         self._pages = dict(pages or {})
         self._feed_posts = list(feed_posts or [])
         self._extract_payload = extract_payload
@@ -145,8 +146,11 @@ class _FakePage:
         self._expand_calls = 0
         self._expanded = False
         self.url = ""
-        self._body = "Facebook feed content"
-        self._title = "Facebook"
+        # blank=True: a fresh tab that never rendered (empty body) —
+        # the session check must prove the session at the job's
+        # target page instead of assuming the current page is alive.
+        self._body = "" if blank else "Facebook feed content"
+        self._title = "" if blank else "Facebook"
         self.eval_calls = 0
         self.expand_calls = 0
         self.extract_calls = 0
@@ -554,15 +558,16 @@ class TestVerifySession:
         assert state == "logged_out"
 
     def test_checkpoint_names_checkpoint_in_job_error(self):
-        # The checkpoint must persist on home too: a checkpoint on
-        # the current page alone is re-checked at home (it may have
-        # been for one action only), and only a checkpoint that is
-        # still there fails the job.
+        # The checkpoint must persist on the job's target page too:
+        # a checkpoint on the current page alone is re-checked at
+        # the target (it may have been for one action only), and
+        # only a checkpoint that is still there fails the job.
+        # The home page is never part of this check.
         checkpoint_body = {"body_text": "Verify your identity to continue",
                            "title": "Checkpoint"}
         page = _FakePage(pages={
             CHECKPOINT_URL: checkpoint_body,
-            "https://www.facebook.com": checkpoint_body})
+            GROUP_URL: checkpoint_body})
         page.goto(CHECKPOINT_URL)
         assert FacebookWorker().verify_session(
             page, jobs._ctx(lambda: False)) == "checkpoint"
@@ -572,6 +577,76 @@ class TestVerifySession:
         assert row["status"] == "failed"
         assert "checkpoint" in (row["error"] or "")
         assert "sign in to Facebook" not in (row["error"] or "")
+        assert "https://www.facebook.com" not in page.goto_calls
+        assert page.goto_calls.count(GROUP_URL) >= 1
+
+    def test_signed_in_page_ignores_target_url(self):
+        # (a) A signed-in current page proves the session even when
+        # a target is supplied — no navigation happens at all.
+        page = self._signed_in_group_page()
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False), GROUP_URL)
+        assert state == "ok"
+        assert page.goto_calls == [GROUP_URL]
+
+    def test_blank_page_proves_session_at_target(self):
+        # (b) A blank current page proves nothing, so the check
+        # loads the job's target page: exactly one navigation, to
+        # the target — home is never requested.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            blank=True)
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False), GROUP_URL)
+        assert state == "ok"
+        assert page.goto_calls == [GROUP_URL]
+        assert "https://www.facebook.com" not in page.goto_calls
+
+    def test_target_proves_session_even_when_home_would_hang(self):
+        # (c) Home hanging (or not existing) must not matter: the
+        # target page alone proves the session.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            blank=True,
+            goto_raises_for={"https://www.facebook.com"})
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False), GROUP_URL)
+        assert state == "ok"
+        assert page.goto_calls == [GROUP_URL]
+        assert "https://www.facebook.com" not in page.goto_calls
+
+    def test_target_page_logged_out_names_sign_in(self):
+        # (d) The target page shows a login wall: the state is
+        # logged_out and the job error is the sign-in guidance.
+        page = _FakePage(logged_out=True)
+        assert FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False), GROUP_URL) == "logged_out"
+        job = _scrape_job()
+        _run_scrape(page, job)
+        row = db.get_job(job["id"])
+        assert row["status"] == "failed"
+        assert "sign in to Facebook" in (row["error"] or "")
+        assert db.get_posts_for_source("src1") == []
+
+    def test_target_page_never_loading_is_empty_not_signed_in(self):
+        # (e) The target page never loads: the state is "empty" and
+        # the job error says the page did not load — it never claims
+        # the user is signed out.
+        page = _FakePage(blank=True, goto_raises_for={GROUP_URL})
+        assert FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False), GROUP_URL) == "empty"
+        assert "https://www.facebook.com" not in page.goto_calls
+        job = _scrape_job()
+        _run_scrape(page, job)
+        row = db.get_job(job["id"])
+        assert row["status"] == "failed"
+        assert "did not load" in (row["error"] or "")
+        assert "sign in to Facebook" not in (row["error"] or "")
+        assert "https://www.facebook.com" not in page.goto_calls
 
 
 # ---------------------------------------------------------------------------
