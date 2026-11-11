@@ -7,7 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { toast } from "sonner";
 
 import * as svc from "./leadhunter-service";
-import { createSeedState } from "./seed";
+import { createDefaultSettings, createSeedState } from "./seed";
 import type { AccountStatus, AppState, Lead, LeadStatus, Settings, SourceType } from "./types";
 
 const STORAGE_KEY = "leadhunter:v1";
@@ -29,7 +29,7 @@ interface StoreValue {
   runAnalysis: (postIds: string[]) => svc.AnalysisResult;
   saveLeads: (leads: Lead[], postCount: number) => void;
   setLeadStatus: (leadId: string, status: LeadStatus) => void;
-  updateSettings: (settings: Settings) => void;
+  updateSettings: (settings: Settings) => boolean;
   resetDemoData: () => void;
 }
 
@@ -47,7 +47,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw) as AppState;
-        if (saved?.accounts?.length) setState({ ...createSeedState(), ...saved });
+        if (saved?.accounts?.length)
+          setState({ ...createSeedState(), ...saved, settings: svc.mergeSettings(createDefaultSettings(), saved.settings) });
       }
     } catch {
       /* corrupted storage — fall back to demo data */
@@ -93,8 +94,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setState((s) => svc.addLeads(s, leads, activeId, postCount, nowIso()).state),
       setLeadStatus: (leadId, status) => setState((s) => svc.setLeadStatus(s, leadId, status, nowIso())),
       updateSettings: (settings) => {
-        setState((s) => ({ ...s, settings }));
-        toast.success("Settings saved on this device");
+        const r = svc.validateSettings(settings);
+        if (!r.ok) {
+          toast.error(r.error);
+          return false;
+        }
+        setState((s) => ({ ...s, settings: r.value }));
+        toast.success("Configurations saved on this device");
+        return true;
       },
       resetDemoData: () => {
         setState(createSeedState());

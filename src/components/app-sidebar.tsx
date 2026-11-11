@@ -68,10 +68,10 @@ export function AppSidebar() {
       <SidebarFooter className="border-t border-sidebar-border">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild isActive={pathname === "/settings"} tooltip="Settings">
-              <Link to="/settings">
+            <SidebarMenuButton asChild isActive={pathname === "/configurations"} tooltip="Configurations">
+              <Link to="/configurations">
                 <Settings />
-                <span>Settings</span>
+                <span>Configurations</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
