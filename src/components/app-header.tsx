@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { Star } from "lucide-react";
 
 import { AccountStatusBadge } from "@/components/badges";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useStore } from "@/lib/store";
@@ -42,6 +43,7 @@ export function AppHeader() {
       <Link to="/accounts" className="text-xs font-semibold text-primary hover:underline">
         Manage accounts
       </Link>
+      <ThemeToggle />
     </header>
   );
 }
