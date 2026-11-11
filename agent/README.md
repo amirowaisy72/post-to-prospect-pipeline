@@ -31,6 +31,31 @@ sign in again unless Facebook logs you out. If a job fails with
 "Facebook session is not signed in", sign in again in that Chrome
 window and run the job again.
 
+## Use an existing signed-in Chrome profile
+
+The agent's own fresh profile sometimes cannot finish Facebook's
+sign-in (the two-step verification page stays blank). Instead of
+signing in again, point the agent at a profile that is **already
+signed in** — the Client Hunting profile:
+
+1. **Close Client Hunting first** — one Chrome profile can only be
+   used by one browser at a time. If it is still running, the job
+   fails with "Chrome profile is in use — close Client Hunting
+   first, then run the job again."
+2. Set the env var **before** starting the agent (in the same
+   PowerShell window, or via Windows env settings):
+   ```powershell
+   $env:LEADHUNTER_CHROME_PROFILE = "G:\Web Apps\client-hunting\data\profiles\Master"
+   ```
+   That path is Client Hunting's profile for its `Master` account
+   (`<client-hunting>\data\profiles\<account>`). Use your own
+   account folder name if it differs.
+3. Start the agent (`run-agent.bat`) — Add Source / Scrap / Sync
+   now need **no sign-in at all**.
+4. To go back to the agent's own profile, unset the var
+   (`Remove-Item Env:LEADHUNTER_CHROME_PROFILE`) and restart the
+   agent.
+
 ## How Scrap / Sync / Stop map to the frontend
 
 | Frontend button | Agent endpoint | What happens |

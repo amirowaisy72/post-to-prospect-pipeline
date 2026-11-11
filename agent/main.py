@@ -3,8 +3,11 @@
 Local-only tool: bind to 127.0.0.1 (see run-agent.bat). The frontend
 calls it from the user's PC, where the agent drives the user's own
 logged-in Chrome/Facebook session via a persistent Playwright profile
-(``agent/.chrome-profile``). The user signs in to Facebook once in
-that Chrome window; the agent NEVER asks for or stores a password.
+(``agent/.chrome-profile`` by default, or the dir named by the
+``LEADHUNTER_CHROME_PROFILE`` env var — e.g. the already-signed-in
+Client Hunting profile, so no Facebook sign-in is needed). The user
+signs in to Facebook once in that Chrome window; the agent NEVER asks
+for or stores a password.
 
 One running job at a time globally — a second start returns 409.
 The browser is launched lazily on the first job (Playwright is
@@ -14,6 +17,7 @@ is reused across jobs.
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
@@ -51,12 +55,55 @@ _playwright = None
 # ----------------------------------------------------------------------
 # Browser (lazy — Playwright imported inside the function only)
 # ----------------------------------------------------------------------
+PROFILE_IN_USE_MESSAGE = (
+    "Chrome profile is in use — close Client Hunting first, "
+    "then run the job again."
+)
+
+
+class ProfileInUseError(RuntimeError):
+    """The chosen Chrome profile is locked by another running browser."""
+
+
+def resolve_chrome_profile() -> Path:
+    """Resolve the persistent Chrome profile dir for the agent.
+
+    ``LEADHUNTER_CHROME_PROFILE`` (an absolute path) overrides the
+    default ``agent/.chrome-profile`` — point it at an already-signed-in
+    profile (e.g. the Client Hunting profile) so no Facebook sign-in
+    is needed. Unset, empty, or whitespace-only means the default.
+    ``~`` and env vars in the value are expanded; Windows backslash
+    paths are accepted as-is.
+    """
+    raw = os.environ.get("LEADHUNTER_CHROME_PROFILE") or ""
+    raw = raw.strip()
+    if not raw:
+        return _AGENT_DIR / ".chrome-profile"
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    return Path(expanded)
+
+
+def _is_profile_in_use_error(exc: BaseException) -> bool:
+    """True when a launch failure is Chromium's profile lock.
+
+    A locked user-data-dir surfaces as "already in use" /
+    "SingletonLock" / "profile ... in use" in Playwright's error text.
+    """
+    msg = str(exc).lower()
+    return ("already in use" in msg or "singleton" in msg
+            or ("profile" in msg and "in use" in msg))
+
+
 def _get_page():
     """Launch (once) the persistent Chrome profile and return its page.
 
     headless=False so the user can see the window and sign in to
-    Facebook there on first run; the session persists in
-    agent/.chrome-profile. The same page is reused across jobs.
+    Facebook there on first run; the session persists in the profile
+    dir (see :func:`resolve_chrome_profile`). The same page is reused
+    across jobs. When the profile is locked by another browser the
+    launch raises :class:`ProfileInUseError` with a plain message
+    instead of crashing — the agent stays up and a later job retries
+    the launch.
     """
     global _page, _playwright
     if _page is not None:
@@ -64,12 +111,19 @@ def _get_page():
     from playwright.sync_api import sync_playwright
 
     _playwright = sync_playwright().start()
-    profile = _AGENT_DIR / ".chrome-profile"
-    context = _playwright.chromium.launch_persistent_context(
-        user_data_dir=str(profile),
-        headless=False,
-        args=["--disable-blink-features=AutomationControlled"],
-    )
+    profile = resolve_chrome_profile()
+    try:
+        context = _playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+    except Exception as exc:
+        _playwright.stop()
+        _playwright = None
+        if _is_profile_in_use_error(exc):
+            raise ProfileInUseError(PROFILE_IN_USE_MESSAGE) from exc
+        raise
     _page = context.pages[0] if context.pages else context.new_page()
     return _page
 

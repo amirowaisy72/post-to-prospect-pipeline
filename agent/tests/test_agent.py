@@ -775,3 +775,166 @@ class TestSourceDb:
         assert db.get_source_by_id("src1") is None
         assert db.get_post_by_url(POST_URLS[0]) is None
         assert db.delete_source("src1") is False
+
+# ---------------------------------------------------------------------------
+# (m) Configurable Chrome profile (LEADHUNTER_CHROME_PROFILE)
+# ---------------------------------------------------------------------------
+# Imports kept local to this section: the profile tests stub the
+# Playwright import, so no real browser is ever launched.
+
+import time
+import types
+from unittest import mock
+
+
+def _install_fake_playwright(monkeypatch, launch_error=None):
+    """Install a fake ``playwright.sync_api``; return the launch mock.
+
+    The fake records the ``launch_persistent_context`` kwargs (so
+    tests can assert which profile dir was used) and either returns
+    a fake context with one page or raises ``launch_error``.
+    """
+    handle = mock.MagicMock(name="playwright-handle")
+    context = mock.MagicMock(name="context")
+    context.pages = [mock.MagicMock(name="page")]
+    chromium = mock.MagicMock(name="chromium")
+    if launch_error is not None:
+        chromium.launch_persistent_context.side_effect = launch_error
+    else:
+        chromium.launch_persistent_context.return_value = context
+    handle.chromium = chromium
+    starter = mock.MagicMock(name="sync-playwright")
+    starter.start.return_value = handle
+    sync_api = types.ModuleType("playwright.sync_api")
+    sync_api.sync_playwright = mock.MagicMock(return_value=starter)
+    playwright_mod = types.ModuleType("playwright")
+    playwright_mod.sync_api = sync_api
+    monkeypatch.setitem(sys.modules, "playwright", playwright_mod)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api)
+    return chromium, handle
+
+
+def _reset_main_browser():
+    try:
+        import main
+    except Exception:
+        return
+    main._page = None
+    main._playwright = None
+
+
+class TestChromeProfile:
+    @pytest.fixture(autouse=True)
+    def _reset_browser_state(self):
+        _reset_main_browser()
+        yield
+        _reset_main_browser()
+
+    def test_resolve_chrome_profile_variants(self, monkeypatch, tmp_path):
+        pytest.importorskip("fastapi")
+        import main
+
+        default = Path(main.__file__).resolve().parent / ".chrome-profile"
+        monkeypatch.delenv("LEADHUNTER_CHROME_PROFILE", raising=False)
+        assert main.resolve_chrome_profile() == default
+
+        # Whitespace-only means the default.
+        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", "   \n")
+        assert main.resolve_chrome_profile() == default
+
+        # Plain path, whitespace trimmed.
+        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE",
+                           f"  {tmp_path / 'prof'}  ")
+        assert main.resolve_chrome_profile() == tmp_path / "prof"
+
+        # ~ and env vars are expanded.
+        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", "~/my-profile")
+        resolved = main.resolve_chrome_profile()
+        assert str(resolved).endswith("my-profile")
+        assert not str(resolved).startswith("~")
+        monkeypatch.setenv("LEADHUNTER_HOME", "/tmp/lh-home")
+        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE",
+                           "$LEADHUNTER_HOME/prof")
+        assert main.resolve_chrome_profile() == Path("/tmp/lh-home/prof")
+
+    def test_env_var_profile_used_for_launch(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        import main
+
+        monkeypatch.setenv(
+            "LEADHUNTER_CHROME_PROFILE",
+            "G:\\Web Apps\\client-hunting\\data\\profiles\\Master")
+        chromium, _handle = _install_fake_playwright(monkeypatch)
+        page = main._get_page()
+        assert page is not None
+        chromium.launch_persistent_context.assert_called_once()
+        kwargs = chromium.launch_persistent_context.call_args.kwargs
+        assert kwargs["user_data_dir"] == (
+            "G:\\Web Apps\\client-hunting\\data\\profiles\\Master")
+        assert kwargs["headless"] is False
+        assert "--disable-blink-features=AutomationControlled" in kwargs["args"]
+
+    def test_default_profile_used_when_env_unset(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        import main
+
+        monkeypatch.delenv("LEADHUNTER_CHROME_PROFILE", raising=False)
+        chromium, _handle = _install_fake_playwright(monkeypatch)
+        main._get_page()
+        kwargs = chromium.launch_persistent_context.call_args.kwargs
+        expected = str(Path(main.__file__).resolve().parent / ".chrome-profile")
+        assert kwargs["user_data_dir"] == expected
+
+    def test_profile_in_use_fails_job_with_plain_message(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from fastapi.testclient import TestClient
+        import main
+
+        lock_error = Exception(
+            "browserType.launchPersistentContext: Failed to launch: "
+            "user data directory is already in use")
+        _install_fake_playwright(monkeypatch, launch_error=lock_error)
+        client = TestClient(main.app)
+        resp = client.post("/scrape", json={
+            "sourceId": "src1",
+            "sourceUrl": GROUP_URL,
+            "sourceName": "Stocks To Watch",
+            "accountId": "acc1",
+        })
+        assert resp.status_code == 202
+        job_id = resp.json()["jobId"]
+        row = None
+        for _ in range(200):
+            row = client.get(f"/jobs/{job_id}").json()["job"]
+            if row["status"] == "failed":
+                break
+            time.sleep(0.05)
+        assert row is not None and row["status"] == "failed"
+        assert row["error"] == main.PROFILE_IN_USE_MESSAGE
+        # Launch state is reset, so a later job retries the launch.
+        assert main._page is None and main._playwright is None
+        # ... and the agent itself is still up.
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["ok"] is True
+
+    def test_delete_endpoint_reports_profile_in_use(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from fastapi.testclient import TestClient
+        import main
+
+        db.upsert_source("src1", "Stocks To Watch", "group", GROUP_URL,
+                         12000, "joined", "acc1")
+        lock_error = Exception("The profile appears to be in use by "
+                               "another browser process (SingletonLock)")
+        _install_fake_playwright(monkeypatch, launch_error=lock_error)
+        client = TestClient(main.app)
+        resp = client.post("/sources/src1/delete")
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == main.PROFILE_IN_USE_MESSAGE
+        # The row was not touched.
+        assert db.get_source_by_id("src1") is not None
+        health = client.get("/health")
+        assert health.status_code == 200

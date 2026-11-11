@@ -37,6 +37,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Optional: reuse an already-signed-in Chrome profile instead of
+REM the agent's own fresh one — e.g. the Client Hunting profile, so
+REM no Facebook sign-in is needed. Close Client Hunting first (one
+REM profile can only be used by one browser at a time), then:
+REM   set "LEADHUNTER_CHROME_PROFILE=G:\Web Apps\client-hunting\data\profiles\Master"
+REM See README.md ("Use an existing signed-in Chrome profile").
+REM When the var is unset, the agent uses agent\.chrome-profile as before.
+
 echo.
 echo [leadhunter] Starting the agent at http://127.0.0.1:8001
 echo [leadhunter] First run: start a Scrap/Sync in LeadHunter and a Chrome
