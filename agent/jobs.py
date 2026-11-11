@@ -46,6 +46,33 @@ _SIGN_IN_ERROR = (
     "The agent never asks for or stores your Facebook password."
 )
 
+# The job failure message names the ACTUAL detected state instead
+# of always saying "not signed in": an empty home page is a load
+# failure, not proof the session is dead — the browser may still
+# be signed in, so the user just retries the job.
+_SESSION_ERRORS = {
+    "logged_out": _SIGN_IN_ERROR,
+    "checkpoint": (
+        "Facebook is asking for a checkpoint / identity check "
+        "(state: checkpoint) — please complete the check in the "
+        "agent Chrome window, then run the job again."
+    ),
+    "blocked": (
+        "Facebook blocked the agent browser (state: blocked) — "
+        "please open Facebook in the agent Chrome window and "
+        "check for a warning, then run the job again."
+    ),
+    "empty": (
+        "Facebook home page did not load (state: empty) — the "
+        "browser may still be signed in; try the job again."
+    ),
+}
+
+
+def _session_error(state: str) -> str:
+    """Failure message for a non-ok session state."""
+    return _SESSION_ERRORS.get(state, _SIGN_IN_ERROR)
+
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
@@ -219,14 +246,14 @@ def _fail(db, job_id, error):
 def _check_session_first(worker, page, db, job_id, should_stop):
     """Session check FIRST, via the worker. Returns True when the
     session is ok. On any other state the job is marked failed with
-    the sign-in message and nothing is scraped."""
+    a message naming that state, and nothing is scraped."""
     try:
         state = worker.verify_session(page, _ctx(should_stop))
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
         return False
     if state != "ok":
-        _fail(db, job_id, _SIGN_IN_ERROR)
+        _fail(db, job_id, _session_error(state))
         return False
     return True
 
@@ -398,9 +425,14 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
                      f"{member_count} members (need {min_members})")
                 continue
             # Comments gate: our data comes purely from comments.
-            activity = worker.check_comments_activity(page, url, ctx)
+            # The gate scrolls the feed patiently before deciding,
+            # so a group whose first screen is bare is not skipped
+            # for a count the feed had not loaded yet.
+            activity = worker.check_comments_activity(
+                page, url, ctx, min_comments=min_comments)
             if activity.get("comments", 0) < min_comments:
-                note(f"Skipped {kind} (no comments): {url} — "
+                shown = f"{name} ({url})" if name else url
+                note(f"Skipped {kind} (no comments): {shown} — "
                      f"{activity.get('posts', 0)} post(s), "
                      f"{activity.get('comments', 0)} comment(s) "
                      f"(need {min_comments})")

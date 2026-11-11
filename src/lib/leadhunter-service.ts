@@ -608,6 +608,11 @@ export function runningJobForPost(state: AppState, postId: string): SourceJob | 
   return state.jobs.find((j) => j.postId === postId && isJobActive(j));
 }
 
+/** The running (or stop-requested) backend job for an account, if any. */
+export function runningJobForAccount(state: AppState, accountId: string): SourceJob | undefined {
+  return state.jobs.find((j) => j.accountId === accountId && isJobActive(j));
+}
+
 /* ---------------- Analysis (simulated AI) ---------------- */
 
 const REJECT_PATTERNS = [
@@ -938,11 +943,39 @@ export function agentFor(state: AppState, accountId: string): AgentState {
   );
 }
 
-/** Busy while it has a task, offline while its account is paused/blocked, otherwise free. */
+/** Human label for a running job, e.g. "Collecting sources…" / "Scraping Stocks To Watch…". */
+export function jobTaskLabel(state: AppState, job: SourceJob): string {
+  if (job.kind === "collect") return "Collecting sources…";
+  const name = job.sourceId ? state.sources.find((s) => s.id === job.sourceId)?.name : undefined;
+  const verb = job.kind === "sync" ? "Syncing" : "Scraping";
+  return name ? `${verb} ${name}…` : `${verb}…`;
+}
+
+/**
+ * What the account's agent is doing right now: its stored task
+ * (AI Analysis) first, else the running backend job (collect /
+ * scrape / sync) as a derived task. Null when free. A job-derived
+ * task has no expectedMs — its progress comes from the job itself,
+ * and it is cleared when the job finishes, not by finishAgentTask.
+ */
+export function agentCurrentTask(state: AppState, accountId: string): AgentTask | null {
+  const stored = agentFor(state, accountId).task;
+  if (stored) return stored;
+  const job = runningJobForAccount(state, accountId);
+  if (!job) return null;
+  return {
+    kind: job.kind === "collect" ? "joining" : "scraping",
+    label: jobTaskLabel(state, job),
+    startedAt: job.startedAt,
+    expectedMs: null,
+  };
+}
+
+/** Busy while it has a task or a backend job is running, offline while its account is paused/blocked, otherwise free. */
 export function agentStatus(state: AppState, accountId: string): AgentStatus {
   const account = state.accounts.find((a) => a.id === accountId);
   if (!account || account.status !== "active") return "offline";
-  return agentFor(state, accountId).task ? "busy" : "free";
+  return agentCurrentTask(state, accountId) ? "busy" : "free";
 }
 
 function putAgent(state: AppState, agent: AgentState): AppState {
@@ -963,8 +996,9 @@ export function startAgentTask(
   if (status === "offline")
     return { ok: false, error: `${account.name} is ${account.status}, so its agent is offline.` };
   const agent = agentFor(state, accountId);
-  if (agent.task)
-    return { ok: false, error: `${account.name}'s agent is busy: ${agent.task.label}. Wait for it or stop that task.` };
+  const current = agentCurrentTask(state, accountId);
+  if (current)
+    return { ok: false, error: `${account.name}'s agent is busy: ${current.label}. Wait for it or stop that task.` };
   return { ok: true, value: putAgent(state, { ...agent, task: { ...task, startedAt: now } }) };
 }
 

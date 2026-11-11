@@ -596,6 +596,24 @@ _GATE_COUNT_JS = (
     "}"
 )
 
+# JS: are "Loading..." placeholders still present in the feed?
+# Facebook lazy-loads the group feed — only ~1 post is on the
+# first screen and more arrive as you scroll, with empty
+# "Loading..." placeholder articles in between. A gate count taken
+# while placeholders remain undercounts. Test doubles return their
+# canned data when they see "feed-loading".
+_FEED_LOADING_JS = (
+    "() => {"
+    " /* feed-loading */"
+    " const arts = document.querySelectorAll('article, [role=\"article\"]');"
+    " for (const a of arts) {"
+    "   const t = (a.innerText || '').trim();"
+    "   if (t === 'Loading...' || t.indexOf('Loading...') === 0) return {loading: true};"
+    " }"
+    " return {loading: false};"
+    "}"
+)
+
 # JS: diagnostic for the comment-count check — how many [aria-label]
 # elements exist inside feed articles, how many carry a comment total
 # ("142 comments"), and how many look like the Comment action button
@@ -849,13 +867,32 @@ class FacebookWorker:
         }
 
     def verify_session(self, page: Page, ctx: dict | None) -> str:
-        """Load home, classify the session. Returns the session state
-        ('ok' when the session is alive). Callers must STOP the job on
-        any non-ok state. Never raises."""
-        state = "empty"
+        """Classify the session, returning 'ok' when it is alive.
+        Callers must STOP the job on any non-ok state. Never raises.
+
+        The page the browser is already on is checked FIRST: a
+        signed-in group/feed page proves the session without any
+        navigation — navigating to home first can hang (a slow SPA
+        load in this Chromium) and report a live session as dead.
+        Only when the current page cannot prove a live session
+        does it load home, with one extra readiness wait on a slow
+        load before giving up.
+        """
+        try:
+            state = self.check_session(page, ctx)
+        except Exception:
+            state = "empty"
+        if state == "ok":
+            return "ok"
+        # The current page cannot prove the session (fresh tab,
+        # login wall, checkpoint, block, or an unloaded page) —
+        # try home.
         try:
             if self._goto(page, self.home_url, ctx, "home"):
-                self._wait_ready(page, ctx)
+                if not self._wait_ready(page, ctx):
+                    # Slow SPA load: one more bounded readiness
+                    # wait before calling the page empty.
+                    self._wait_ready(page, ctx)
                 state = self.check_session(page, ctx)
             else:
                 state = "empty"
@@ -863,8 +900,13 @@ class FacebookWorker:
             _note(ctx, f"session check failed: {exc}")
             state = "empty"
         if state != "ok":
-            _note(ctx, f"Facebook session state: {state} — sign in to "
-                       "Facebook in the agent Chrome window.")
+            if state == "empty":
+                _note(ctx, "Facebook session state: empty — the home "
+                           "page did not load; the browser may still "
+                           "be signed in.")
+            else:
+                _note(ctx, f"Facebook session state: {state} — sign in to "
+                           "Facebook in the agent Chrome window.")
         return state
 
     # ------------------------------------------------------------------
@@ -1943,18 +1985,33 @@ class FacebookWorker:
         except Exception:
             return None
 
+    def _feed_loading(self, page: Page) -> bool:
+        """True while "Loading..." placeholders remain in the feed.
+        Never raises — unknown means not loading."""
+        try:
+            got = page.evaluate(_FEED_LOADING_JS) or {}
+        except Exception:
+            return False
+        return bool(isinstance(got, dict) and got.get("loading"))
+
     def check_comments_activity(self, page: Page, url: str,
-                               ctx: dict | None) -> dict:
+                               ctx: dict | None,
+                               min_comments: int | None = None) -> dict:
         """Quick activity check for a group/page BEFORE joining it.
 
         The finder's job is to bring back sources our data can come
         from — and our data comes purely from comments. A group with
         6,000 members but no comments on any post is useless to us,
         so this samples the recent feed and counts posts + comments.
-        Loads the feed, waits for posts to render, extracts the
-        visible posts + comments once; if that pass found no comments
-        it scrolls once and extracts again (a second chance in case
-        the first screen was all comment-less posts). Returns
+        Loads the feed, waits for posts to render, then scrolls
+        PATIENTLY before deciding: the feed loads only ~1 post on
+        arrival and the 2nd after one scroll, with "Loading..."
+        placeholders — a count from the first screen undercounts
+        and good groups get skipped. So it scrolls one screen per
+        round (~1.5 s), re-counts after each, and stops when the
+        gate is already passed (when min_comments is known), when
+        5 straight rounds add no new posts or comments and no
+        placeholders remain, or at the 8-round cap. Returns
         {"posts": n, "comments": n}. Never raises — returns zeros
         when the feed never loads.
         """
@@ -1994,15 +2051,27 @@ class FacebookWorker:
             return n_posts, n_comments, const_via
 
         n_posts, n_comments, all_via = _count_once()
-        if n_comments == 0 and n_posts > 0:
-            # One scroll for a second sample — the first screen may
-            # have been all comment-less posts. Expand again after
-            # the scroll, since new posts bring collapsed comments.
+        # Patient scroll — see the docstring. A single scroll is
+        # not enough: the first post does not even fully reveal
+        # before the feed loads the next one.
+        no_new = 0
+        for _ in range(8):
+            if _should_stop(ctx):
+                break
+            if min_comments is not None and n_comments >= min_comments:
+                break
+            if no_new >= 5 and not self._feed_loading(page):
+                break
             try:
                 self._scroll_and_collect(page, ctx, rounds=1, wait_ms=1500)
-                n_posts, n_comments, all_via = _count_once()
             except Exception:
-                pass
+                break
+            prev_posts, prev_comments = n_posts, n_comments
+            n_posts, n_comments, all_via = _count_once()
+            if n_posts > prev_posts or n_comments > prev_comments:
+                no_new = 0
+            else:
+                no_new += 1
         result["posts"] = n_posts
         result["comments"] = n_comments
         # Diagnostic: did the count parsing even see aria-labels?

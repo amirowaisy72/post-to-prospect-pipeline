@@ -111,7 +111,8 @@ class _FakePage:
     def __init__(self, pages=None, feed_posts=None, extract_payload=None,
                  article_count=1, logged_out=False, dialog=None,
                  anchors_by_url=None, gate_by_url=None, join_urls=None,
-                 leave_flow=None):
+                 leave_flow=None, gate_sequence_by_url=None,
+                 feed_loading_by_url=None, goto_raises_for=None):
         self._pages = dict(pages or {})
         self._feed_posts = list(feed_posts or [])
         self._extract_payload = extract_payload
@@ -121,6 +122,19 @@ class _FakePage:
         self._anchors_by_url = dict(anchors_by_url or {})
         self._gate_by_url = dict(gate_by_url or {})
         self._join_urls = set(join_urls or [])
+        # gate_sequence_by_url: url -> list of gate counts, one per
+        # feed scroll — simulates Facebook lazy-loading the feed
+        # (first screen bare, more posts/comments after scrolling).
+        # feed_loading_by_url: url -> scrolls after which the
+        # "Loading..." placeholders disappear.
+        self._gate_sequence = dict(gate_sequence_by_url or {})
+        self._feed_loading = dict(feed_loading_by_url or {})
+        self._feed_scrolls = 0
+        # goto_raises_for: exact URLs whose navigation raises (a
+        # hanging home page). goto_calls records every navigation
+        # so tests can prove verify_session never navigated.
+        self._goto_raises_for = set(goto_raises_for or [])
+        self.goto_calls: list[str] = []
         # leave_flow: {"url", "joined_body", "left_body"} — simulates a
         # group page where Joined -> Leave group -> confirm leaves the
         # group; the body then shows "Join group" again.
@@ -138,6 +152,9 @@ class _FakePage:
         self.extract_calls = 0
 
     def goto(self, url, wait_until=None, timeout=None):
+        self.goto_calls.append(url)
+        if url in self._goto_raises_for:
+            raise RuntimeError(f"navigation to {url} timed out")
         self.url = "https://www.facebook.com/login" if self._logged_out else url
         if self._leave is not None and url == self._leave["url"]:
             self._body = (self._leave["left_body"] if self._left
@@ -195,7 +212,22 @@ class _FakePage:
             return None
         if "article-count" in js:
             return self._article_count
+        if "scrollBy" in js:
+            # A feed scroll (one screen down) on a group/page. Search
+            # pages scroll too, but those are not gate scrolls.
+            # Tracked separately from dialog scrolls so feed tests
+            # never disturb the dialog tests.
+            if "/search/" not in self.url:
+                self._feed_scrolls += 1
+            return None
+        if "feed-loading" in js:
+            after = self._feed_loading.get(self.url, 0)
+            return {"loading": self._feed_scrolls < after}
         if "gate-count" in js:
+            seq = self._gate_sequence.get(self.url)
+            if seq:
+                idx = min(self._feed_scrolls, len(seq) - 1)
+                return dict(seq[idx])
             return dict(self._gate_by_url.get(
                 self.url, {"posts": 0, "comments": 0}))
         if "diag-aria" in js:
@@ -478,6 +510,71 @@ class TestSessionFailure:
 
 
 # ---------------------------------------------------------------------------
+# (g) verify_session: current page first, state-named failures
+# ---------------------------------------------------------------------------
+
+CHECKPOINT_URL = "https://www.facebook.com/checkpoint/?x=1"
+
+
+class TestVerifySession:
+    def _signed_in_group_page(self, goto_raises_for=None):
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            goto_raises_for=goto_raises_for)
+        page.goto(GROUP_URL)
+        return page
+
+    def test_signed_in_group_page_needs_no_navigation(self):
+        # Live bug: the browser sat on a loaded, signed-in group
+        # page while Scrap failed "not signed in" — verify_session
+        # navigated to home first and the navigation hung. The
+        # current page alone must prove the session.
+        page = self._signed_in_group_page()
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False))
+        assert state == "ok"
+        assert page.goto_calls == [GROUP_URL]
+
+    def test_signed_in_page_survives_a_hanging_home_navigation(self):
+        # Even if home would time out, a signed-in current page
+        # is enough — the job must not fail.
+        page = self._signed_in_group_page(
+            goto_raises_for={"https://www.facebook.com"})
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False))
+        assert state == "ok"
+        assert "https://www.facebook.com" not in page.goto_calls
+
+    def test_logged_out_page_is_still_logged_out(self):
+        page = _FakePage(logged_out=True)
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False))
+        assert state == "logged_out"
+
+    def test_checkpoint_names_checkpoint_in_job_error(self):
+        # The checkpoint must persist on home too: a checkpoint on
+        # the current page alone is re-checked at home (it may have
+        # been for one action only), and only a checkpoint that is
+        # still there fails the job.
+        checkpoint_body = {"body_text": "Verify your identity to continue",
+                           "title": "Checkpoint"}
+        page = _FakePage(pages={
+            CHECKPOINT_URL: checkpoint_body,
+            "https://www.facebook.com": checkpoint_body})
+        page.goto(CHECKPOINT_URL)
+        assert FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False)) == "checkpoint"
+        job = _scrape_job()
+        _run_scrape(page, job)
+        row = db.get_job(job["id"])
+        assert row["status"] == "failed"
+        assert "checkpoint" in (row["error"] or "")
+        assert "sign in to Facebook" not in (row["error"] or "")
+
+
+# ---------------------------------------------------------------------------
 # (h) Exhaustive dialog: lazy load + expand reveals everything
 # ---------------------------------------------------------------------------
 
@@ -627,6 +724,69 @@ class TestCollectSources:
         # read once, no count found, and it proceeded on the gate.
         assert db.get_source_by_url(UNKNOWN_GROUP) is not None
         assert db.get_source_by_url(GOOD_GROUP)["member_count"] == 12000
+
+    def test_gate_scrolls_patiently_before_joining(self):
+        # Live bug: the feed shows ~1 post on arrival and the 2nd
+        # only after a scroll, so a one-shot count saw 0 comments
+        # and good groups were skipped. The gate must scroll and
+        # re-count until the gate passes — then join.
+        anchors = [_FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members")]
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors},
+            gate_sequence_by_url={GOOD_GROUP: [
+                {"posts": 1, "comments": 0},
+                {"posts": 2, "comments": 0},
+                {"posts": 5, "comments": 40},
+            ]},
+            feed_loading_by_url={GOOD_GROUP: 2},
+            join_urls={GOOD_GROUP})
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 1
+        assert db.get_source_by_url(GOOD_GROUP) is not None
+        # Stopped as soon as the gate passed — 2 scrolls, not 8.
+        assert page._feed_scrolls == 2
+
+    def test_gate_skips_dead_group_after_patient_scrolling(self):
+        # A group whose feed never yields comments must still be
+        # skipped — but only after patient scrolling, and the run
+        # must terminate (no infinite scroll). The skip note must
+        # name the group with the counted posts/comments.
+        anchors = [_FakeAnchor(DEAD_GROUP, "Dead Group", "5K members")]
+        notes: list[str] = []
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors},
+            gate_sequence_by_url={DEAD_GROUP: [
+                {"posts": 2, "comments": 0},
+            ]},
+            feed_loading_by_url={DEAD_GROUP: 1})
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False, note=notes.append)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 0
+        assert db.get_source_by_url(DEAD_GROUP) is None
+        assert page._feed_scrolls <= 8
+        assert any("Dead Group" in n and "2 post(s)" in n
+                   and "0 comment(s)" in n for n in notes)
+
+    def test_gate_does_not_scroll_when_first_screen_passes(self):
+        # No pointless scrolling: a group already over the gate on
+        # the first screen is decided at once.
+        anchors = [_FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members")]
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors},
+            gate_by_url={GOOD_GROUP: {"posts": 5, "comments": 40}},
+            join_urls={GOOD_GROUP})
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        assert db.get_source_by_url(GOOD_GROUP) is not None
+        assert page._feed_scrolls == 0
 
     def test_join_failure_means_not_saved(self):
         anchors = [_FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members")]

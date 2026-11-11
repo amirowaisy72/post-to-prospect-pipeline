@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { accountName, agentFor, agentStatus, countReplies, type AnalysisResult } from "@/lib/leadhunter-service";
+import { accountName, agentCurrentTask, agentStatus, countReplies, type AnalysisResult } from "@/lib/leadhunter-service";
 import { useActiveAccountData, useStore } from "@/lib/store";
 import type { AiProvider } from "@/lib/types";
 
@@ -55,7 +55,7 @@ function AnalysisPage() {
 
   const running = step >= 0;
   const agent = agentStatus(state, accountId);
-  const agentTask = agentFor(state, accountId).task;
+  const agentTask = agentCurrentTask(state, accountId);
   const agentBlocked = !running && agent !== "free";
   const sourceName = (id: string) => state.sources.find((s) => s.id === id)?.name ?? "";
   const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));

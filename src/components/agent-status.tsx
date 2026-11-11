@@ -3,10 +3,10 @@ import { Bot, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useNow } from "@/hooks/use-now";
-import { agentFor, agentProgress, agentStatus } from "@/lib/leadhunter-service";
+import { agentCurrentTask, agentFor, agentProgress, agentStatus, runningJobForAccount } from "@/lib/leadhunter-service";
 import { fmtAgo } from "@/lib/format";
 import { useStore } from "@/lib/store";
-import type { AgentState, AgentStatus } from "@/lib/types";
+import type { AgentState, AgentStatus, AgentTask } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const AGENT_STATUS_LABEL: Record<AgentStatus, string> = { busy: "Busy", free: "Free", offline: "Offline" };
@@ -41,7 +41,7 @@ export function AgentDot({ status, className }: { status: AgentStatus; className
 export function AgentStatusTag({ accountId }: { accountId: string }) {
   const { state } = useStore();
   const status = agentStatus(state, accountId);
-  const task = agentFor(state, accountId).task;
+  const task = agentCurrentTask(state, accountId);
   return (
     <div className="min-w-0">
       <span
@@ -60,15 +60,16 @@ export function AgentStatusTag({ accountId }: { accountId: string }) {
   );
 }
 
-function AgentRow({ agent, status, name, active, now, onStop }: {
+function AgentRow({ agent, task, status, name, active, now, onStop }: {
   agent: AgentState;
+  /** Current work: the stored task, or the running backend job. */
+  task: AgentTask | null;
   status: AgentStatus;
   name: string;
   active: boolean;
   now: number | null;
   onStop: () => void;
 }) {
-  const task = agent.task;
   const progress = task && now != null ? agentProgress(task, now) : null;
   const initials = name.replace(/[^\p{L}\s]/gu, "").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 
@@ -117,11 +118,11 @@ function AgentRow({ agent, status, name, active, now, onStop }: {
 
 /** Top-bar indicator for the active account's agent, with every account's agent in the popover. */
 export function AgentStatusIndicator() {
-  const { state, finishAgentTask } = useStore();
+  const { state, finishAgentTask, stopJob } = useStore();
   const now = useNow();
   const activeId = state.activeAccountId;
   const status = agentStatus(state, activeId);
-  const task = agentFor(state, activeId).task;
+  const task = agentCurrentTask(state, activeId);
   const progress = task && now != null ? agentProgress(task, now) : null;
   const busyCount = state.accounts.filter((a) => agentStatus(state, a.id) === "busy").length;
 
@@ -166,15 +167,22 @@ export function AgentStatusIndicator() {
               <AgentRow
                 key={a.id}
                 agent={agentFor(state, a.id)}
+                task={agentCurrentTask(state, a.id)}
                 status={agentStatus(state, a.id)}
                 name={a.name}
                 active={a.id === activeId}
                 now={now}
-                onStop={() => finishAgentTask(a.id, { stopped: true })}
+                onStop={() => {
+                  // A running backend job stops through the agent;
+                  // a stored (analysis) task finishes in place.
+                  const job = runningJobForAccount(state, a.id);
+                  if (job) void stopJob(job.id);
+                  else finishAgentTask(a.id, { stopped: true });
+                }}
               />
             ))}
         </ul>
-        <p className="border-t px-4 py-2.5 text-[11px] text-muted-foreground">Demo status — live updates arrive with your agent API.</p>
+        <p className="border-t px-4 py-2.5 text-[11px] text-muted-foreground">Live status — reflects backend jobs and analysis tasks.</p>
       </PopoverContent>
     </Popover>
   );
