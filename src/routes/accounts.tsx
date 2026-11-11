@@ -91,7 +91,14 @@ function AccountsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {state.accounts.map((a) => {
+                {state.accounts.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="pl-6 py-6 text-sm text-muted-foreground">
+                      No accounts yet — create your first account on the left.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  state.accounts.map((a) => {
                   const s = accountStats(state, a.id);
                   const isDefault = a.id === state.defaultAccountId;
                   const isActive = a.id === state.activeAccountId;
@@ -143,7 +150,8 @@ function AccountsPage() {
                       </TableCell>
                     </TableRow>
                   );
-                })}
+                  })
+                )}
               </TableBody>
             </Table>
           </CardContent>

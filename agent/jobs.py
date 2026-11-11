@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from timestamps import posted_at
 
 __all__ = ["merge_post_data", "run_scrape", "run_sync",
+           "run_collect_sources", "delete_source",
            "count_tree_nodes", "verification_entry", "verification_message"]
 
 _SIGN_IN_ERROR = (
@@ -299,6 +300,208 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
                     processed=processed, new_posts=new_posts)
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
+
+
+def run_collect_sources(worker, page, db, job, should_stop, note=None):
+    """Keyword search + collect: search Facebook for groups/pages
+    matching the keyword, apply the comments gate and the member
+    gate, join the good groups (pages are recorded, not joined — a
+    page needs no join), and save them as sources.
+
+    ``job`` is a db job row dict, enriched with ``keyword``,
+    ``type`` ("group" / "page" / "both"), ``max_new``,
+    ``min_comments`` (default 3) and ``min_members`` (default 100)
+    — the two gates come from Configurations sourcing rules.
+    Rules ported from client-hunting ``collect_sources``: a source
+    whose posts carry fewer than min_comments comments is dead and
+    is never saved and never consumes the target; a source with a
+    known member count below min_members is skipped the same way;
+    a source already joined by ANY account is skipped. A missing
+    member count never blocks a run — it is read once from the
+    source's own page, and if it still cannot be read the source
+    proceeds (a missing count is not proof of a small group).
+    One search pass per run: the user presses Add Source again for
+    more (the original cycled its keyword list with a 2-minute
+    wait between empty passes, which makes no sense for a single
+    keyword). A join that fails means the group is NOT saved — the
+    user can retry with another Add Source run. Never raises:
+    failures are recorded on the job row. The joined sources are
+    stored on the job row as ``result`` = {"sources": [...]}.
+    """
+    job_id = job["id"]
+    note = _note_fn(note)
+    try:
+        if not _check_session_first(worker, page, db, job_id, should_stop):
+            return
+        keyword = (job.get("keyword") or "").strip()
+        if not keyword:
+            _fail(db, job_id, "collect job has no keyword")
+            return
+        account_id = job.get("account_id") or ""
+        type_ = (job.get("type") or "group").strip().lower()
+        if type_ not in ("group", "page", "both"):
+            type_ = "group"
+        try:
+            max_new = int(job.get("max_new") or 10)
+        except (TypeError, ValueError):
+            max_new = 10
+        try:
+            min_comments = int(job.get("min_comments") or 3)
+        except (TypeError, ValueError):
+            min_comments = 3
+        try:
+            min_members = int(job.get("min_members") or 100)
+        except (TypeError, ValueError):
+            min_members = 100
+        ctx = _ctx(should_stop, note)
+        candidates = []
+        if type_ in ("group", "both"):
+            for group in worker.search_groups(page, keyword, ctx) or []:
+                candidates.append({"kind": "group", **(group or {})})
+        if type_ in ("page", "both") and len(candidates) < max_new * 3:
+            for found_page in worker.search_pages(page, keyword, ctx) or []:
+                candidates.append({"kind": "page", **(found_page or {})})
+        seen_urls = set()
+        joined = []
+        checked = 0
+        stopped = False
+        for candidate in candidates:
+            if len(joined) >= max_new:
+                break
+            if should_stop():
+                stopped = True
+                break
+            url = (candidate.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            checked += 1
+            kind = candidate.get("kind") or "group"
+            name = candidate.get("name") or ""
+            existing = db.get_source_by_url(url)
+            if existing is not None:
+                note(f"Already joined: {url} — skipped")
+                continue
+            # Member gate: known count below the minimum is dead;
+            # unknown count is read once from the source's own page;
+            # still unknown -> proceed (never blocks a run).
+            member_count = candidate.get("member_count")
+            if member_count is None:
+                try:
+                    member_count = worker.read_source_member_count(
+                        page, url, name, ctx)
+                except Exception:
+                    member_count = None
+            if (isinstance(member_count, int)
+                    and member_count < min_members):
+                note(f"Skipped {kind} (too few members): {url} — "
+                     f"{member_count} members (need {min_members})")
+                continue
+            # Comments gate: our data comes purely from comments.
+            activity = worker.check_comments_activity(page, url, ctx)
+            if activity.get("comments", 0) < min_comments:
+                note(f"Skipped {kind} (no comments): {url} — "
+                     f"{activity.get('posts', 0)} post(s), "
+                     f"{activity.get('comments', 0)} comment(s) "
+                     f"(need {min_comments})")
+                continue
+            source_id = _new_id_source()
+            if kind == "group":
+                try:
+                    joined_ok = worker.join_group(page, url, ctx)
+                except Exception:
+                    joined_ok = False
+                if not joined_ok:
+                    note(f"Could not join group: {url} — not saved, "
+                         f"try Add Source again")
+                    continue
+                note(f"Joined group: {url}")
+            else:
+                note(f"Recorded page: {url}")
+            db.upsert_source(source_id, name, kind, url, member_count,
+                             "joined", account_id or None)
+            joined.append({
+                "id": source_id,
+                "name": name,
+                "type": kind,
+                "url": url,
+                "memberCount": member_count,
+                "joinedByAccountId": account_id or None,
+            })
+            db.update_job(job_id, posts_processed=checked,
+                          new_posts=len(joined),
+                          result={"sources": joined})
+        if joined:
+            message = (f"Joined {len(joined)} new "
+                       f"{'source' if len(joined) == 1 else 'sources'} "
+                       f"for '{keyword}'")
+        else:
+            message = (f"No new sources for '{keyword}' — every "
+                       f"candidate failed the comments/member gate "
+                       f"or was already joined")
+        db.update_job(job_id,
+                      status="stopped" if stopped else "done",
+                      finished_at=_now_iso(),
+                      posts_processed=checked,
+                      new_posts=len(joined),
+                      message=message,
+                      result={"sources": joined})
+    except Exception as exc:  # noqa: BLE001 - never raise out of a job
+        _fail(db, job_id, exc)
+
+
+def _new_id_source():
+    """A fresh source id (same shape as db._new_id)."""
+    import uuid
+
+    return uuid.uuid4().hex
+
+
+def delete_source(worker, page, db, source_id, should_stop=None):
+    """Delete one source: leave the group / unfollow the page on
+    Facebook, then remove the local record (source + its posts).
+
+    The local record is removed ONLY when the Facebook action
+    actually succeeded (or the user was already not a member).
+    When the leave/unfollow FAILS, the record STAYS in the list and
+    the failure is reported — silently dropping it would leave the
+    user still joined with no way to retry. Ported from
+    client-hunting ``HuntingManager.delete_source``. Returns
+    {ok, left, detail}. Never raises.
+    """
+    try:
+        source = db.get_source_by_id(source_id)
+        if source is None:
+            return {"ok": False, "left": False,
+                    "detail": "Source not found."}
+        kind = source.get("type") or "group"
+        url = source.get("url") or ""
+        left = False
+        if url:
+            ctx = _ctx(should_stop or (lambda: False))
+            try:
+                if kind == "group":
+                    left = bool(worker.leave_group(page, url, ctx))
+                else:
+                    left = bool(worker.unfollow_page(page, url, ctx))
+            except Exception:
+                left = False
+        if not left:
+            if kind == "group":
+                detail = ("Could not leave the group on Facebook — "
+                          "it is still in the list, try Delete again.")
+            else:
+                detail = ("Could not unfollow the page on Facebook — "
+                          "it is still in the list, try Delete again.")
+            return {"ok": False, "left": False, "detail": detail}
+        db.delete_source(source_id)
+        if kind == "group":
+            detail = "Left the group and removed it from the list."
+        else:
+            detail = "Unfollowed the page and removed it from the list."
+        return {"ok": True, "left": True, "detail": detail}
+    except Exception as exc:  # noqa: BLE001 - never raise
+        return {"ok": False, "left": False, "detail": str(exc)}
 
 
 def run_sync(worker, page, db, job, should_stop, note=None):

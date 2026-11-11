@@ -1,4 +1,4 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { Link, Outlet, createFileRoute, useChildMatches } from "@tanstack/react-router";
 
 import { EmptyState, PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,8 +19,17 @@ export const Route = createFileRoute("/data-sourcing/$sourceId")({
 });
 
 function SourcePostsPage() {
+  // Hooks first, always — the child check below returns early, and a
+  // return before these hooks would render fewer hooks on the next
+  // navigation and crash React ("Rendered fewer hooks than expected").
+  const childMatches = useChildMatches();
   const { sourceId } = Route.useParams();
   const { state } = useStore();
+  // The post detail page (/data-sourcing/$sourceId/$postId) is a
+  // nested route: when it matches, it REPLACES this list instead of
+  // rendering underneath it.
+  if (childMatches.length > 0) return <Outlet />;
+
   const source = state.sources.find((s) => s.id === sourceId);
   const posts = postsForSource(state, sourceId);
 
@@ -50,14 +59,14 @@ function SourcePostsPage() {
         <CardHeader>
           <CardTitle className="text-base">{posts.length} post{posts.length === 1 ? "" : "s"}</CardTitle>
           <CardDescription>
-            Collected by the Chrome extension or the local scraping agent (Scrap / Sync on the source row).
+            Collected by the local scraping agent (Scrap / Sync on the source row).
           </CardDescription>
         </CardHeader>
         <CardContent className="px-0">
           {posts.length === 0 ? (
             <div className="px-6">
               <EmptyState title="No posts scraped from this source yet">
-                Use Scrap on the source row in Data Sourcing, or import a post with Add Post Data.
+                Use Scrap on the source row in Data Sourcing.
               </EmptyState>
             </div>
           ) : (

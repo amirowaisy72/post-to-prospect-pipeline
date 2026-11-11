@@ -10,7 +10,9 @@ import * as svc from "./leadhunter-service";
 import {
   AGENT_NOT_RUNNING_MESSAGE,
   AgentUnreachableError,
+  deleteAgentSource,
   getAgentJob,
+  startAgentCollect,
   startAgentScrape,
   startAgentSync,
   stopAgentJob,
@@ -18,7 +20,9 @@ import {
 import { createDefaultSettings, createSeedState } from "./seed";
 import type { AccountStatus, AgentTask, AppState, Lead, LeadStatus, Settings, SourceType } from "./types";
 
-const STORAGE_KEY = "leadhunter:v1";
+const STORAGE_KEY = "leadhunter:v2";
+// v1 stored the demo data — purged on first load so the app starts empty.
+const LEGACY_STORAGE_KEY = "leadhunter:v1";
 
 const newId = (prefix: string) => `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 const nowIso = () => new Date().toISOString();
@@ -31,16 +35,14 @@ interface StoreValue {
   setDefaultAccount: (id: string) => void;
   createAccount: (input: { name: string; facebookName: string }) => boolean;
   setAccountStatus: (id: string, status: AccountStatus) => void;
-  addSource: (input: { name: string; type: SourceType; quantity: number }) => boolean;
-  joinSource: (sourceId: string) => void;
-  addPost: (draft: svc.PostDraft, sourceId: string) => boolean;
-  /** Import several parsed posts at once; one summary toast for the batch. */
-  addPosts: (drafts: svc.PostDraft[], sourceId: string) => void;
+  /** Search Facebook for groups/pages matching a keyword and collect the good ones (agent job). */
+  collectSources: (input: { keyword: string; type: SourceType | "both"; maxNew: number }) => Promise<boolean>;
+  /** Leave the group/page on Facebook, then remove it from everywhere. False (row kept) when the leave fails. */
+  deleteSource: (sourceId: string) => Promise<boolean>;
   runAnalysis: (postIds: string[]) => svc.AnalysisResult;
   saveLeads: (leads: Lead[], postCount: number) => void;
   setLeadStatus: (leadId: string, status: LeadStatus) => void;
   updateSettings: (settings: Settings) => boolean;
-  resetDemoData: () => void;
   /** Give an account's agent a task; false (with a toast) when it is busy or offline. */
   startAgentTask: (accountId: string, task: Omit<AgentTask, "startedAt">) => boolean;
   /** Finish or stop the agent's current task. */
@@ -66,14 +68,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // Load saved data after hydration (browser storage is not available during SSR).
   useEffect(() => {
     try {
+      // The old key held the demo data — drop it so the app starts empty.
+      window.localStorage.removeItem(LEGACY_STORAGE_KEY);
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw) as AppState;
-        if (saved?.accounts?.length)
-          setState({ ...createSeedState(), ...saved, settings: svc.mergeSettings(createDefaultSettings(), saved.settings) });
+        if (saved && typeof saved === "object") {
+          const seed = createSeedState();
+          const arrays = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+          const accounts = arrays<AppState["accounts"][number]>(saved.accounts);
+          const pick = (id: unknown) =>
+            typeof id === "string" && accounts.some((a) => a.id === id) ? id : "";
+          setState({
+            ...seed,
+            ...saved,
+            accounts,
+            sources: arrays(saved.sources),
+            posts: arrays(saved.posts),
+            leads: arrays(saved.leads),
+            activity: arrays(saved.activity),
+            jobs: arrays(saved.jobs),
+            agents: arrays(saved.agents),
+            // Never sit on an account id that no longer exists.
+            activeAccountId: pick(saved.activeAccountId) || pick(saved.defaultAccountId) || accounts[0]?.id || "",
+            defaultAccountId: pick(saved.defaultAccountId) || accounts[0]?.id || "",
+            settings: svc.mergeSettings(createDefaultSettings(), saved.settings),
+          });
+        }
       }
     } catch {
-      /* corrupted storage — fall back to demo data */
+      /* corrupted storage — fall back to the empty state */
     }
     setHydrated(true);
   }, []);
@@ -131,6 +155,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         const aj = res.job;
         if (aj.status === "done" || aj.status === "stopped" || aj.status === "failed" || aj.status === "incomplete") {
+          if (job.kind === "collect") {
+            // Collect finished: import the sources the agent joined,
+            // then finish the local job.
+            const collected = aj.result?.sources ?? [];
+            setState((prev) => {
+              let next = prev;
+              if (aj.status !== "failed" && collected.length > 0) {
+                next = svc.addCollectedSources(next, collected, job.accountId, nowIso()).state;
+              }
+              return svc.updateSourceJob(next, job.id, {
+                status: aj.status,
+                postsProcessed: aj.postsProcessed,
+                newPosts: aj.newPosts,
+                finishedAt: aj.finishedAt ?? nowIso(),
+                error: aj.error ?? null,
+                verification: aj.verification ?? [],
+                result: aj.result ?? null,
+              }).state;
+            });
+            if (aj.status === "failed") {
+              toast.error(`Collect failed — ${aj.error ?? "unknown error"}`);
+            } else if (collected.length > 0) {
+              const names = collected.map((s) => s.name).slice(0, 3).join(", ");
+              toast.success(
+                `Collected ${collected.length} new source${collected.length === 1 ? "" : "s"} — ${names}${collected.length > 3 ? "…" : ""}`,
+              );
+            } else {
+              toast.info(
+                aj.message ??
+                  "No new sources found — every candidate failed the comments/member gate or was already joined",
+              );
+            }
+          } else {
           // Import the collected posts, then finish the local job.
           const parsed = svc.parsePostDataJson(JSON.stringify({ posts: res.posts }), stateRef.current, {
             allowExisting: job.kind === "sync",
@@ -192,6 +249,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           } else {
             toast.success(`Sync finished — ${aj.postsProcessed} post(s) re-checked in ${sourceName}`);
           }
+          }
         } else {
           setState((prev) =>
             svc.updateSourceJob(prev, job.id, {
@@ -234,20 +292,61 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       createAccount: (input) =>
         apply(svc.createAccount(stateRef.current, input, newId("acc"), nowIso()), `Account “${input.name.trim()}” created`),
       setAccountStatus: (id, status) => setState((s) => svc.setAccountStatus(s, id, status)),
-      addSource: (input) =>
-        apply(svc.addSource(stateRef.current, input, activeId, newId("src"), nowIso()), "Source added"),
-      joinSource: (sourceId) => {
-        const name = stateRef.current.sources.find((s) => s.id === sourceId)?.name;
-        apply(svc.joinSource(stateRef.current, sourceId, activeId, nowIso()), `Joined ${name}`);
+      collectSources: async (input) => {
+        const s = stateRef.current;
+        const accountId = s.activeAccountId;
+        if (!accountId) {
+          toast.error("Create an account first — sources belong to an account");
+          return false;
+        }
+        const keyword = input.keyword.trim();
+        if (!keyword) {
+          toast.error("Enter a search keyword");
+          return false;
+        }
+        if (s.jobs.some((j) => j.status === "running" || j.status === "stop-requested")) {
+          toast.info("A job is already running — wait for it to finish");
+          return false;
+        }
+        let jobId: string;
+        try {
+          ({ jobId } = await startAgentCollect(s.settings.agentUrl, {
+            keyword,
+            type: input.type,
+            maxNew: input.maxNew,
+            accountId,
+            minComments: s.settings.sourcing.minComments,
+            minMembers: s.settings.sourcing.minMembers,
+          }));
+        } catch (e) {
+          toast.error(e instanceof AgentUnreachableError ? AGENT_NOT_RUNNING_MESSAGE : (e as Error).message);
+          return false;
+        }
+        setState((prev) =>
+          svc.startSourceJob(prev, { id: jobId, kind: "collect", sourceId: null, postId: null, accountId, startedAt: nowIso() }).state,
+        );
+        toast(`Searching Facebook for “${keyword}” — joining groups that pass the comments and member gates`);
+        void pollJobs();
+        return true;
       },
-      addPost: (draft, sourceId) =>
-        apply(svc.addPost(stateRef.current, draft, sourceId, activeId, newId("post"), nowIso()), "Post data saved"),
-      addPosts: (drafts, sourceId) => {
-        const r = svc.addPosts(stateRef.current, drafts, sourceId, activeId, () => newId("post"), nowIso());
-        setState(r.state);
-        const parts = [`Imported ${r.added} post${r.added === 1 ? "" : "s"}`];
-        if (r.skipped) parts.push(`${r.skipped} already collected`);
-        toast.success(parts.join(", "));
+      deleteSource: async (sourceId) => {
+        const s = stateRef.current;
+        const source = s.sources.find((x) => x.id === sourceId);
+        if (!source) return false;
+        try {
+          await deleteAgentSource(s.settings.agentUrl, sourceId);
+        } catch (e) {
+          // The agent throws when the leave fails — the row stays so
+          // Delete can be retried.
+          toast.error(e instanceof AgentUnreachableError ? AGENT_NOT_RUNNING_MESSAGE : (e as Error).message);
+          return false;
+        }
+        setState((prev) => {
+          const r = svc.deleteSource(prev, sourceId, nowIso());
+          return r.ok ? r.value : prev;
+        });
+        toast.success(`Left ${source.name} and removed it from the list`);
+        return true;
       },
       runAnalysis: (postIds) => svc.analysePosts(stateRef.current, postIds, activeId, () => newId("lead")),
       saveLeads: (leads, postCount) =>
@@ -370,10 +469,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         } catch (e) {
           toast.error(e instanceof AgentUnreachableError ? AGENT_NOT_RUNNING_MESSAGE : (e as Error).message);
         }
-      },
-      resetDemoData: () => {
-        setState(createSeedState());
-        toast.success("Demo data restored");
       },
     };
   }, [state, hydrated, apply]);

@@ -49,11 +49,45 @@ def temp_db(tmp_path):
 
 
 class _FakeLocator:
-    def __init__(self, count=0):
+    def __init__(self, count=0, page=None, action=None):
         self._count = count
+        self._page = page
+        self._action = action
 
     def count(self):
         return self._count
+
+    def is_visible(self):
+        return self._count > 0
+
+    def click(self, timeout=None, force=False):
+        if self._action is not None:
+            self._action()
+        return None
+
+    def scroll_into_view_if_needed(self, timeout=None):
+        return None
+
+    @property
+    def first(self):
+        return self
+
+
+class _FakeAnchor:
+    """One <a href> element. ``member_count_text`` is what the
+    worker's ancestor walk would return for the result card
+    ("12K members"), so the member gate can be tested without JS."""
+
+    def __init__(self, href, text="", member_count_text=None):
+        self._href = href
+        self._text = text
+        self.member_count_text = member_count_text
+
+    def get_attribute(self, name):
+        return self._href if name == "href" else None
+
+    def inner_text(self):
+        return self._text
 
 
 class _FakeMouse:
@@ -75,13 +109,24 @@ class _FakePage:
     """
 
     def __init__(self, pages=None, feed_posts=None, extract_payload=None,
-                 article_count=1, logged_out=False, dialog=None):
+                 article_count=1, logged_out=False, dialog=None,
+                 anchors_by_url=None, gate_by_url=None, join_urls=None,
+                 leave_flow=None):
         self._pages = dict(pages or {})
         self._feed_posts = list(feed_posts or [])
         self._extract_payload = extract_payload
         self._article_count = article_count
         self._logged_out = logged_out
         self._dialog = dialog
+        self._anchors_by_url = dict(anchors_by_url or {})
+        self._gate_by_url = dict(gate_by_url or {})
+        self._join_urls = set(join_urls or [])
+        # leave_flow: {"url", "joined_body", "left_body"} — simulates a
+        # group page where Joined -> Leave group -> confirm leaves the
+        # group; the body then shows "Join group" again.
+        self._leave = leave_flow
+        self._leave_state = "joined"
+        self._left = False
         self._scrolls = 0
         self._expand_calls = 0
         self._expanded = False
@@ -94,6 +139,11 @@ class _FakePage:
 
     def goto(self, url, wait_until=None, timeout=None):
         self.url = "https://www.facebook.com/login" if self._logged_out else url
+        if self._leave is not None and url == self._leave["url"]:
+            self._body = (self._leave["left_body"] if self._left
+                          else self._leave["joined_body"])
+            self._title = "Stocks To Watch"
+            return
         data = self._pages.get(url, {})
         self._body = data.get("body_text", "Facebook feed content")
         self._title = data.get("title", "Facebook")
@@ -107,10 +157,36 @@ class _FakePage:
         return ""
 
     def query_selector_all(self, selector):
+        if "a[href]" in selector:
+            return list(self._anchors_by_url.get(self.url, []))
         return []
+
+    def _leave_action(self, selector):
+        """Click action for the leave state machine, or None."""
+        if self._leave_state == "joined" and "Joined" in selector:
+            def _open_menu():
+                self._leave_state = "menu"
+            return _open_menu
+        if self._leave_state == "menu" and "Leave group" in selector:
+            def _open_confirm():
+                self._leave_state = "confirm"
+            return _open_confirm
+        if self._leave_state == "confirm" and "Leave" in selector:
+            def _confirm():
+                self._leave_state = "left"
+                self._left = True
+                self._body = self._leave["left_body"]
+            return _confirm
+        return None
 
     def locator(self, selector):
         if self._logged_out and 'input[type="password"]' in selector:
+            return _FakeLocator(1)
+        if self._leave is not None:
+            action = self._leave_action(selector)
+            if action is not None:
+                return _FakeLocator(1, page=self, action=action)
+        if "Join group" in selector and self.url in self._join_urls:
             return _FakeLocator(1)
         return _FakeLocator(0)
 
@@ -119,6 +195,12 @@ class _FakePage:
             return None
         if "article-count" in js:
             return self._article_count
+        if "gate-count" in js:
+            return dict(self._gate_by_url.get(
+                self.url, {"posts": 0, "comments": 0}))
+        if "diag-aria" in js:
+            return {"total": 0, "matched": 0, "btns": 0, "btnNums": 0,
+                    "samples": [], "parentBtns": []}
         if "feed-posts" in js:
             self.eval_calls += 1
             return [dict(p) for p in self._feed_posts]
@@ -471,3 +553,225 @@ class TestApi:
             "/stop", json={"jobId": "does-not-exist"}).status_code == 404
         assert client.get("/jobs/does-not-exist").status_code == 404
         assert client.get("/jobs").status_code == 200
+        # Collect + delete validation (the 202 collect path spawns a
+        # real browser thread, so only the 400/404 paths are tested
+        # here; the run itself is covered by TestCollectSources).
+        assert client.post("/collect-sources", json={}).status_code == 400
+        assert client.post(
+            "/collect-sources",
+            json={"keyword": "stocks", "type": "nope"}).status_code == 400
+        assert client.post("/sources/nope/delete").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# (j) Collect sources: comments gate + member gate + dedupe + join
+# ---------------------------------------------------------------------------
+
+SEARCH_GROUPS_URL = "https://www.facebook.com/search/groups?q=stocks"
+SEARCH_PAGES_URL = "https://www.facebook.com/search/pages?q=stocks"
+GOOD_GROUP = "https://www.facebook.com/groups/111"
+DEAD_GROUP = "https://www.facebook.com/groups/222"
+SMALL_GROUP = "https://www.facebook.com/groups/333"
+UNKNOWN_GROUP = "https://www.facebook.com/groups/444"
+ALREADY_GROUP = "https://www.facebook.com/groups/555"
+GOOD_PAGE = "https://www.facebook.com/stockpage"
+
+
+class TestCollectSources:
+    def _collect_job(self, keyword="stocks", type_="group", max_new=10,
+                     min_comments=3, min_members=100, account_id="acc1"):
+        job_id = db.create_job("collect", account_id=account_id)
+        job = db.get_job(job_id)
+        job.update({"keyword": keyword, "type": type_, "max_new": max_new,
+                    "min_comments": min_comments,
+                    "min_members": min_members})
+        return job
+
+    def test_good_joined_dead_small_and_already_skipped(self):
+        # Already joined by another account — must be skipped, and
+        # must NOT be duplicated.
+        db.upsert_source("src-old", "Already In", "group", ALREADY_GROUP,
+                         8000, "joined", "acc9")
+        anchors = [
+            _FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members"),
+            _FakeAnchor(DEAD_GROUP, "Dead Group", "5K members"),
+            _FakeAnchor(SMALL_GROUP, "Tiny Group", "50 members"),
+            _FakeAnchor(UNKNOWN_GROUP, "Mystery Group", None),
+            _FakeAnchor(ALREADY_GROUP, "Already In", "8K members"),
+        ]
+        gate = {
+            GOOD_GROUP: {"posts": 5, "comments": 40},
+            DEAD_GROUP: {"posts": 3, "comments": 1},
+            SMALL_GROUP: {"posts": 4, "comments": 30},
+            UNKNOWN_GROUP: {"posts": 2, "comments": 25},
+            ALREADY_GROUP: {"posts": 9, "comments": 99},
+        }
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors},
+            gate_by_url=gate,
+            join_urls={GOOD_GROUP, UNKNOWN_GROUP})
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 2
+        sources = (row.get("result") or {}).get("sources") or []
+        assert {s["url"] for s in sources} == {GOOD_GROUP, UNKNOWN_GROUP}
+        # Dead (1 comment < 3) and small (50 members < 100) never saved.
+        assert db.get_source_by_url(DEAD_GROUP) is None
+        assert db.get_source_by_url(SMALL_GROUP) is None
+        # Already-joined kept exactly once, under its original id.
+        assert db.get_source_by_url(ALREADY_GROUP)["id"] == "src-old"
+        # Unknown member count did NOT block the run: the group was
+        # read once, no count found, and it proceeded on the gate.
+        assert db.get_source_by_url(UNKNOWN_GROUP) is not None
+        assert db.get_source_by_url(GOOD_GROUP)["member_count"] == 12000
+
+    def test_join_failure_means_not_saved(self):
+        anchors = [_FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members")]
+        gate = {GOOD_GROUP: {"posts": 5, "comments": 40}}
+        # No Join button on this fake page (join_urls empty) — the
+        # group must NOT be saved.
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors}, gate_by_url=gate)
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 0
+        assert db.get_source_by_url(GOOD_GROUP) is None
+
+    def test_max_new_caps_the_run(self):
+        anchors = [
+            _FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members"),
+            _FakeAnchor(UNKNOWN_GROUP, "Mystery Group", None),
+        ]
+        gate = {
+            GOOD_GROUP: {"posts": 5, "comments": 40},
+            UNKNOWN_GROUP: {"posts": 2, "comments": 25},
+        }
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors},
+            gate_by_url=gate,
+            join_urls={GOOD_GROUP, UNKNOWN_GROUP})
+        job = self._collect_job(max_new=1)
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["new_posts"] == 1
+        assert len((row.get("result") or {}).get("sources") or []) == 1
+
+    def test_page_is_recorded_not_joined(self):
+        anchors = [_FakeAnchor(GOOD_PAGE, "Stock Page", "9K followers")]
+        gate = {GOOD_PAGE: {"posts": 6, "comments": 55}}
+        page = _FakePage(
+            anchors_by_url={SEARCH_PAGES_URL: anchors}, gate_by_url=gate)
+        job = self._collect_job(type_="page")
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 1
+        saved = db.get_source_by_url(GOOD_PAGE)
+        assert saved is not None
+        assert saved["type"] == "page"
+        assert saved["member_count"] == 9000
+
+    def test_no_keyword_fails_the_job(self):
+        page = _FakePage()
+        job = self._collect_job(keyword="")
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["status"] == "failed"
+        assert "keyword" in (row["error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# (k) Delete source: leave-then-remove; leave failure keeps the row
+# ---------------------------------------------------------------------------
+
+class TestDeleteSource:
+    def _seed_source_with_post(self):
+        db.upsert_source("src1", "Stocks To Watch", "group", GROUP_URL,
+                         12000, "joined", "acc1")
+        db.save_post({
+            "source_id": "src1", "account_id": "acc1",
+            "post_url": POST_URLS[0], "author_name": "Poster",
+            "author_url": "https://www.facebook.com/poster",
+            "text": "post text", "collected_at": NOW.isoformat(),
+            "comments": [{
+                "author_name": "Amit",
+                "author_url": "https://www.facebook.com/amit",
+                "text": "nice", "posted_at": None,
+                "posted_at_label": "5d",
+                "replies": [{
+                    "author_name": "Sana",
+                    "author_url": "https://www.facebook.com/sana",
+                    "text": "agreed", "posted_at": None,
+                    "posted_at_label": "5d", "replies": []}]}]})
+
+    def test_leave_success_removes_source_and_posts(self):
+        self._seed_source_with_post()
+        page = _FakePage(leave_flow={
+            "url": GROUP_URL,
+            "joined_body": "Stocks To Watch Joined 12K members",
+            "left_body": "Stocks To Watch Join group 12K members"})
+        result = jobs.delete_source(FacebookWorker(), page, db, "src1")
+        assert result == {"ok": True, "left": True,
+                          "detail": "Left the group and removed it "
+                                    "from the list."}
+        assert db.get_source_by_id("src1") is None
+        assert db.get_posts_for_source("src1") == []
+        assert db.get_post_by_url(POST_URLS[0]) is None
+
+    def test_leave_failure_keeps_row_and_posts(self):
+        self._seed_source_with_post()
+        # Plain fake page: no Joined button anywhere, so the leave
+        # cannot happen — the row must stay for a retry.
+        page = _FakePage()
+        result = jobs.delete_source(FacebookWorker(), page, db, "src1")
+        assert result["ok"] is False
+        assert result["left"] is False
+        assert "still in the list" in result["detail"]
+        assert db.get_source_by_id("src1") is not None
+        assert db.get_post_by_url(POST_URLS[0]) is not None
+
+    def test_delete_unknown_source(self):
+        page = _FakePage()
+        result = jobs.delete_source(FacebookWorker(), page, db, "nope")
+        assert result["ok"] is False
+        assert result["detail"] == "Source not found."
+
+
+# ---------------------------------------------------------------------------
+# (l) Source DB helpers
+# ---------------------------------------------------------------------------
+
+class TestSourceDb:
+    def test_get_source_by_url_and_delete_cascade(self):
+        db.upsert_source("src1", "Stocks To Watch", "group", GROUP_URL,
+                         12000, "joined", "acc1")
+        assert db.get_source_by_url(GROUP_URL)["id"] == "src1"
+        assert db.get_source_by_url("https://www.facebook.com/groups/999") is None
+        db.save_post({
+            "source_id": "src1", "account_id": "acc1",
+            "post_url": POST_URLS[0], "author_name": "Poster",
+            "author_url": "https://www.facebook.com/poster",
+            "text": "post text", "collected_at": NOW.isoformat(),
+            "comments": [{
+                "author_name": "Amit",
+                "author_url": "https://www.facebook.com/amit",
+                "text": "nice", "posted_at": None,
+                "posted_at_label": "5d",
+                "replies": [{
+                    "author_name": "Sana",
+                    "author_url": "https://www.facebook.com/sana",
+                    "text": "agreed", "posted_at": None,
+                    "posted_at_label": "5d", "replies": []}]}]})
+        assert db.delete_source("src1") is True
+        assert db.get_source_by_id("src1") is None
+        assert db.get_post_by_url(POST_URLS[0]) is None
+        assert db.delete_source("src1") is False

@@ -96,6 +96,10 @@ def _job_view(row: dict) -> dict:
         # imported, and `message` says plainly what is missing.
         "verification": row.get("verification") or [],
         "message": row.get("message"),
+        # Collect jobs store their joined sources here:
+        # {"sources": [{id, name, type, url, memberCount,
+        #               joinedByAccountId}]}.
+        "result": row.get("result"),
     }
 
 
@@ -148,6 +152,9 @@ def _run_job_thread(job_id, kind, payload):
         note = lambda msg: print(f"[leadhunter] {msg}", flush=True)  # noqa: E731
         if kind == "scrape":
             jobs.run_scrape(worker, page, db, job, should_stop, note=note)
+        elif kind == "collect":
+            jobs.run_collect_sources(worker, page, db, job, should_stop,
+                                     note=note)
         else:
             jobs.run_sync(worker, page, db, job, should_stop, note=note)
     except Exception as exc:  # noqa: BLE001 - job failure, not a crash
@@ -236,6 +243,92 @@ async def scrape(request: Request):
             status_code=409,
             content={"detail": "another job is already running"})
     return JSONResponse(status_code=202, content={"jobId": job_id})
+
+
+@app.post("/collect-sources")
+async def collect_sources(request: Request):
+    """Keyword search + collect (same rules as client-hunting).
+
+    Body: {keyword, type ("group" | "page" | "both"), maxNew,
+    accountId, minComments, minMembers}. Searches Facebook for
+    matching groups/pages, applies the comments gate (default 3)
+    and the member gate (default 100), joins the good groups and
+    returns them on the finished job's ``result.sources``. One job
+    at a time — 409 while another job runs. No URL input anywhere:
+    the keyword is the search, exactly like the Add Source dialog.
+    """
+    body = await request.json() if request.headers.get("content-length") else {}
+    if not isinstance(body, dict):
+        body = {}
+    keyword = (body.get("keyword") or "").strip()
+    if not keyword:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "keyword is required"})
+    type_ = (body.get("type") or "group").strip().lower()
+    if type_ not in ("group", "page", "both"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "type must be group, page or both"})
+    try:
+        max_new = int(body.get("maxNew") or 10)
+    except (TypeError, ValueError):
+        max_new = 10
+    max_new = max(1, min(max_new, 50))
+    try:
+        min_comments = int(body.get("minComments") or 3)
+    except (TypeError, ValueError):
+        min_comments = 3
+    try:
+        min_members = int(body.get("minMembers") or 100)
+    except (TypeError, ValueError):
+        min_members = 100
+    job_id, busy = _start_job(
+        "collect",
+        {
+            "keyword": keyword,
+            "type": type_,
+            "max_new": max_new,
+            "min_comments": min_comments,
+            "min_members": min_members,
+        },
+        {
+            "account_id": body.get("accountId"),
+        },
+    )
+    if busy:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "another job is already running"})
+    return JSONResponse(status_code=202, content={"jobId": job_id})
+
+
+@app.post("/sources/{source_id}/delete")
+async def delete_source_endpoint(source_id: str):
+    """Leave the group / unfollow the page on Facebook, then remove
+    the source (and its posts) from the agent DB. The row is removed
+    ONLY when the Facebook action succeeded — on failure the row
+    stays and the response says so (same rule as client-hunting).
+    Synchronous; refuses with 409 while a job is running, since the
+    job owns the browser page.
+    """
+    source = db.get_source_by_id(source_id)
+    if source is None:
+        return JSONResponse(status_code=404, content={"detail": "unknown source"})
+    with _lock:
+        if _running_job_id is not None:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "another job is already running"})
+    try:
+        page = _get_page()
+        worker = FacebookWorker()
+        result = jobs.delete_source(worker, page, db, source_id)
+    except Exception as exc:  # noqa: BLE001 - report, do not crash
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+    if not result.get("ok"):
+        return JSONResponse(status_code=502, content=result)
+    return result
 
 
 @app.post("/sync")

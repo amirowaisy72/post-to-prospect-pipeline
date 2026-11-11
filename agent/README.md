@@ -35,9 +35,11 @@ window and run the job again.
 
 | Frontend button | Agent endpoint | What happens |
 |---|---|---|
+| **Add Source** (Data Sourcing) | `POST /collect-sources` | Searches Facebook for groups/pages matching the **keyword** (the dialog's Name field), applies the **comments gate** (a source whose posts carry fewer than `minComments`, default 3, is dead — never saved, never counts toward the target) and the **member gate** (known member count below `minMembers`, default 100, is skipped; a count that cannot be read never blocks a run), **joins** the good groups (pages are recorded, not joined), and saves them as sources. The joined sources come back on the finished job's `result.sources`. One search pass per run — press Add Source again for more. |
 | **Scrap** (per source) | `POST /scrape` | Collects **new posts only** from the source feed (already-known post URLs are skipped), then extracts each post fully — every comment and reply — and saves it to `leadhunter.db`. |
 | **Sync** (per source / per post) | `POST /sync` | Re-opens each known post (all of a source, or one post) and **merges** new comments/replies into the stored post; nothing already saved is duplicated. Updates `lastSyncedAt`. |
 | **Stop** | `POST /stop` | The current post is always finished and saved first; the job then ends with status `stopped` and the next post is never started. |
+| **Delete** (per source) | `POST /sources/{id}/delete` | **Leaves** the group (or unfollows the page) on Facebook **first**, then removes the source — and its collected posts — from `leadhunter.db`. If the leave fails, the row is **not** removed and the response says so (try Delete again). Refuses with `409` while a job is running. |
 
 One job runs at a time — starting a second returns `409`.
 
@@ -88,6 +90,14 @@ kept in `postedAtLabel` next to the computed `postedAt`.
 
 - `GET /health` → `{"ok": true, "service": "leadhunter-agent",
   "version": "0.1.0", "facebook": "unknown"}`
+- `POST /collect-sources` `{"keyword", "type": "group"|"page"|"both",
+  "maxNew"?, "accountId"?, "minComments"?, "minMembers"?}` → `202 {"jobId"}`
+  (`400` when `keyword` is missing/empty or `type` is invalid). The
+  finished job's `result` is `{"sources": [{id, name, type, url,
+  memberCount, joinedByAccountId}]}`.
+- `POST /sources/{id}/delete` → `{"ok": true, "left": true, "detail": ...}`
+  (`404` unknown source, `409` a job is running, `502` the leave failed
+  and the row was kept)
 - `POST /scrape` `{"sourceId", "sourceUrl", "sourceName"?, "accountId",
   "limit"?}` → `202 {"jobId"}` (`400` when `sourceUrl` is missing/invalid)
 - `POST /sync` `{"sourceId"? | "postId"?, "sourceUrl"?, "postUrl"?,
@@ -98,10 +108,10 @@ kept in `postedAtLabel` next to the computed `postedAt`.
 - `GET /jobs` → `{"jobs": [...]}`
 - `GET /jobs/{jobId}` → `{"job": {...}, "posts": [...]}` (`404` unknown job)
 
-Job object: `{"id", "kind": "scrape"|"sync", "sourceId", "postId",
+Job object: `{"id", "kind": "scrape"|"sync"|"collect", "sourceId", "postId",
 "accountId", "status": "running"|"stop-requested"|"done"|"incomplete"|
 "stopped"|"failed", "postsProcessed", "newPosts", "startedAt",
-"finishedAt", "error", "verification": [...], "message"}`.
+"finishedAt", "error", "verification": [...], "message", "result"}`.
 
 Posts use the frontend `PostData` shape, plus timestamps:
 `{"id", "sourceId", "accountId", "postUrl", "author": {"name", "url"},
@@ -113,8 +123,12 @@ Posts use the frontend `PostData` shape, plus timestamps:
 
 - `main.py` — FastAPI app (lazy Playwright launch, one job at a time)
 - `facebook.py` — FacebookWorker (session check, feed collection,
-  exhaustive dialog extraction; no Playwright import at module top)
-- `jobs.py` — scrape/sync runners, comment merge, count verification
+  exhaustive dialog extraction; keyword search, comments gate,
+  join/leave — ported from the tested client-hunting finder, see the
+  "Ported from client-hunting" section at the top of the search code;
+  no Playwright import at module top)
+- `jobs.py` — scrape/sync/collect runners, comment merge, count
+  verification, source delete (leave-then-remove)
 - `db.py` — SQLite storage (`leadhunter.db`, stdlib only)
 - `timestamps.py` — exact-description + label-fallback timestamp parsing
 - `tests/test_agent.py` — pytest suite (fake page, no network/browser)

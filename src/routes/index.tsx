@@ -27,6 +27,8 @@ export const Route = createFileRoute("/")({
 const ACTIVITY_ICON: Record<ActivityType, typeof Users> = {
   "account-created": UserPlus,
   "source-added": Database,
+  "source-collected": Database,
+  "source-deleted": X,
   "source-joined": Database,
   "post-collected": FileText,
   "analysis-finished": BrainCircuit,
@@ -84,7 +86,14 @@ function Dashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {state.accounts.map((a) => {
+                {state.accounts.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="pl-6 py-6 text-sm text-muted-foreground">
+                      No accounts yet — <Link to="/accounts" className="font-medium text-primary hover:underline">create your first account</Link>, then add sources.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  state.accounts.map((a) => {
                   const s = accountStats(state, a.id);
                   return (
                     <TableRow key={a.id}>
@@ -108,7 +117,8 @@ function Dashboard() {
                       <TableCell className="pr-6 text-right tabular font-semibold">{s.shortlisted}</TableCell>
                     </TableRow>
                   );
-                })}
+                  })
+                )}
               </TableBody>
             </Table>
           </CardContent>
@@ -119,7 +129,10 @@ function Dashboard() {
             <CardTitle className="text-base">Recent activity</CardTitle>
           </CardHeader>
           <CardContent>
-            <ol className="relative space-y-4 border-l pl-5">
+            {state.activity.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Nothing yet — activity appears here as you work.</p>
+            ) : (
+              <ol className="relative space-y-4 border-l pl-5">
               {state.activity.slice(0, 8).map((e) => {
                 const Icon = ACTIVITY_ICON[e.type];
                 return (
@@ -134,7 +147,8 @@ function Dashboard() {
                   </li>
                 );
               })}
-            </ol>
+              </ol>
+            )}
           </CardContent>
         </Card>
       </div>

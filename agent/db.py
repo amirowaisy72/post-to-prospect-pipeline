@@ -33,6 +33,8 @@ __all__ = [
     "update_job",
     "get_job",
     "list_jobs",
+    "get_source_by_url",
+    "delete_source",
 ]
 
 _DEFAULT_PATH = Path(__file__).resolve().parent / "leadhunter.db"
@@ -100,7 +102,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at TEXT,
     error TEXT,
     verification TEXT NOT NULL DEFAULT '[]',
-    message TEXT
+    message TEXT,
+    result TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments (post_id);
 CREATE INDEX IF NOT EXISTS idx_replies_comment_id ON replies (comment_id);
@@ -132,18 +135,31 @@ def init_db(path=None) -> Path:
                 "NOT NULL DEFAULT '[]'")
         if "message" not in cols:
             conn.execute("ALTER TABLE jobs ADD COLUMN message TEXT")
+        if "result" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN result TEXT")
     return _DB_PATH
 
 
 def _decode_verification(row: dict) -> dict:
-    """Parse the stored verification JSON back into a list."""
+    """Parse the stored verification/result JSON back into lists/dicts."""
     raw = row.get("verification")
     if isinstance(raw, list):
-        return row
-    try:
-        row["verification"] = json.loads(raw) if raw else []
-    except Exception:
-        row["verification"] = []
+        pass
+    else:
+        try:
+            row["verification"] = json.loads(raw) if raw else []
+        except Exception:
+            row["verification"] = []
+    raw = row.get("result")
+    if raw is None:
+        row["result"] = None
+    elif isinstance(raw, (list, dict)):
+        pass
+    else:
+        try:
+            row["result"] = json.loads(raw) if raw else None
+        except Exception:
+            row["result"] = None
     return row
 
 
@@ -178,6 +194,41 @@ def get_source_by_id(source_id):
         row = conn.execute(
             "SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
     return dict(row) if row else None
+
+
+def get_source_by_url(url):
+    """One source row by its Facebook URL, or None. Used by the
+    collect-sources job to skip a group/page this account (or any
+    account) already joined."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM sources WHERE url = ?", (url,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_source(source_id):
+    """Delete a source row AND its posts (comments/replies cascade by
+    explicit delete: replies of the source's posts, then comments,
+    then posts, then the source itself). Returns True when a row was
+    removed, False when the id did not exist."""
+    with _connect() as conn:
+        post_rows = conn.execute(
+            "SELECT id FROM posts WHERE source_id = ?",
+            (source_id,)).fetchall()
+        post_ids = [r["id"] for r in post_rows]
+        for post_id in post_ids:
+            comment_rows = conn.execute(
+                "SELECT id FROM comments WHERE post_id = ?",
+                (post_id,)).fetchall()
+            for comment_row in comment_rows:
+                conn.execute("DELETE FROM replies WHERE comment_id = ?",
+                             (comment_row["id"],))
+            conn.execute("DELETE FROM comments WHERE post_id = ?",
+                         (post_id,))
+        conn.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
+        cur = conn.execute("DELETE FROM sources WHERE id = ?",
+                           (source_id,))
+        return cur.rowcount > 0
 
 
 # ----------------------------------------------------------------------
@@ -326,16 +377,19 @@ def create_job(kind, source_id=None, post_id=None, account_id="",
 
 def update_job(job_id, **fields):
     """Update job columns. Allowed keys: status, posts_processed,
-    new_posts, finished_at, error, verification, message. Unknown keys
-    are ignored. ``verification`` may be passed as a list (stored as
-    JSON) or as a JSON string."""
+    new_posts, finished_at, error, verification, message, result.
+    Unknown keys are ignored. ``verification`` may be passed as a list
+    (stored as JSON) or as a JSON string; ``result`` the same (dict or
+    list, stored as JSON)."""
     allowed = {"status", "posts_processed", "new_posts", "finished_at",
-               "error", "verification", "message"}
+               "error", "verification", "message", "result"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
     if isinstance(updates.get("verification"), (list, dict)):
         updates["verification"] = json.dumps(updates["verification"])
+    if isinstance(updates.get("result"), (list, dict)):
+        updates["result"] = json.dumps(updates["result"])
     assignments = ", ".join(f"{k}=?" for k in updates)
     with _connect() as conn:
         conn.execute(

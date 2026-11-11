@@ -5,17 +5,24 @@ REM serves the agent at http://127.0.0.1:8001 for the LeadHunter frontend.
 setlocal
 cd /d "%~dp0"
 
+REM Python 3.14 on some PCs is only reachable via the `py` launcher
+REM (`python` is not on PATH). Prefer `python`, fall back to `py`.
+set "PY=python"
 where python >nul 2>nul
 if errorlevel 1 (
-  echo [leadhunter] Python was not found. Install Python 3.14 from
-  echo [leadhunter] https://www.python.org/downloads/ (tick "Add python to PATH"),
-  echo [leadhunter] then run this file again.
-  pause
-  exit /b 1
+  set "PY=py"
+  where py >nul 2>nul
+  if errorlevel 1 (
+    echo [leadhunter] Python was not found. Install Python 3.14 from
+    echo [leadhunter] https://www.python.org/downloads/ (tick "Add python to PATH"),
+    echo [leadhunter] then run this file again.
+    pause
+    exit /b 1
+  )
 )
 
 echo [leadhunter] Installing dependencies...
-python -m pip install -r requirements.txt
+%PY% -m pip install -r requirements.txt
 if errorlevel 1 (
   echo [leadhunter] pip install failed — check your connection and try again.
   pause
@@ -23,7 +30,7 @@ if errorlevel 1 (
 )
 
 echo [leadhunter] Installing Chromium for Playwright (first run only)...
-python -m playwright install chromium
+%PY% -m playwright install chromium
 if errorlevel 1 (
   echo [leadhunter] Playwright Chromium install failed — try again.
   pause
@@ -38,5 +45,5 @@ echo [leadhunter] The session stays saved in agent\.chrome-profile, and the
 echo [leadhunter] agent never asks for or stores your Facebook password.
 echo [leadhunter] Keep this window open while LeadHunter is scraping.
 echo.
-python -m uvicorn main:app --host 127.0.0.1 --port 8001
+%PY% -m uvicorn main:app --host 127.0.0.1 --port 8001
 pause

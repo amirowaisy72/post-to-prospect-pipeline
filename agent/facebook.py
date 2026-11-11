@@ -52,8 +52,10 @@ signs in to Facebook once in that window.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, quote, urlparse
 
 if TYPE_CHECKING:  # typing only — no Playwright import at runtime top-level
     from playwright.sync_api import Page
@@ -447,6 +449,271 @@ _DIALOG_SCROLL_JS = r"""() => {
  dlg.scrollTop = dlg.scrollTop + dlg.clientHeight;
  return true;
 }"""
+
+
+# ----------------------------------------------------------------------
+# Ported from ~/workspace/client-hunting/app/facebook.py (the tested
+# sources finder). These helpers + methods are VERBATIM copies of the
+# proven code — do not "improve" them without a live reason. They
+# power keyword search, the comments gate, join/leave and the member
+# count used by the collect-sources job (see jobs.py).
+# ----------------------------------------------------------------------
+
+# URL path segments that are never a person/page profile.
+_NAV_PATHS = {
+    "search", "groups", "pages", "events", "marketplace", "watch",
+    "login", "settings", "notifications", "messages", "friends",
+    "photos", "videos", "reels", "reel", "video", "photo", "story",
+    "gaming", "fundraisers", "saved",
+    "bookmarks", "home", "privacy", "help", "about", "ads", "business",
+    "developers", "policies", "dialog", "plugins", "sharer", "tr",
+    "campaign", "boost", "live", "stories", "groups_feed", "profile.php",
+    # Facebook internal product pages — these appear as links in group
+    # and page chrome (e.g. "Creator Dashboard" in a group header) and
+    # must NEVER become a lead. A real person is never named after one
+    # of these; a false lead here destroys trust in Step 1 quality.
+    "professional_dashboard", "professional", "creator_studio",
+    "monetization", "creator", "creators", "insights",
+    "publishing_tools", "ads_manager", "business_suite",
+    "meta_business_suite", "commerce_manager", "creator_support",
+    "support_inbox", "activity_log", "memories", "feeds", "explore",
+    "discover", "jobs", "offers", "services", "notes", "weather",
+    "birthdays", "subscriptions", "payments", "orders", "apps",
+    "games", "instant_games", "shows", "places", "local", "community",
+    "support", "directory", "nearby", "meta", "ai",
+}
+
+_FILE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp|svg|html|htm|php|pdf|mp4|css|js|json|ico)(\?|#|$)", re.I)
+
+
+def _clean_text(text: str, limit: int = 200) -> str:
+    """Collapse whitespace and truncate a snippet for logging."""
+    return re.sub(r"\s+", " ", text or "").strip()[:limit]
+
+
+# ----------------------------------------------------------------------
+# Member counts
+# ----------------------------------------------------------------------
+
+_MEMBER_COUNT_RE = re.compile(
+    r"(\d[\d,]*\.?\d*)\s*([KMkm]?)\s*(members?|followers?)", re.I)
+
+
+def _parse_member_count(text: str) -> int | None:
+    """Parse a member/follower count from nearby text, or None.
+
+    Handles "12K members" (12000), "1,234 members" (1234),
+    "5.2K followers" (5200), "10k followers" (10000) and
+    "1.2M members" (1200000). Returns None when no count pattern
+    matches — a missing count must never block a run.
+    """
+    if not text:
+        return None
+    try:
+        m = _MEMBER_COUNT_RE.search(str(text))
+        if not m:
+            return None
+        num = float(m.group(1).replace(",", ""))
+        suffix = (m.group(2) or "").upper()
+        if suffix == "K":
+            num *= 1_000
+        elif suffix == "M":
+            num *= 1_000_000
+        return int(num)
+    except Exception:
+        return None
+
+
+def _clean_title(title: str) -> str:
+    """Strip a trailing ' | Facebook' suffix from a page title."""
+    title = _clean_text(title or "", 120)
+    title = re.sub(r"\s*\|\s*Facebook\s*$", "", title, flags=re.I).strip()
+    return title
+
+
+# JS: walk an anchor's ancestors (bounded) to the nearest container
+# whose text is longer than the link text. Prefers a [role="article"]
+# or comment-like container; falls back to the first longer ancestor.
+_COMMENT_JS = (
+    "(el) => {"
+    " if (!el) return '';"
+    " const linkText = (el.innerText || '').trim();"
+    " let node = el.parentElement; let fallback = '';"
+    " for (let i = 0; i < 10 && node; i++) {"
+    "   const t = (node.innerText || '').trim();"
+    "   if (t && t.length > linkText.length + 10) {"
+    "     if (!fallback) fallback = t;"
+    "     const role = node.getAttribute ? node.getAttribute('role') : null;"
+    "     const html = (node.outerHTML || '').slice(0, 2000);"
+    "     if (role === 'article' || /comment/i.test(html)) return t.slice(0, 500);"
+    "   }"
+    "   node = node.parentElement;"
+    " }"
+    " return fallback.slice(0, 500);"
+    "}"
+)
+
+# JS: same ancestor walk, but any longer container counts (used for the
+# member/follower count printed near a group/page result card).
+_NEARBY_JS = (
+    "(el) => {"
+    " if (!el) return '';"
+    " const linkText = (el.innerText || '').trim();"
+    " let node = el.parentElement;"
+    " for (let i = 0; i < 10 && node; i++) {"
+    "   const t = (node.innerText || '').trim();"
+    "   if (t && t.length > linkText.length + 10) return t.slice(0, 1000);"
+    "   node = node.parentElement;"
+    " }"
+    " return '';"
+    "}"
+)
+
+# JS: count posts + comments straight from the Comment buttons'
+# aria-labels ("Comment on X's post, 223 comments"). One button = one
+# post, the sum = the total. In the group feed the posts are NOT
+# div[role="article"] (those are the comments themselves), so article
+# iteration finds no posts at all — the button count IS the post
+# count. Test doubles return their canned data when they see
+# "gate-count".
+_GATE_COUNT_JS = (
+    "() => {"
+    " /* gate-count */"
+    " const RE = /(\\d[\\d.,]*\\s*[KM]?)\\s+comments?\\b/i;"
+    " const toNum = s => {"
+    "   const m = /(\\d[\\d.,]*)\\s*([KM])?/i.exec(s || '');"
+    "   if (!m) return 0;"
+    "   if (m[2]) return Math.round(parseFloat(m[1].replace(/,/g, '')) * (m[2].toUpperCase() === 'K' ? 1e3 : 1e6));"
+    "   return parseInt(m[1].replace(/[.,]/g, ''), 10);"
+    " };"
+    " let posts = 0, total = 0; const seen = new Set();"
+    " for (const el of document.querySelectorAll('[aria-label]')) {"
+    "   const lab = el.getAttribute('aria-label') || '';"
+    "   const m = RE.exec(lab);"
+    "   if (m && !seen.has(el)) { seen.add(el); posts++; total += toNum(m[1]); }"
+    " }"
+    " return {posts: posts, comments: total};"
+    "}"
+)
+
+# JS: diagnostic for the comment-count check — how many [aria-label]
+# elements exist inside feed articles, how many carry a comment total
+# ("142 comments"), and how many look like the Comment action button
+# (label contains "comment" but is not a "view more" link) with a
+# number in their visible text. This tells us, on a live run, which
+# signal the count parsing can actually see. Test doubles return None
+# for unknown JS, so the diagnostic is zeros there.
+_DIAG_ARIA_JS = (
+    "() => {"
+    " /* diag-aria */"
+    " let total = 0, matched = 0, btns = 0, btnNums = 0; const samples = [];"
+    " const articles = document.querySelectorAll('div[role=\"article\"]');"
+    " for (const art of articles) {"
+    "   const labelled = art.querySelectorAll('[aria-label]');"
+    "   for (const el of labelled) {"
+    "     total++;"
+    "     const lab = (el.getAttribute('aria-label') || '').trim();"
+    "     if (/([\\d,]+)\\s+comments?/i.test(lab)) {"
+    "       matched++;"
+    "       if (samples.length < 3) samples.push(lab.slice(0, 80));"
+    "     }"
+    "     if (/comment/i.test(lab) && !/view more/i.test(lab) && !/view previous/i.test(lab) && !/replies/i.test(lab)) {"
+    "       btns++;"
+    "       const t = (el.innerText || '').trim();"
+    "       if (/[\\d,]+/.test(t)) { btnNums++; if (samples.length < 3) samples.push('btn:' + t.slice(0, 40)); }"
+    "     }"
+    "   }"
+    " }"
+    " const parentBtns = [];"
+    " const first = articles[0];"
+    " if (first && first.parentElement) {"
+    "   const pbtns = first.parentElement.querySelectorAll('[role=\"button\"]');"
+    "   for (const b of pbtns) {"
+    "     if (parentBtns.length >= 8) break;"
+    "     parentBtns.push(((b.getAttribute('aria-label') || '') + ' | ' + (b.textContent || '').trim()).slice(0, 80));"
+    "   }"
+    " }"
+    " return {total: total, matched: matched, btns: btns, btnNums: btnNums, samples: samples, parentBtns: parentBtns};"
+    "}"
+)
+
+
+def _comment_text_for(page, anchor) -> str:
+    """Comment text the anchor belongs to, or "".
+
+    Test doubles can supply it directly via a ``comment_text``
+    attribute on the anchor; otherwise the ancestor walk above runs
+    through ``page.evaluate``. Never raises.
+    """
+    try:
+        supplied = getattr(anchor, "comment_text", None)
+        if isinstance(supplied, str) and supplied.strip():
+            return _clean_text(supplied, 500)
+    except Exception:
+        pass
+    try:
+        text = page.evaluate(_COMMENT_JS, anchor)
+    except Exception:
+        return ""
+    try:
+        return _clean_text(text or "", 500)
+    except Exception:
+        return ""
+
+
+def _nearby_text_for(page, anchor) -> str:
+    """Text of the nearest ancestor container holding the anchor.
+
+    Test doubles can supply it via a ``nearby_text`` (or
+    ``member_count_text``) attribute; otherwise the ancestor walk
+    above runs through ``page.evaluate``. Never raises.
+    """
+    try:
+        for attr in ("member_count_text", "nearby_text"):
+            supplied = getattr(anchor, attr, None)
+            if isinstance(supplied, str) and supplied.strip():
+                return _clean_text(supplied, 1000)
+    except Exception:
+        pass
+    try:
+        text = page.evaluate(_NEARBY_JS, anchor)
+    except Exception:
+        return ""
+    try:
+        return _clean_text(text or "", 1000)
+    except Exception:
+        return ""
+
+
+def _found_via_for_label(label: str) -> str:
+    """found_via for a _collect_from_links label.
+
+    "comment" when the label is a comments source (group_comments /
+    page_comments); "search" for search results and friend lists
+    (both are search-style discovery, not a comment).
+    """
+    label = (label or "").lower()
+    if "comment" in label:
+        return "comment"
+    return "search"
+
+
+def _activity(ctx: dict | None, kind: str, msg: str) -> None:
+    try:
+        fn = (ctx or {}).get("activity")
+        if callable(fn):
+            fn(kind, msg)
+    except Exception:
+        pass
+
+
+def _blocked(ctx: dict | None, reason: str) -> None:
+    try:
+        fn = (ctx or {}).get("blocked")
+        if callable(fn):
+            fn(reason)
+    except Exception:
+        pass
 
 
 def _should_stop(ctx: dict | None) -> bool:
@@ -894,3 +1161,865 @@ class FacebookWorker:
         if data.get("comment_total") is None and state.get("total") is not None:
             data["comment_total"] = state.get("total")
         return data
+
+    # ------------------------------------------------------------------
+    # Ported from client-hunting: block detection, page state, search,
+    # comments gate, join / leave. Verbatim copies of the tested code.
+    # ------------------------------------------------------------------
+    def detect_block(self, page: Page) -> str | None:
+        """Return the matched block marker, or None when no block is seen."""
+        try:
+            url = (page.url or "").lower()
+            if "/checkpoint" in url or "checkpoint" in url:
+                return "checkpoint"
+            try:
+                body = page.inner_text("body")[:6000].lower()
+            except Exception:
+                body = ""
+            for marker in BLOCK_MARKERS:
+                if marker in body:
+                    return marker
+            return None
+        except Exception:
+            return None
+
+    def _page_state(self, page: Page) -> str:
+        """One-line page state for logs: url/title/body_len/body snippet
+        plus login_form / checkpoint / link count, so an empty page can
+        be told apart from a login wall or a page that never rendered."""
+        try:
+            url = page.url or ""
+        except Exception:
+            url = "?"
+        try:
+            title = page.title() or ""
+        except Exception:
+            title = ""
+        try:
+            body = page.inner_text("body") or ""
+        except Exception:
+            body = ""
+        try:
+            login_form = page.locator('input[type="password"]').count() > 0
+        except Exception:
+            login_form = False
+        try:
+            links = len(page.query_selector_all("a[href]"))
+        except Exception:
+            links = 0
+        checkpoint = "checkpoint" in (url + " " + body).lower()
+        return (
+            f"url={url} title={_clean_text(title, 120)} "
+            f"body_len={len(body)} body='{_clean_text(body, 200)}' "
+            f"login_form={int(login_form)} checkpoint={int(checkpoint)} "
+            f"links={links}"
+        )
+
+    def _check_block(self, page: Page, ctx: dict | None) -> str | None:
+        """Detect a block, report it via ctx, and return the marker."""
+        marker = self.detect_block(page)
+        if marker:
+            _blocked(ctx, f"Facebook block/warning: {marker} | {self._page_state(page)}")
+            _activity(ctx, "blocked", f"Facebook block: {marker}")
+        return marker
+
+    def _click_first_visible(self, page: Page, selectors) -> bool:
+        """Click the first visible locator among the selectors.
+
+        Normal click first (the element is scrolled into view).
+        If every normal click fails — e.g. an invisible overlay
+        swallows the event, which Facebook's React can do while
+        Playwright still reports the click as done — retry with
+        force=True, which bypasses the actionability checks.
+        Returns True when a click happened. Never raises.
+        """
+        for force in (False, True):
+            for selector in selectors:
+                try:
+                    loc = page.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        if not force:
+                            try:
+                                loc.scroll_into_view_if_needed(timeout=3000)
+                            except Exception:
+                                pass
+                        loc.click(timeout=5000, force=force)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _wait_for_visible(self, page: Page, selectors,
+                          timeout_ms: int = 5000) -> bool:
+        """Poll until any of the selectors is visible (or the bound
+        expires). Waiting for the TEXT to exist is not enough —
+        Facebook's React can leave the text in the DOM while the
+        menu is still half-rendered and not clickable yet. Never
+        raises."""
+        polls = max(1, int(timeout_ms / 500))
+        for _ in range(polls):
+            for selector in selectors:
+                try:
+                    loc = page.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        return True
+                except Exception:
+                    continue
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+        return False
+
+    def _wait_for_text(self, page: Page, text: str,
+                       timeout_ms: int = 5000) -> bool:
+        """Poll until the body contains the text (or the bound expires)."""
+        polls = max(1, int(timeout_ms / 500))
+        for _ in range(polls):
+            try:
+                body = page.inner_text("body") or ""
+                if text.lower() in body.lower():
+                    return True
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+        return False
+
+    def _profile_url(self, href: str | None) -> str | None:
+        """Normalise an href to a canonical profile URL, or None.
+
+        ``profile.php?id=...`` is handled BEFORE stripping the query
+        string. Dotted usernames (john.smith) are allowed; file-like
+        slugs (.jpg/.html/.php) and nav paths are rejected.
+        """
+        if not href:
+            return None
+        href = href.strip()
+        if not href or href.startswith(("javascript:", "#", "mailto:")):
+            return None
+        try:
+            parsed = urlparse(href)
+        except Exception:
+            return None
+        if parsed.netloc and "facebook.com" not in parsed.netloc.lower():
+            return None
+        path = (parsed.path or "").rstrip("/")
+        if not path or path == "/":
+            return None
+        segments = [s for s in path.split("/") if s]
+        if not segments:
+            return None
+        first = segments[0].lower()
+        # profile.php?id=... — extract the id before dropping the query.
+        if first == "profile.php":
+            ids = parse_qs(parsed.query).get("id")
+            if ids and ids[0].isdigit():
+                return f"{self.base_url}/profile.php?id={ids[0]}"
+            return None
+        if first in _NAV_PATHS:
+            return None
+        if len(segments) > 2:
+            return None
+        # File-like slugs are not profiles (e.g. /photo.jpg, /page.html).
+        if _FILE_EXT_RE.search(path):
+            return None
+        # Username: letters/digits/dots/underscores, must contain a letter.
+        username = segments[0]
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", username):
+            return None
+        if not re.search(r"[A-Za-z]", username):
+            return None
+        return f"{self.base_url}/{username}"
+
+    def _group_url(self, href: str | None) -> str | None:
+        """Normalise an href to a group URL, or None."""
+        if not href:
+            return None
+        try:
+            parsed = urlparse(href.strip())
+        except Exception:
+            return None
+        if parsed.netloc and "facebook.com" not in parsed.netloc.lower():
+            return None
+        path = (parsed.path or "").rstrip("/")
+        m = re.fullmatch(r"/groups/([A-Za-z0-9._-]+)", path)
+        if not m:
+            return None
+        return f"{self.base_url}/groups/{m.group(1)}"
+
+    def _post_url(self, href: str | None) -> str | None:
+        """Normalise an href to a post/permalink URL, or None."""
+        if not href:
+            return None
+        href = href.strip()
+        try:
+            parsed = urlparse(href)
+        except Exception:
+            return None
+        if parsed.netloc and "facebook.com" not in parsed.netloc.lower():
+            return None
+        path = parsed.path or ""
+        if "/posts/" in path or "/permalink/" in path or "story_fbid" in parsed.query:
+            return href if href.startswith("http") else f"{self.base_url}{href}"
+        return None
+
+    def _anchors(self, page: Page) -> list:
+        """All <a href> elements currently on the page (never raises)."""
+        try:
+            return list(page.query_selector_all("a[href]"))
+        except Exception:
+            return []
+
+    def _links(self, page: Page) -> list[tuple[str, str]]:
+        """All (href, link text) pairs currently on the page."""
+        out: list[tuple[str, str]] = []
+        for a in self._anchors(page):
+            try:
+                href = a.get_attribute("href") or ""
+                text = _clean_text(a.inner_text() or "", 120)
+            except Exception:
+                continue
+            if href:
+                out.append((href, text))
+        return out
+
+    def _member_count_for(self, page: Page, anchor, name: str) -> int | None:
+        """Best-effort member/follower count for a group/page result.
+
+        (1) text near the result (anchor ancestor, via _nearby_text_for);
+        (2) fall back to searching the page body for "<name> ... N
+        members/followers" in a short window after the name. Never
+        raises; returns None when no count is exposed.
+        """
+        try:
+            nearby = _nearby_text_for(page, anchor)
+            if nearby:
+                count = _parse_member_count(nearby)
+                if count is not None:
+                    return count
+        except Exception:
+            pass
+        try:
+            body = page.inner_text("body") or ""
+            if name and body:
+                idx = body.lower().find(name.lower())
+                if idx >= 0:
+                    window = body[idx:idx + len(name) + 120]
+                    return _parse_member_count(window)
+        except Exception:
+            pass
+        return None
+
+    def _scroll_and_collect(self, page: Page, ctx: dict | None,
+                            rounds: int = 8, wait_ms: int = 2000) -> None:
+        """Scroll the page in steps so lazy-loaded content renders."""
+        for _ in range(rounds):
+            if _should_stop(ctx):
+                return
+            try:
+                page.evaluate("window.scrollBy(0, window.innerHeight)")
+            except Exception:
+                try:
+                    page.mouse.wheel(0, 800)
+                except Exception:
+                    pass
+            try:
+                page.wait_for_timeout(wait_ms)
+            except Exception:
+                time.sleep(wait_ms / 1000.0)
+
+    def _collect_from_links(self, page: Page, kind: str, label: str,
+                            source_url: str) -> list[dict]:
+        """Build candidate dicts from the links currently on the page.
+
+        When a profile URL is already seen, a later anchor with a
+        non-empty name UPDATES the stored (blank) name — the first
+        anchor for a profile is often its picture link, whose text is
+        empty, so keeping the first anchor kept every name blank.
+
+        Profile candidates also carry ``comment_text`` (the comment
+        that surfaced the person, "" otherwise) and ``found_via``
+        ("comment" for group/page comment sources, "search" otherwise;
+        group_members sets "member" itself). Group/page results carry
+        ``member_count`` (int or None — None when the page does not
+        expose a count; never blocks the run).
+        """
+        seen: dict[str, int] = {}
+        out: list[dict] = []
+        for anchor in self._anchors(page):
+            try:
+                href = anchor.get_attribute("href") or ""
+                text = _clean_text(anchor.inner_text() or "", 120)
+            except Exception:
+                continue
+            if not href:
+                continue
+            if kind == "profiles":
+                url = self._profile_url(href)
+                if not url:
+                    continue
+                found_via = _found_via_for_label(label)
+                comment_text = ""
+                if found_via == "comment":
+                    comment_text = _comment_text_for(page, anchor)
+                if url in seen:
+                    stored = out[seen[url]]
+                    if not stored.get("name") and text:
+                        stored["name"] = text
+                    if not stored.get("comment_text") and comment_text:
+                        stored["comment_text"] = comment_text
+                    continue
+                seen[url] = len(out)
+                out.append({
+                    "profile_url": url, "name": text or "",
+                    "source": label, "source_url": source_url,
+                    "source_detail": label,
+                    "comment_text": comment_text,
+                    "found_via": found_via,
+                })
+            elif kind == "groups":
+                url = self._group_url(href)
+                if not url:
+                    continue
+                if url in seen:
+                    stored = out[seen[url]]
+                    if not stored.get("name") and text:
+                        stored["name"] = text
+                    if stored.get("member_count") is None:
+                        count = self._member_count_for(page, anchor, text or stored.get("name") or "")
+                        if count is not None:
+                            stored["member_count"] = count
+                    continue
+                seen[url] = len(out)
+                out.append({"url": url, "name": text or "",
+                            "member_count": self._member_count_for(page, anchor, text)})
+            elif kind == "pages":
+                url = self._profile_url(href)
+                if not url:
+                    continue
+                if url in seen:
+                    stored = out[seen[url]]
+                    if not stored.get("name") and text:
+                        stored["name"] = text
+                    if stored.get("member_count") is None:
+                        count = self._member_count_for(page, anchor, text or stored.get("name") or "")
+                        if count is not None:
+                            stored["member_count"] = count
+                    continue
+                seen[url] = len(out)
+                out.append({"url": url, "name": text or "",
+                            "member_count": self._member_count_for(page, anchor, text)})
+            elif kind == "posts":
+                url = self._post_url(href)
+                if not url:
+                    continue
+                if url in seen:
+                    continue
+                seen[url] = len(out)
+                out.append({"url": url})
+        return out
+
+    def _search_via_ui(self, page: Page, keyword: str, tab: str,
+                       ctx: dict | None, kind: str = "profiles") -> list[dict]:
+        """Search using Facebook's own search box, then collect results.
+
+        home -> search box -> type keyword -> Enter -> click the tab
+        (People/Posts/Pages/Groups) -> collect from the results page.
+        Used when a direct search URL yields 0 links.
+        """
+        if _should_stop(ctx):
+            return []
+        label = f"ui_search:{tab}:{keyword}"
+        try:
+            if not self._load(page, self.home_url, ctx, "home"):
+                return []
+            box = None
+            for selector in (
+                'input[placeholder*="Search Facebook"]',
+                'input[aria-label="Search Facebook"]',
+                'input[type="search"]',
+                'input[placeholder*="Search"]',
+            ):
+                try:
+                    loc = page.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        box = loc
+                        break
+                except Exception:
+                    continue
+            if box is None:
+                _note(ctx, f"search box not found for '{keyword}': "
+                           f"{self._page_state(page)}")
+                return []
+            box.click()
+            box.type(keyword, delay=60)
+            box.press("Enter")
+            try:
+                page.wait_for_timeout(3000)
+            except Exception:
+                time.sleep(3)
+            # Click the results tab (People / Posts / Pages / Groups).
+            clicked = False
+            for selector in (
+                f'a[role="link"]:has-text("{tab}")',
+                f'[role="tab"]:has-text("{tab}")',
+                f'text="{tab}"',
+            ):
+                try:
+                    loc = page.locator(selector).first
+                    if loc.count() > 0:
+                        loc.click(timeout=5000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                _note(ctx, f"search tab '{tab}' not clickable for "
+                           f"'{keyword}': {self._page_state(page)}")
+            try:
+                page.wait_for_timeout(3000)
+            except Exception:
+                time.sleep(3)
+            # Results render after the tab click — wait for real content
+            # instead of assuming the fixed sleep was enough.
+            self._wait_ready(page, ctx)
+            if self.check_session(page, ctx) != "ok":
+                _note(ctx, f"session not ok on {label}: "
+                           f"{self._page_state(page)}")
+                return []
+            self._scroll_and_collect(page, ctx)
+            if kind == "profiles":
+                candidates = self._collect_from_links(
+                    page, "profiles", label, page.url)
+            elif kind == "groups":
+                candidates = self._collect_from_links(
+                    page, "groups", label, page.url)
+            elif kind == "pages":
+                candidates = self._collect_from_links(
+                    page, "pages", label, page.url)
+            else:
+                candidates = self._collect_from_links(
+                    page, "posts", label, page.url)
+            if not candidates:
+                state = self._page_state(page)
+                _note(ctx, f"0 results via search box ({label}): {state}")
+                _activity(ctx, "browse",
+                          f"Search-box fallback empty for '{keyword}' — {state}")
+                self._check_block(page, ctx)
+            return candidates
+        except Exception as exc:  # noqa: BLE001 - never raise on one bad page
+            _note(ctx, f"search-box fallback failed ('{keyword}'): {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+    def search_groups(self, page: Page, keyword: str,
+                      ctx: dict | None) -> list[dict]:
+        """Search groups -> [{url, name, member_count}]."""
+        if _should_stop(ctx):
+            return []
+        url = f"{self.base_url}/search/groups?q={quote(keyword)}"
+        try:
+            if not self._load(page, url, ctx, "group_search"):
+                return []
+            self._scroll_and_collect(page, ctx)
+            results = self._collect_from_links(page, "groups", "group_search", url)
+            if not results:
+                _note(ctx, f"0 groups for '{keyword}': {self._page_state(page)}")
+                results = self._search_via_ui(page, keyword, "Groups", ctx,
+                                              kind="groups")
+            return results
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"group search failed ('{keyword}'): {exc}")
+            return []
+
+    def search_pages(self, page: Page, keyword: str,
+                     ctx: dict | None) -> list[dict]:
+        """Search pages -> [{url, name, member_count}]."""
+        if _should_stop(ctx):
+            return []
+        url = f"{self.base_url}/search/pages?q={quote(keyword)}"
+        try:
+            if not self._load(page, url, ctx, "page_search"):
+                return []
+            self._scroll_and_collect(page, ctx)
+            results = self._collect_from_links(page, "pages", "page_search", url)
+            if not results:
+                _note(ctx, f"0 pages for '{keyword}': {self._page_state(page)}")
+                results = self._search_via_ui(page, keyword, "Pages", ctx,
+                                              kind="pages")
+            return results
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"page search failed ('{keyword}'): {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Groups
+    # ------------------------------------------------------------------
+    def join_group(self, page: Page, group_url: str, ctx: dict | None) -> bool:
+        """Join a group. Returns True only when membership is confirmed."""
+        if _should_stop(ctx):
+            return False
+        try:
+            if not self._load(page, group_url, ctx, "join_group"):
+                return False
+            if self._check_block(page, ctx):
+                return False
+            clicked = False
+            for selector in (
+                'button:has-text("Join group")',
+                'div[role="button"]:has-text("Join group")',
+                'a:has-text("Join group")',
+            ):
+                try:
+                    loc = page.locator(selector).first
+                    if loc.count() > 0 and loc.is_visible():
+                        loc.click(timeout=5000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                # Already a member, or no join button on this page.
+                try:
+                    body = page.inner_text("body")[:4000]
+                    if re.search(r"\b(Joined|Member|Leave group)\b", body):
+                        return True
+                except Exception:
+                    pass
+                _note(ctx, f"no Join button on {group_url}: {self._page_state(page)}")
+                return False
+            try:
+                page.wait_for_timeout(3000)
+            except Exception:
+                time.sleep(3)
+            try:
+                body = page.inner_text("body")[:4000]
+                if re.search(r"\b(Joined|Member|Request sent|Pending)\b", body):
+                    return True
+            except Exception:
+                pass
+            return clicked
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"join group failed ({group_url}): {exc}")
+            return False
+
+    def leave_group(self, page: Page, group_url: str,
+                    ctx: dict | None) -> bool:
+        """Leave a group. Returns True ONLY when the page proves the
+        user is no longer a member (a "Join group" button is shown).
+
+        Steps: click "Joined" to open the menu → click "Leave group"
+        in the menu → click "Leave group" in the confirmation dialog.
+        Uses broad text selectors (Facebook's menu roles vary), waits
+        for each step to appear, and verifies at the end. Returns
+        False when the leave did not happen — the caller must NOT
+        treat that as "already left". Never raises.
+        """
+        if _should_stop(ctx):
+            return False
+        try:
+            if not self._load(page, group_url, ctx, "leave_group"):
+                _note(ctx, f"leave group: page did not load ({group_url})")
+                return False
+            if self._check_block(page, ctx):
+                return False
+            # Already not a member?
+            if self._shows_join_button(page):
+                return True
+            # Open the Joined menu.
+            opened = self._click_first_visible(page, (
+                'button:has-text("Joined")',
+                'div[role="button"]:has-text("Joined")',
+                'text="Joined"',
+            ))
+            if not opened:
+                _note(ctx, f"leave group: no Joined button ({group_url})")
+                return False
+            # Wait for the menu's "Leave group" item to be VISIBLE
+            # (up to 5s). The text alone is not proof — React can
+            # leave it in the DOM while the menu is half-rendered
+            # and not clickable yet.
+            if not self._wait_for_visible(page, (
+                'div[role="menuitem"]:has-text("Leave group")',
+                '[role="menuitem"]:has-text("Leave group")',
+                'span:has-text("Leave group")',
+                'text="Leave group"',
+            ), 5000):
+                _note(ctx, f"leave group: menu did not open ({group_url})")
+                return False
+            clicked = self._click_first_visible(page, (
+                'div[role="menuitem"]:has-text("Leave group")',
+                '[role="menuitem"]:has-text("Leave group")',
+                'text="Leave group"',
+                'span:has-text("Leave group")',
+            ))
+            if not clicked:
+                _note(ctx, f"leave group: no Leave item ({group_url})")
+                return False
+            # Confirm the dialog: poll up to 5s for the confirm button.
+            # Facebook's dialog confirm is often a div[role="button"],
+            # not a real <button> — button:has-text alone misses it
+            # (cross-check: div[aria-label='Leave group'][role='button']).
+            # The click result is checked: a missed confirm must report
+            # "no confirm button", never silently become "still Joined".
+            confirmed = False
+            for _ in range(10):
+                if self._click_first_visible(page, (
+                    'button:has-text("Leave group")',
+                    'div[role="button"]:has-text("Leave group")',
+                    'div[aria-label="Leave group"][role="button"]',
+                    'button:has-text("Leave")',
+                )):
+                    confirmed = True
+                    break
+                try:
+                    page.wait_for_timeout(500)
+                except Exception:
+                    time.sleep(0.5)
+            if not confirmed:
+                _note(ctx, f"leave group: no confirm button ({group_url})")
+                return False
+            try:
+                page.wait_for_timeout(3000)
+            except Exception:
+                time.sleep(3)
+            # Verify by RELOADING the page: after leaving, Facebook
+            # does not always repaint the header at once, so reading
+            # the same (stale) DOM can wrongly report "still Joined"
+            # even when the leave actually happened. Facebook can
+            # also take a few seconds to process the leave, so retry
+            # the verify a few times — a single too-early check
+            # wrongly reported "Could not leave" for a leave that
+            # completed moments later.
+            for _attempt in range(3):
+                loaded = self._load(page, group_url, ctx,
+                                    "leave_group_verify")
+                if loaded and self._shows_join_button(page):
+                    return True
+                if not loaded:
+                    _note(ctx, f"leave group: verify reload failed, "
+                               f"retrying ({group_url})")
+                try:
+                    page.wait_for_timeout(5000)
+                except Exception:
+                    time.sleep(5)
+            try:
+                _snippet = _clean_text(page.inner_text("body") or "", 200)
+            except Exception:
+                _snippet = ""
+            _note(ctx, f"leave group: still Joined after confirm "
+                       f"({group_url}) :: body='{_snippet}'")
+            return False
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"leave group failed ({group_url}): {exc}")
+            return False
+
+    def _shows_join_button(self, page: Page) -> bool:
+        """True when the page shows a "Join group" button (not a member).
+
+        Case-insensitive: Facebook's casing varies, and a missed
+        match here wrongly reports a successful leave as failed.
+        """
+        try:
+            body = page.inner_text("body") or ""
+            return bool(re.search(r"\bJoin group\b", body, re.I))
+        except Exception:
+            return False
+
+    def unfollow_page(self, page: Page, page_url: str,
+                      ctx: dict | None) -> bool:
+        """Unfollow a page. Returns True when no longer following.
+
+        Clicks "Following" (opens the menu) then "Unfollow". Returns
+        True also when the page already shows "Follow" (not
+        following). Never raises.
+        """
+        if _should_stop(ctx):
+            return False
+        try:
+            if not self._load(page, page_url, ctx, "unfollow_page"):
+                return False
+            if self._check_block(page, ctx):
+                return False
+            try:
+                body = page.inner_text("body")[:4000]
+                if re.search(r"\bFollow\b", body) and not re.search(
+                        r"\bFollowing\b", body):
+                    return True  # already not following
+            except Exception:
+                pass
+            opened = self._click_first_visible(page, (
+                'button:has-text("Following")',
+                'div[role="button"]:has-text("Following")',
+            ))
+            if opened:
+                try:
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    time.sleep(1.5)
+                clicked = self._click_first_visible(page, (
+                    'div[role="menuitem"]:has-text("Unfollow")',
+                    'span:has-text("Unfollow")',
+                    'button:has-text("Unfollow")',
+                ))
+                if clicked:
+                    try:
+                        page.wait_for_timeout(2000)
+                    except Exception:
+                        time.sleep(2)
+                    return True
+            try:
+                body = page.inner_text("body")[:4000]
+                if re.search(r"\bFollow\b", body) and not re.search(
+                        r"\bFollowing\b", body):
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"unfollow page failed ({page_url}): {exc}")
+            return False
+
+    def read_source_member_count(self, page: Page, url: str, name: str,
+                                 ctx: dict | None) -> int | None:
+        """Best-effort member/follower count for one recorded source.
+
+        Loads the source's own page (group or page) and parses the
+        count from the body text — first a window right after the
+        source name, then a scan of the whole body for the first
+        "N members/followers" pattern. Facebook loads the count
+        lazily, so the body is re-read for up to ~10s until a
+        "member"/"follower" word appears. When no count is found,
+        a short diagnostic snippet of the body is noted (so the real
+        format can be seen and the parser fixed with real data).
+        Returns None when the page does not load, the session is
+        dead, or no count is exposed. Never raises; never returns 0
+        for a missing count.
+        """
+        try:
+            if not self._load(page, url, ctx, "source"):
+                _note(ctx, f"count: page did not load ({url})")
+                return None
+            body = ""
+            for _attempt in range(10):
+                body = page.inner_text("body") or ""
+                if body and ("member" in body.lower()
+                             or "follower" in body.lower()):
+                    break
+                try:
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    time.sleep(1)
+            if not body:
+                _note(ctx, f"count: empty body ({url})")
+                return None
+            if name:
+                idx = body.lower().find(name.lower())
+                if idx >= 0:
+                    count = _parse_member_count(
+                        body[idx:idx + len(name) + 200])
+                    if count is not None:
+                        return count
+            count = _parse_member_count(body)
+            if count is None:
+                # Diagnostic only: show what the page actually has
+                # around the group name, so the parser can be fixed
+                # with the real format instead of a guess.
+                snippet = ""
+                if name:
+                    idx = body.lower().find(name.lower())
+                    if idx >= 0:
+                        snippet = body[idx:idx + 300]
+                if not snippet:
+                    snippet = body[:300]
+                snippet = re.sub(r"\s+", " ", snippet).strip()
+                _note(ctx, f"count: no count found ({url}) :: {snippet}")
+            return count
+        except Exception:
+            return None
+
+    def check_comments_activity(self, page: Page, url: str,
+                               ctx: dict | None) -> dict:
+        """Quick activity check for a group/page BEFORE joining it.
+
+        The finder's job is to bring back sources our data can come
+        from — and our data comes purely from comments. A group with
+        6,000 members but no comments on any post is useless to us,
+        so this samples the recent feed and counts posts + comments.
+        Loads the feed, waits for posts to render, extracts the
+        visible posts + comments once; if that pass found no comments
+        it scrolls once and extracts again (a second chance in case
+        the first screen was all comment-less posts). Returns
+        {"posts": n, "comments": n}. Never raises — returns zeros
+        when the feed never loads.
+        """
+        result: dict = {"posts": 0, "comments": 0}
+        if _should_stop(ctx):
+            return result
+        try:
+            if not self._load(page, url, ctx, "activity_check"):
+                return result
+        except Exception:
+            return result
+        articles = self._wait_for_articles(page, ctx, timeout_s=20.0)
+        if articles == 0:
+            return result
+
+        def _count_once() -> tuple[int, int, dict]:
+            # Count straight from the Comment buttons' aria-labels
+            # ("Comment on X's post, 223 comments"). In the group
+            # feed the posts are NOT div[role="article"] (those are
+            # the comments themselves), so article iteration finds no
+            # posts at all — the button count IS the post count.
+            try:
+                got = page.evaluate(_GATE_COUNT_JS) or {}
+            except Exception:
+                got = {}
+            if not isinstance(got, dict):
+                got = {}
+            try:
+                n_posts = int(got.get("posts") or 0)
+            except (TypeError, ValueError):
+                n_posts = 0
+            try:
+                n_comments = int(got.get("comments") or 0)
+            except (TypeError, ValueError):
+                n_comments = 0
+            const_via = {"button aria-label": n_posts} if n_posts else {}
+            return n_posts, n_comments, const_via
+
+        n_posts, n_comments, all_via = _count_once()
+        if n_comments == 0 and n_posts > 0:
+            # One scroll for a second sample — the first screen may
+            # have been all comment-less posts. Expand again after
+            # the scroll, since new posts bring collapsed comments.
+            try:
+                self._scroll_and_collect(page, ctx, rounds=1, wait_ms=1500)
+                n_posts, n_comments, all_via = _count_once()
+            except Exception:
+                pass
+        result["posts"] = n_posts
+        result["comments"] = n_comments
+        # Diagnostic: did the count parsing even see aria-labels?
+        # (The accessible name may be computed, not an attribute.)
+        try:
+            diag = page.evaluate(_DIAG_ARIA_JS) or {}
+        except Exception:
+            diag = {}
+        if not isinstance(diag, dict):
+            diag = {}
+        result["diag"] = {
+            "aria_labels": int(diag.get("total") or 0),
+            "comment_labels": int(diag.get("matched") or 0),
+            "comment_btns": int(diag.get("btns") or 0),
+            "btn_with_number": int(diag.get("btnNums") or 0),
+            "via": dict(all_via),
+            "samples": list(diag.get("samples") or [])[:3],
+            "parent_btns": list(diag.get("parentBtns") or [])[:8],
+        }
+        return result

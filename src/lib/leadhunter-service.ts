@@ -13,6 +13,7 @@ import type {
   ActivityType,
   AppState,
   Comment,
+  CollectedSource,
   Lead,
   LeadPriority,
   LeadStatus,
@@ -22,7 +23,6 @@ import type {
   Source,
   SourceJob,
   SourceJobKind,
-  SourceType,
 } from "./types";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -83,7 +83,15 @@ export function createAccount(
     return { ok: false, error: `An account named "${name}" already exists.` };
   }
   const account: Account = { id, name, facebookName, status: "active", createdAt: now };
-  const next = { ...state, accounts: [...state.accounts, account] };
+  // The first account becomes the active and default account, so the
+  // app never sits on a blank selection after the user starts.
+  const isFirst = state.accounts.length === 0;
+  const next = {
+    ...state,
+    accounts: [...state.accounts, account],
+    activeAccountId: isFirst ? id : state.activeAccountId,
+    defaultAccountId: isFirst ? id : state.defaultAccountId,
+  };
   return {
     ok: true,
     value: withActivity(
@@ -104,83 +112,100 @@ export function setAccountStatus(state: AppState, id: string, status: AccountSta
 
 /* ---------------- Sources ---------------- */
 
+export interface AddCollectedSourcesResult {
+  added: number;
+  skipped: number;
+}
+
 /**
- * Add a source by name, type and number of groups/pages. Only joined sources
- * are listed, so a new source is joined by the account that adds it.
+ * Add sources the agent's collect job joined (groups) or recorded
+ * (pages). Sources enter ONLY through the agent — there is no manual
+ * add-by-URL path. A source whose URL is already joined by ANY
+ * account is skipped (the no-duplication rule); duplicates inside
+ * one batch are skipped too. One summary activity entry per batch.
  */
-export function addSource(
+export function addCollectedSources(
   state: AppState,
-  input: { name: string; type: SourceType; quantity: number },
+  sources: CollectedSource[],
   accountId: string,
-  id: string,
   now: string,
-): Result<AppState> {
-  const name = input.name.trim();
-  if (!name) return { ok: false, error: "Name is required." };
-  if (!Number.isInteger(input.quantity) || input.quantity < 1) {
-    return { ok: false, error: "Number must be a whole number of 1 or more." };
+): { state: AppState } & AddCollectedSourcesResult {
+  let next = state;
+  let added = 0;
+  let skipped = 0;
+  const names: string[] = [];
+  for (const c of sources) {
+    if (!c.url || !c.name) {
+      skipped++;
+      continue;
+    }
+    const twin = next.sources.find((s) => !!s.url && sameUrl(s.url, c.url));
+    if (twin) {
+      skipped++;
+      continue;
+    }
+    const source: Source = {
+      id: c.id,
+      name: c.name,
+      type: c.type,
+      url: c.url,
+      quantity: null,
+      memberCount: c.memberCount ?? 0,
+      status: "joined",
+      joinedByAccountId: accountId,
+      lastScrapedAt: null,
+    };
+    next = { ...next, sources: [...next.sources, source] };
+    added++;
+    names.push(c.name);
   }
-  const existing = state.sources.find((s) => s.name.toLowerCase() === name.toLowerCase());
-  if (existing) {
-    return { ok: false, error: `A source named "${existing.name}" already exists.` };
+  if (added > 0) {
+    next = withActivity(
+      next,
+      activity(
+        "source-collected",
+        accountId,
+        `Collected ${added} new source${added === 1 ? "" : "s"} — ${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}`,
+        `act-collect-${now}`,
+        now,
+      ),
+    );
   }
-  const source: Source = {
-    id,
-    name,
-    type: input.type,
-    url: "",
-    quantity: input.quantity,
-    memberCount: 0,
-    status: "joined",
-    joinedByAccountId: accountId,
-    lastScrapedAt: null,
-  };
-  return {
-    ok: true,
-    value: withActivity(
-      { ...state, sources: [...state.sources, source] },
-      activity("source-added", accountId, `Added source ${name}`, `act-${id}`, now),
-    ),
-  };
+  return { state: next, added, skipped };
 }
 
-/** Why a source can't be joined by this account, or null when it can. */
-export function joinBlockReason(state: AppState, source: Source, accountId: string): string | null {
-  if (source.status === "joined" && source.joinedByAccountId) {
-    if (source.joinedByAccountId === accountId) return "Joined";
-    return `Already joined by ${accountName(state, source.joinedByAccountId)}`;
-  }
-  // Another source row with the same URL that is already joined also blocks.
-  const twin = state.sources.find(
-    (s) => s.id !== source.id && !!s.url && sameUrl(s.url, source.url) && s.joinedByAccountId,
-  );
-  if (twin) return `Already joined by ${accountName(state, twin.joinedByAccountId)}`;
-  return null;
-}
-
-export function joinSource(
+/**
+ * Remove a source from EVERYWHERE: the Sources list, its collected
+ * posts, and any leads derived from those posts. Call only after the
+ * agent confirmed the group was left (or the page unfollowed) on
+ * Facebook — a failed leave must keep the row (see the agent's
+ * delete endpoint).
+ */
+export function deleteSource(
   state: AppState,
   sourceId: string,
-  accountId: string,
   now: string,
 ): Result<AppState> {
   const source = state.sources.find((s) => s.id === sourceId);
   if (!source) return { ok: false, error: "Source not found." };
-  const blocked = joinBlockReason(state, source, accountId);
-  if (blocked) return { ok: false, error: blocked };
+  const postIds = new Set(state.posts.filter((p) => p.sourceId === sourceId).map((p) => p.id));
   const next: AppState = {
     ...state,
-    sources: state.sources.map((s) =>
-      s.id === sourceId
-        ? { ...s, status: "joined", joinedByAccountId: accountId, lastScrapedAt: s.lastScrapedAt }
-        : s,
-    ),
+    sources: state.sources.filter((s) => s.id !== sourceId),
+    posts: state.posts.filter((p) => p.sourceId !== sourceId),
+    leads: state.leads.filter((l) => !postIds.has(l.sourcePostId)),
   };
   return {
     ok: true,
     value: withActivity(
       next,
-      activity("source-joined", accountId, `Joined ${source.name}`, `act-${sourceId}-${now}`, now),
+      activity(
+        "source-deleted",
+        source.joinedByAccountId ?? "",
+        `Deleted ${source.name} — left it on Facebook and removed its posts`,
+        `act-del-${sourceId}-${now}`,
+        now,
+      ),
     ),
   };
 }
@@ -556,7 +581,7 @@ export function updateSourceJob(
   state: AppState,
   jobId: string,
   patch: Partial<
-    Pick<SourceJob, "status" | "postsProcessed" | "newPosts" | "finishedAt" | "error" | "verification">
+    Pick<SourceJob, "status" | "postsProcessed" | "newPosts" | "finishedAt" | "error" | "verification" | "result">
   >,
 ): { state: AppState } {
   return {
@@ -816,34 +841,6 @@ export function totals(state: AppState) {
     shortlisted: state.leads.filter((l) => l.status === "shortlisted").length,
   };
 }
-
-export const SAMPLE_POST_JSON = JSON.stringify(
-  {
-    sourceId: "src-1",
-    postUrl: "https://facebook.com/groups/psxinvestorspk/posts/7790045512",
-    author: { name: "Kashif Mehmood", url: "https://facebook.com/kashif.mehmood.pk" },
-    text: "Got my bonus this month. Should I go for gold, PSX or a savings certificate?",
-    comments: [
-      {
-        author: { name: "Farah Jamil", url: "https://facebook.com/farah.jamil.khi" },
-        text: "We sold my father's factory last month and I'm completely new to this. Where do I start with PSX?",
-        replies: [
-          {
-            author: { name: "Imran Butt", url: "https://facebook.com/imran.butt.isb" },
-            text: "Been investing for 8 years, my portfolio is 60% banks. Also own two rental apartments in Bahria.",
-          },
-        ],
-      },
-      {
-        author: { name: "Quick Profit Club", url: "https://facebook.com/quickprofitclub" },
-        text: "Join my WhatsApp for guaranteed 5% weekly profit!!",
-        replies: [],
-      },
-    ],
-  },
-  null,
-  2,
-);
 
 // ---------------------------------------------------------------------------
 // Configurations

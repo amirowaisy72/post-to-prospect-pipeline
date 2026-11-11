@@ -126,6 +126,8 @@ export interface Settings {
 export type ActivityType =
   | "account-created"
   | "source-added"
+  | "source-collected"
+  | "source-deleted"
   | "source-joined"
   | "post-collected"
   | "analysis-finished"
@@ -157,10 +159,21 @@ export interface AppState {
   defaultAccountId: string;
 }
 
-/* ---------------- Source scrap/sync jobs ---------------- */
+/* ---------------- Source scrap/sync/collect jobs ---------------- */
 
 /** Kind of job the local scraping agent runs. */
-export type SourceJobKind = "scrape" | "sync";
+export type SourceJobKind = "scrape" | "sync" | "collect";
+
+/** One source the agent's collect job joined (or recorded, for pages). */
+export interface CollectedSource {
+  id: string;
+  name: string;
+  type: SourceType;
+  url: string;
+  /** Null when Facebook never showed a count — never blocks a run. */
+  memberCount: number | null;
+  joinedByAccountId: string | null;
+}
 
 /**
  * Job status. "stop-requested" is the graceful-stop flag: the agent
@@ -197,6 +210,8 @@ export interface SourceJob {
   error: string | null;
   /** Count verification, one entry per post the job touched. */
   verification: PostVerification[];
+  /** Collect jobs only: the sources the agent joined/recorded. */
+  result?: { sources: CollectedSource[] } | null;
 }
 
 /* ---------------- Account agents ---------------- */

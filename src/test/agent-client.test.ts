@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_NOT_RUNNING_MESSAGE,
   AgentUnreachableError,
+  deleteAgentSource,
   getAgentHealth,
+  startAgentCollect,
   startAgentScrape,
 } from "@/lib/agent-client";
 
@@ -60,5 +62,50 @@ describe("agent client", () => {
         accountId: "acc-1",
       }),
     ).rejects.toThrow("Another job is already running");
+  });
+
+  it("starts a collect with keyword, type, gates and maxNew", async () => {
+    mockFetch.mockResolvedValue(okJson({ jobId: "job-collect" }, 202));
+    const r = await startAgentCollect("http://127.0.0.1:8001", {
+      keyword: "stocks",
+      type: "group",
+      maxNew: 10,
+      accountId: "acc-1",
+      minComments: 3,
+      minMembers: 100,
+    });
+    expect(r.jobId).toBe("job-collect");
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8001/collect-sources");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      keyword: "stocks",
+      type: "group",
+      maxNew: 10,
+      accountId: "acc-1",
+      minComments: 3,
+      minMembers: 100,
+    });
+  });
+
+  it("deletes a source and reports the leave result", async () => {
+    mockFetch.mockResolvedValue(
+      okJson({ ok: true, left: true, detail: "Left the group and removed it from the list." }),
+    );
+    const r = await deleteAgentSource("http://127.0.0.1:8001", "src-1");
+    expect(r.ok).toBe(true);
+    expect(r.left).toBe(true);
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8001/sources/src-1/delete");
+    expect(init.method).toBe("POST");
+  });
+
+  it("a failed leave surfaces the agent's detail as an error", async () => {
+    mockFetch.mockResolvedValue(
+      okJson({ ok: false, left: false, detail: "Could not leave the group on Facebook — it is still in the list, try Delete again." }, 502),
+    );
+    await expect(deleteAgentSource("http://127.0.0.1:8001", "src-1")).rejects.toThrow(
+      "Could not leave the group on Facebook",
+    );
   });
 });

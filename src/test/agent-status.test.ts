@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentStatus,
+  createAccount,
   finishAgentTask,
   finishDueAgentTasks,
   setAccountStatus,
@@ -11,8 +12,20 @@ import { createSeedState } from "@/lib/seed";
 import type { AppState } from "@/lib/types";
 
 const NOW = "2026-11-11T10:00:00.000Z";
-const freeState = (): AppState => ({ ...createSeedState(), agents: [] });
 const task = { kind: "scraping" as const, label: "Scraping posts", expectedMs: 60_000 };
+
+/** Two accounts: acc-1 active, acc-2 paused. No demo data — built
+ * through the service. */
+const freeState = (): AppState => {
+  let state = createSeedState();
+  const a1 = createAccount(state, { name: "Ayesha — Main", facebookName: "Ayesha Khan" }, "acc-1", NOW);
+  if (!a1.ok) throw new Error("fixture account 1 failed");
+  state = a1.value;
+  const a2 = createAccount(state, { name: "Bilal — Research", facebookName: "Bilal Ahmed" }, "acc-2", NOW);
+  if (!a2.ok) throw new Error("fixture account 2 failed");
+  state = setAccountStatus(a2.value, "acc-2", "paused");
+  return { ...state, agents: [] };
+};
 
 describe("account agents", () => {
   it("an active account with no task is free", () => {
@@ -24,7 +37,7 @@ describe("account agents", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(agentStatus(r.value, "acc-1")).toBe("busy");
-    // acc-2 is paused in the demo data — its own status is unaffected by acc-1.
+    // acc-2 is paused — its own status is unaffected by acc-1.
     expect(agentStatus(r.value, "acc-2")).toBe("offline");
   });
 
@@ -63,5 +76,10 @@ describe("account agents", () => {
     const start = Date.parse(NOW);
     expect(agentStatus(finishDueAgentTasks(r.value, start + 59_000), "acc-1")).toBe("busy");
     expect(agentStatus(finishDueAgentTasks(r.value, start + 60_000), "acc-1")).toBe("free");
+  });
+
+  it("an unknown account's agent is offline", () => {
+    expect(agentStatus(freeState(), "acc-9")).toBe("offline");
+    expect(agentStatus(createSeedState(), "")).toBe("offline");
   });
 });

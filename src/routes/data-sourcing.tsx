@@ -1,6 +1,6 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
-import { ExternalLink, Plus, Upload } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { Link, Outlet, createFileRoute, useChildMatches } from "@tanstack/react-router";
+import { ExternalLink, Plus } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { SourceStatusBadge } from "@/components/badges";
 import { EmptyState, PageHeader } from "@/components/page-header";
@@ -13,12 +13,10 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
 import { AGENT_NOT_RUNNING_MESSAGE } from "@/lib/agent-client";
-import { accountName, countReplies, parsePostDataJson, runningJobForSource, scrapedCount, SAMPLE_POST_JSON } from "@/lib/leadhunter-service";
-import type { PostImportResult } from "@/lib/leadhunter-service";
+import { accountName, runningJobForSource, scrapedCount } from "@/lib/leadhunter-service";
 import { fmtDate, fmtNumber, shortUrl } from "@/lib/format";
-import { useActiveAccountData, useStore } from "@/lib/store";
+import { useStore } from "@/lib/store";
 import { useAgentHealth } from "@/lib/use-agent-health";
 import type { SourceType } from "@/lib/types";
 
@@ -37,6 +35,12 @@ export const Route = createFileRoute("/data-sourcing")({
 });
 
 function DataSourcingPage() {
+  // The per-source posts page (/data-sourcing/$sourceId) and the post
+  // detail page are nested routes: when one matches, it REPLACES the
+  // sources table instead of rendering underneath it.
+  const childMatches = useChildMatches();
+  if (childMatches.length > 0) return <Outlet />;
+
   return (
     <>
       <PageHeader
@@ -45,7 +49,6 @@ function DataSourcingPage() {
       />
       <div className="space-y-6">
         <SourcesSection />
-        <CollectedPostsSection />
       </div>
     </>
   );
@@ -54,7 +57,7 @@ function DataSourcingPage() {
 /* ---------------- Sources ---------------- */
 
 function SourcesSection() {
-  const { state } = useStore();
+  const { state, stopJob } = useStore();
   const { reachable, refresh } = useAgentHealth();
   const accountId = state.activeAccountId;
   const [filter, setFilter] = useState<"all" | "mine">("all");
@@ -68,6 +71,11 @@ function SourcesSection() {
     const rank = (id: string | null) => (id === accountId ? 0 : 1);
     return [...list].sort((a, b) => rank(a.joinedByAccountId) - rank(b.joinedByAccountId));
   }, [state.sources, filter, accountId]);
+
+  // A collect job (Add Source) has no source row — show its progress
+  // as a banner above the table instead.
+  const collectJob = state.jobs.find((j) => j.kind === "collect" && (j.status === "running" || j.status === "stop-requested"));
+  const lastCollectJob = state.jobs.find((j) => j.kind === "collect" && (j.status === "done" || j.status === "failed" || j.status === "stopped"));
 
   return (
     <Card className="shadow-card">
@@ -83,7 +91,7 @@ function SourcesSection() {
               <TabsTrigger value="mine">Joined by me</TabsTrigger>
             </TabsList>
           </Tabs>
-          <Button onClick={() => setOpen(true)}>
+          <Button onClick={() => setOpen(true)} disabled={!accountId}>
             <Plus /> Add Source
           </Button>
         </div>
@@ -97,9 +105,34 @@ function SourcesSection() {
             </Button>
           </div>
         )}
+        {!accountId && (
+          <div className="mx-6 mb-4 rounded-md border px-3 py-2 text-sm text-muted-foreground">
+            No account yet — <Link to="/accounts" className="font-medium text-primary hover:underline">create an account</Link> first.
+            Sources belong to the account that collects them.
+          </div>
+        )}
+        {collectJob && (
+          <div className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+            <span>
+              Collecting sources… {collectJob.postsProcessed} checked, {collectJob.newPosts} joined
+            </span>
+            <Button variant="outline" size="sm" onClick={() => void stopJob(collectJob.id)}>
+              Stop
+            </Button>
+          </div>
+        )}
+        {lastCollectJob?.status === "failed" && (
+          <div className="mx-6 mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+            Last collect failed: {lastCollectJob.error ?? "unknown error"}
+          </div>
+        )}
         {rows.length === 0 ? (
           <div className="px-6">
-            <EmptyState title="No sources here yet" />
+            <EmptyState title={accountId ? "No sources here yet" : "No account yet"}>
+              {accountId
+                ? "Add a source: search Facebook by keyword — the agent joins groups that pass the comments and member gates."
+                : "Create an account first, then add a source."}
+            </EmptyState>
           </div>
         ) : (
           <Table>
@@ -107,7 +140,6 @@ function SourcesSection() {
               <TableRow>
                 <TableHead className="pl-6">Name</TableHead>
                 <TableHead>Type</TableHead>
-                <TableHead className="text-right">Number</TableHead>
                 <TableHead className="text-right">Members</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Joined by</TableHead>
@@ -133,7 +165,6 @@ function SourcesSection() {
                     <TableCell>
                       <Badge variant="outline" className="capitalize">{s.type}</Badge>
                     </TableCell>
-                    <TableCell className="text-right tabular">{s.quantity ? fmtNumber(s.quantity) : "—"}</TableCell>
                     <TableCell className="text-right tabular">{s.memberCount ? fmtNumber(s.memberCount) : "—"}</TableCell>
                     <TableCell><SourceStatusBadge status={s.status} /></TableCell>
                     <TableCell className="text-sm">
@@ -176,10 +207,10 @@ function SourcesSection() {
   );
 }
 
-/** Per-row Scrap / Sync / Stop. While a job runs for this source the
- * buttons are replaced by its progress and a Stop button. */
+/** Per-row Scrap / Sync / Stop / Delete. While a job runs for this
+ * source the buttons are replaced by its progress and a Stop button. */
 function SourceActions({ sourceId, reachable }: { sourceId: string; reachable: boolean | null }) {
-  const { state, startScrape, startSync, stopJob } = useStore();
+  const { state, startScrape, startSync, stopJob, deleteSource } = useStore();
   const job = runningJobForSource(state, sourceId);
   const count = scrapedCount(state, sourceId);
   // Most recent job for this source, so an incomplete run stays
@@ -187,6 +218,28 @@ function SourceActions({ sourceId, reachable }: { sourceId: string; reachable: b
   const latestJob = state.jobs.find((j) => j.sourceId === sourceId);
   const lastJob =
     latestJob && (latestJob.status === "incomplete" || latestJob.status === "failed") ? latestJob : undefined;
+  const [armed, setArmed] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const armTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (armTimer.current) window.clearTimeout(armTimer.current);
+    },
+    [],
+  );
+
+  const onDelete = () => {
+    if (!armed) {
+      setArmed(true);
+      armTimer.current = window.setTimeout(() => setArmed(false), 8000);
+      return;
+    }
+    if (armTimer.current) window.clearTimeout(armTimer.current);
+    setArmed(false);
+    setDeleting(true);
+    void deleteSource(sourceId).finally(() => setDeleting(false));
+  };
+
   if (job) {
     return (
       <div className="flex flex-col gap-1">
@@ -218,6 +271,21 @@ function SourceActions({ sourceId, reachable }: { sourceId: string; reachable: b
         >
           Sync
         </Button>
+        <Button
+          variant={armed ? "destructive" : "outline"}
+          size="sm"
+          disabled={agentDown || deleting}
+          title={
+            agentDown
+              ? agentReason
+              : armed
+                ? "Click again to confirm — this leaves the group/page on Facebook and removes it from everywhere"
+                : "Leave the group/page on Facebook and remove it from everywhere"
+          }
+          onClick={onDelete}
+        >
+          {deleting ? "Deleting…" : armed ? "Confirm delete?" : "Delete"}
+        </Button>
       </div>
       {lastJob?.status === "incomplete" && (
         <span className="max-w-56 text-xs text-amber-600">
@@ -235,21 +303,39 @@ function SourceActions({ sourceId, reachable }: { sourceId: string; reachable: b
   );
 }
 
+type CollectType = SourceType | "both";
+
+/**
+ * Add Source = keyword search + collect, exactly like client-hunting.
+ * The Name field is the search keyword; Type filters Group/Page (or
+ * both); "Number of groups" is how many good sources to collect at
+ * most. The agent searches Facebook, applies the comments gate and
+ * the member gate from Configurations, joins the good groups, and
+ * lists them here. There is no URL input anywhere.
+ */
 function AddSourceDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { addSource } = useStore();
-  const [name, setName] = useState("");
-  const [type, setType] = useState<SourceType>("group");
+  const { collectSources, state } = useStore();
+  const [keyword, setKeyword] = useState("");
+  const [type, setType] = useState<CollectType>("group");
   const [quantity, setQuantity] = useState("");
+  const [busy, setBusy] = useState(false);
   const qty = Number(quantity);
   const validQty = Number.isInteger(qty) && qty >= 1;
+  const typeLabel = type === "group" ? "groups" : type === "page" ? "pages" : "groups/pages";
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (addSource({ name, type, quantity: qty })) {
-      setName("");
-      setQuantity("");
-      onOpenChange(false);
-    }
+    if (!keyword.trim() || !validQty) return;
+    setBusy(true);
+    void collectSources({ keyword: keyword.trim(), type, maxNew: qty })
+      .then((ok) => {
+        if (ok) {
+          setKeyword("");
+          setQuantity("");
+          onOpenChange(false);
+        }
+      })
+      .finally(() => setBusy(false));
   };
 
   return (
@@ -257,258 +343,53 @@ function AddSourceDialog({ open, onOpenChange }: { open: boolean; onOpenChange: 
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add source</DialogTitle>
-          <DialogDescription>Enter how many groups or pages to add. It will be listed as joined by this account.</DialogDescription>
+          <DialogDescription>
+            Search Facebook by keyword. The agent joins up to {quantity || "N"} active {typeLabel} with posts and comments
+            (at least {state.settings.sourcing.minComments} comments and {state.settings.sourcing.minMembers} members —
+            see Configurations), and lists them here. Dead sources are never saved.
+          </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="src-name">Name</Label>
-            <Input id="src-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Lahore Investors Circle" />
+            <Label htmlFor="src-name">Keyword</Label>
+            <Input
+              id="src-name"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="e.g. stock market"
+            />
           </div>
           <div className="space-y-1.5">
             <Label>Type</Label>
-            <Select value={type} onValueChange={(v) => setType(v as SourceType)}>
+            <Select value={type} onValueChange={(v) => setType(v as CollectType)}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="group">Group</SelectItem>
                 <SelectItem value="page">Page</SelectItem>
+                <SelectItem value="both">Groups + Pages</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="src-number">Number of {type === "group" ? "groups" : "pages"}</Label>
-            <Input id="src-number" type="number" inputMode="numeric" min={1} step={1} value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="e.g. 10" />
+            <Label htmlFor="src-number">Number of {typeLabel}</Label>
+            <Input
+              id="src-number"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              step={1}
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              placeholder="e.g. 10"
+            />
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={!name.trim() || !validQty}>Add source</Button>
+            <Button type="submit" disabled={!keyword.trim() || !validQty || busy}>
+              {busy ? "Starting…" : "Search & collect"}
+            </Button>
           </DialogFooter>
         </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/* ---------------- Collected posts ---------------- */
-
-function CollectedPostsSection() {
-  const { state } = useStore();
-  const { posts, accountId } = useActiveAccountData();
-  const [open, setOpen] = useState(false);
-
-  return (
-    <Card className="shadow-card">
-      <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:space-y-0">
-        <div>
-          <CardTitle className="text-base">Collected Posts</CardTitle>
-          <CardDescription>
-            PostData collected by the Chrome extension — one post with its comments and replies.
-          </CardDescription>
-        </div>
-        <Button onClick={() => setOpen(true)}>
-          <Plus /> Add Post Data
-        </Button>
-      </CardHeader>
-      <CardContent className="px-0">
-        {posts.length === 0 ? (
-          <div className="px-6">
-            <EmptyState title="No posts collected yet">
-              Collect a Facebook post with the Chrome extension, then import the _structured.json file here.
-            </EmptyState>
-          </div>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="pl-6">Post</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead className="text-right">Comments</TableHead>
-                <TableHead className="text-right">Replies</TableHead>
-                <TableHead className="pr-6">Collected</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {posts.map((p) => {
-                const source = state.sources.find((s) => s.id === p.sourceId);
-                return (
-                  <TableRow key={p.id}>
-                    <TableCell className="pl-6">
-                      <div className="font-semibold text-foreground">{p.author.name}</div>
-                      <div className="line-clamp-2 max-w-md text-sm text-muted-foreground">{p.text}</div>
-                      {p.postUrl && (
-                        <a href={p.postUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground hover:text-primary">
-                          {shortUrl(p.postUrl)} <ExternalLink className="size-3" />
-                        </a>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-sm">{source?.name ?? "—"}</TableCell>
-                    <TableCell className="text-right tabular">{p.comments.length}</TableCell>
-                    <TableCell className="text-right tabular">{countReplies(p)}</TableCell>
-                    <TableCell className="whitespace-nowrap pr-6 text-sm text-muted-foreground">{fmtDate(p.collectedAt)}</TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
-      <AddPostDataDialog open={open} onOpenChange={setOpen} />
-    </Card>
-  );
-}
-
-type PreviewRow =
-  | { key: string; label: string; status: "ready"; author: string; comments: number; replies: number }
-  | { key: string; label: string; status: "already"; accountName: string }
-  | { key: string; label: string; status: "error"; reason: string };
-
-function AddPostDataDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { state, addPosts } = useStore();
-  const { joinedSources } = useActiveAccountData();
-  const [raw, setRaw] = useState("");
-  const [fileName, setFileName] = useState("");
-  const [sourceId, setSourceId] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  const parsed: PostImportResult | null = useMemo(
-    () => (raw.trim() ? parsePostDataJson(raw, state) : null),
-    [raw, state],
-  );
-
-  const preview: PreviewRow[] = useMemo(() => {
-    if (!parsed) return [];
-    const rows: PreviewRow[] = parsed.drafts.map((d) => ({
-      key: `ready-${d.postUrl}`,
-      label: d.postUrl,
-      status: "ready" as const,
-      author: d.author.name,
-      comments: d.comments.length,
-      replies: countReplies(d),
-    }));
-    for (const a of parsed.alreadyCollected) {
-      rows.push({ key: `already-${a.postUrl}`, label: a.postUrl, status: "already", accountName: a.accountName });
-    }
-    for (const e of parsed.errors) {
-      rows.push({ key: `error-${e.label}`, label: e.label, status: "error", reason: e.reason });
-    }
-    return rows;
-  }, [parsed]);
-
-  const effectiveSourceId = sourceId || joinedSources[0]?.id || "";
-
-  const openDialog = (o: boolean) => {
-    if (o && !sourceId) setSourceId(joinedSources[0]?.id ?? "");
-    onOpenChange(o);
-  };
-
-  const onFile = (file: File | undefined) => {
-    if (!file) return;
-    setFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => setRaw(String(reader.result ?? ""));
-    reader.readAsText(file);
-  };
-
-  const doImport = () => {
-    if (!parsed || parsed.drafts.length === 0 || !effectiveSourceId) return;
-    addPosts(parsed.drafts, effectiveSourceId);
-    setRaw("");
-    setFileName("");
-    setSourceId("");
-    onOpenChange(false);
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={openDialog}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Add post data</DialogTitle>
-          <DialogDescription>
-            Paste a PostData JSON object, or upload the _structured.json file from the Chrome extension.
-            It can hold one post, a posts wrapper, or a bare array of posts.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="post-json">Post data (JSON)</Label>
-            <Textarea
-              id="post-json"
-              value={raw}
-              onChange={(e) => setRaw(e.target.value)}
-              placeholder='{"posts": [{ "postUrl": "https://facebook.com/...", "author": {...}, "text": "...", "comments": [...] }]}'
-              rows={8}
-              className="font-mono text-xs"
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".json,application/json"
-              className="hidden"
-              onChange={(e) => onFile(e.target.files?.[0])}
-            />
-            <Button type="button" variant="outline" onClick={() => fileRef.current?.click()}>
-              <Upload /> Upload .json{fileName ? ` — ${fileName}` : ""}
-            </Button>
-            <Button type="button" variant="outline" onClick={() => { setRaw(SAMPLE_POST_JSON); setFileName(""); }}>
-              Use sample
-            </Button>
-          </div>
-          <div className="space-y-1.5">
-            <Label>Source</Label>
-            <Select value={effectiveSourceId} onValueChange={setSourceId} disabled={joinedSources.length === 0}>
-              <SelectTrigger><SelectValue placeholder="Pick a joined source" /></SelectTrigger>
-              <SelectContent>
-                {joinedSources.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {joinedSources.length === 0 && (
-              <p className="text-xs text-muted-foreground">This account has not joined any source yet — join one first.</p>
-            )}
-          </div>
-          {parsed && (
-            <div className="space-y-2">
-              <Label>Preview</Label>
-              {preview.length === 0 ? (
-                <p className="text-sm text-muted-foreground">Nothing to import — check the JSON.</p>
-              ) : (
-                <div className="max-h-56 space-y-2 overflow-y-auto rounded-lg border p-3">
-                  {preview.map((row) => (
-                    <div key={row.key} className="flex items-start justify-between gap-3 text-sm">
-                      <div className="min-w-0">
-                        <div className="truncate font-mono text-xs text-muted-foreground">{row.label}</div>
-                        {row.status === "ready" && (
-                          <div className="text-foreground">
-                            {row.author} — {row.comments} comment{row.comments === 1 ? "" : "s"}, {row.replies} repl{row.replies === 1 ? "y" : "ies"}
-                          </div>
-                        )}
-                        {row.status === "already" && (
-                          <div className="text-muted-foreground">Already collected by {row.accountName}</div>
-                        )}
-                        {row.status === "error" && <div className="text-destructive">{row.reason}</div>}
-                      </div>
-                      {row.status === "ready" && <Badge className="shrink-0 bg-green-600 text-white hover:bg-green-600">Ready</Badge>}
-                      {row.status === "already" && <Badge variant="secondary" className="shrink-0">Already collected</Badge>}
-                      {row.status === "error" && <Badge variant="destructive" className="shrink-0">Error</Badge>}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => openDialog(false)}>Cancel</Button>
-          <Button
-            type="button"
-            disabled={!parsed || parsed.drafts.length === 0 || !effectiveSourceId}
-            onClick={doImport}
-          >
-            Import{parsed && parsed.drafts.length > 0 ? ` ${parsed.drafts.length} post${parsed.drafts.length === 1 ? "" : "s"}` : ""}
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

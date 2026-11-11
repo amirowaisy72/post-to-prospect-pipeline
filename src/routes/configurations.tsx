@@ -106,7 +106,7 @@ function Section({ icon, title, description, action, children }: { icon: ReactNo
 }
 
 function ConfigurationsPage() {
-  const { state, updateSettings, resetDemoData } = useStore();
+  const { state, updateSettings } = useStore();
   const [form, setForm] = useState<Settings>(state.settings);
   useEffect(() => setForm(state.settings), [state.settings]);
 
@@ -301,23 +301,6 @@ function ConfigurationsPage() {
           </p>
         </Section>
       </div>
-
-      <Card className="mt-6 border-dashed shadow-card">
-        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-sm font-semibold text-foreground">Restore demo data</p>
-            <p className="text-sm text-muted-foreground">Replaces all accounts, sources, posts, leads and configurations with the original sample data.</p>
-          </div>
-          <Button
-            variant="outline"
-            onClick={() => {
-              if (window.confirm("Replace everything with the demo data?")) resetDemoData();
-            }}
-          >
-            Restore demo data
-          </Button>
-        </CardContent>
-      </Card>
     </>
   );
 }

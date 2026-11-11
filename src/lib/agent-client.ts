@@ -3,7 +3,7 @@
  * user's PC at settings.agentUrl). The agent uses the user's own Chrome
  * profile — the frontend never sees a Facebook password.
  */
-import type { PostVerification } from "./types";
+import type { CollectedSource, PostVerification, SourceType } from "./types";
 
 export const AGENT_NOT_RUNNING_MESSAGE = "Agent not running — run run-agent.bat on your PC";
 
@@ -24,7 +24,7 @@ export type AgentJobStatus =
 
 export interface AgentJob {
   id: string;
-  kind: "scrape" | "sync";
+  kind: "scrape" | "sync" | "collect";
   sourceId: string | null;
   postId: string | null;
   accountId: string;
@@ -37,6 +37,8 @@ export interface AgentJob {
   /** Plain-language flag when the job is incomplete, e.g. "collected 8 of 10 — 2 missing". */
   message?: string | null;
   verification: PostVerification[];
+  /** Collect jobs only: the sources the agent joined/recorded. */
+  result?: { sources: CollectedSource[] } | null;
 }
 
 export interface AgentHealth {
@@ -109,6 +111,40 @@ export async function startAgentSync(
     method: "POST",
     body: JSON.stringify(input),
   })) as { jobId: string };
+}
+
+export async function startAgentCollect(
+  agentUrl: string,
+  input: {
+    keyword: string;
+    type: SourceType | "both";
+    maxNew: number;
+    accountId: string;
+    minComments: number;
+    minMembers: number;
+  },
+): Promise<{ jobId: string }> {
+  return (await agentFetch(agentUrl, "/collect-sources", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })) as { jobId: string };
+}
+
+/**
+ * Leave the group / unfollow the page on Facebook, then remove the
+ * source from the agent DB. Long timeout: a leave takes ~15–20 s on
+ * Facebook. Throws on failure — the caller must NOT remove the row.
+ */
+export async function deleteAgentSource(
+  agentUrl: string,
+  sourceId: string,
+): Promise<{ ok: boolean; left: boolean; detail: string }> {
+  return (await agentFetch(
+    agentUrl,
+    `/sources/${encodeURIComponent(sourceId)}/delete`,
+    { method: "POST" },
+    180_000,
+  )) as { ok: boolean; left: boolean; detail: string };
 }
 
 export async function stopAgentJob(

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { addPosts, mergePostActivity, parsePostDataJson, postTitle, requestSourceJobStop, runningJobForSource, scrapedCount, startSourceJob, updateSourceJob, SAMPLE_POST_JSON } from "@/lib/leadhunter-service";
+import { addCollectedSources, addPosts, createAccount, mergePostActivity, parsePostDataJson, postTitle, requestSourceJobStop, runningJobForSource, scrapedCount, startSourceJob, updateSourceJob } from "@/lib/leadhunter-service";
 import { createSeedState } from "@/lib/seed";
+import type { AppState } from "@/lib/types";
+
+const NOW = "2026-11-11T00:00:00.000Z";
+const POST_URL = "https://facebook.com/groups/psxinvestorspk/posts/7781203344";
+const POST_TEXT =
+  "Planning to put fresh money into PSX before the year ends. Which sectors are you all watching for 2027 — banks, cement or fertiliser? Share your thinking below.";
 
 const makePost = (overrides: Record<string, unknown> = {}) => ({
   postUrl: "https://facebook.com/groups/psxinvestorspk/posts/111",
@@ -17,6 +23,65 @@ const makePost = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+/** One account + one joined source + one collected post (5 comments,
+ * first comment with 2 replies), built only through the service —
+ * the seed state itself is empty. */
+const fixtureState = (): AppState => {
+  let state = createSeedState();
+  const acc = createAccount(state, { name: "Ayesha — Main", facebookName: "Ayesha Khan" }, "acc-1", NOW);
+  if (!acc.ok) throw new Error("fixture account failed");
+  state = acc.value;
+  state = addCollectedSources(
+    state,
+    [{ id: "src-1", name: "PSX Investors Pakistan", type: "group", url: "https://facebook.com/groups/psxinvestorspk", memberCount: 184300, joinedByAccountId: "acc-1" }],
+    "acc-1",
+    NOW,
+  ).state;
+  const parsed = parsePostDataJson(
+    JSON.stringify(
+      makePost({
+        postUrl: POST_URL,
+        author: { name: "Usman Tariq", url: "https://facebook.com/usman.tariq.pk" },
+        text: POST_TEXT,
+        comments: [
+          {
+            author: { name: "Sana Mirza", url: "https://facebook.com/sana.mirza.88" },
+            text: "I just sold a plot in DHA and have around 2 crore sitting in my account. Completely new to stocks though — where do I even start?",
+            replies: [
+              { author: { name: "Usman Tariq", url: "https://facebook.com/usman.tariq.pk" }, text: "Start with a broker account and blue chips, Sana." },
+              { author: { name: "Sana Mirza", url: "https://facebook.com/sana.mirza.88" }, text: "Thanks! Is 2 crore too much to put in at once?" },
+            ],
+          },
+          {
+            author: { name: "Hamza Qureshi", url: "https://facebook.com/hamza.qureshi.lhr" },
+            text: "Been investing in PSX for 6 years, my portfolio is mostly banks and OGDC. Recently exited a textile business so I have extra cash to diversify.",
+            replies: [],
+          },
+          {
+            author: { name: "Signals King PK", url: "https://facebook.com/signalskingpk" },
+            text: "Join my Telegram channel for daily guaranteed signals 💯 t.me/signalsking",
+            replies: [{ author: { name: "Faraz Ali", url: "https://facebook.com/faraz.ali.khi" }, text: "Reported. Stop spamming please." }],
+          },
+          {
+            author: { name: "Nida Hassan", url: "https://facebook.com/nida.hassan.lhr" },
+            text: "My husband and I run two pharmacies in Lahore. Never invested before but want our savings working. Is PSX safe for beginners?",
+            replies: [{ author: { name: "Kamran Shah", url: "https://facebook.com/kamran.shah.isb" }, text: "I have held mutual funds and stocks for 10 years, PSX is fine if you stay diversified." }],
+          },
+          {
+            author: { name: "Ali Raza", url: "https://facebook.com/ali.raza.2004" },
+            text: "Where do I start? Just graduated, total beginner.",
+            replies: [],
+          },
+        ],
+      }),
+    ),
+    state,
+  );
+  if (parsed.errors.length > 0) throw new Error("fixture post failed: " + JSON.stringify(parsed.errors));
+  state = addPosts(state, parsed.drafts, "src-1", "acc-1", () => "post-1", NOW).state;
+  return state;
+};
+
 describe("parsePostDataJson", () => {
   it("parses a single PostData object", () => {
     const r = parsePostDataJson(JSON.stringify(makePost()), createSeedState());
@@ -27,8 +92,30 @@ describe("parsePostDataJson", () => {
     expect(r.drafts[0]!.author.name).toBe("Ayesha Khan");
   });
 
-  it("parses the sample JSON", () => {
-    const r = parsePostDataJson(SAMPLE_POST_JSON, createSeedState());
+  it("parses a post with two comments and a nested reply", () => {
+    const raw = JSON.stringify({
+      postUrl: "https://facebook.com/groups/psxinvestorspk/posts/7790045512",
+      author: { name: "Kashif Mehmood", url: "https://facebook.com/kashif.mehmood.pk" },
+      text: "Got my bonus this month. Should I go for gold, PSX or a savings certificate?",
+      comments: [
+        {
+          author: { name: "Farah Jamil", url: "https://facebook.com/farah.jamil.khi" },
+          text: "We sold my father's factory last month and I'm completely new to this. Where do I start with PSX?",
+          replies: [
+            {
+              author: { name: "Imran Butt", url: "https://facebook.com/imran.butt.isb" },
+              text: "Been investing for 8 years, my portfolio is 60% banks. Also own two rental apartments in Bahria.",
+            },
+          ],
+        },
+        {
+          author: { name: "Quick Profit Club", url: "https://facebook.com/quickprofitclub" },
+          text: "Join my WhatsApp for guaranteed 5% weekly profit!!",
+          replies: [],
+        },
+      ],
+    });
+    const r = parsePostDataJson(raw, createSeedState());
     expect(r.errors).toEqual([]);
     expect(r.drafts).toHaveLength(1);
     expect(r.drafts[0]!.comments).toHaveLength(2);
@@ -93,7 +180,7 @@ describe("parsePostDataJson", () => {
   });
 
   it("detects a duplicate postUrl as already collected", () => {
-    const state = createSeedState();
+    const state = fixtureState();
     const existingUrl = state.posts[0]!.postUrl;
     const r = parsePostDataJson(JSON.stringify(makePost({ postUrl: existingUrl })), state);
     expect(r.drafts).toEqual([]);
@@ -103,7 +190,7 @@ describe("parsePostDataJson", () => {
   });
 
   it("allowExisting returns an already-collected post as a draft (Sync re-import)", () => {
-    const state = createSeedState();
+    const state = fixtureState();
     const existingUrl = state.posts[0]!.postUrl;
     const r = parsePostDataJson(JSON.stringify(makePost({ postUrl: existingUrl })), state, { allowExisting: true });
     expect(r.drafts).toHaveLength(1);
@@ -113,7 +200,7 @@ describe("parsePostDataJson", () => {
 
 describe("addPosts batch import", () => {
   it("imports only the new posts and skips already-collected ones", () => {
-    const state = createSeedState();
+    const state = fixtureState();
     const existingUrl = state.posts[0]!.postUrl;
     const parsed = parsePostDataJson(
       JSON.stringify([makePost(), makePost({ postUrl: existingUrl })]),
@@ -128,7 +215,7 @@ describe("addPosts batch import", () => {
   });
 
   it("skips a draft whose URL was already collected, even inside one batch", () => {
-    const state = createSeedState();
+    const state = fixtureState();
     const parsed = parsePostDataJson(
       JSON.stringify([makePost(), makePost()]),
       state,
@@ -197,7 +284,7 @@ describe("postTitle", () => {
 
 describe("scrapedCount", () => {
   it("counts collected posts per source", () => {
-    const state = createSeedState();
+    const state = fixtureState();
     expect(scrapedCount(state, "src-1")).toBe(1);
     expect(scrapedCount(state, "src-4")).toBe(0);
   });
@@ -205,16 +292,16 @@ describe("scrapedCount", () => {
 
 describe("mergePostActivity (Sync)", () => {
   const incoming = (overrides: Record<string, unknown> = {}) => ({
-    postUrl: "https://facebook.com/groups/psxinvestorspk/posts/7781203344",
+    postUrl: POST_URL,
     author: { name: "Usman Tariq", url: "https://facebook.com/usman.tariq.pk" },
-    text: "Planning to put fresh money into PSX before the year ends. Which sectors are you all watching for 2027 — banks, cement or fertiliser? Share your thinking below.",
+    text: POST_TEXT,
     comments: [],
     sourceId: "src-1",
     ...overrides,
   });
 
   it("appends new comments and updates lastSyncedAt", () => {
-    const state = createSeedState();
+    const state = fixtureState();
     const draft = incoming({
       comments: [
         {
@@ -236,7 +323,7 @@ describe("mergePostActivity (Sync)", () => {
   });
 
   it("never duplicates a comment already present, but merges its new replies", () => {
-    const state = createSeedState();
+    const state = fixtureState();
     const existing = state.posts.find((p) => p.id === "post-1")!.comments[0]!;
     const draft = incoming({
       comments: [
@@ -286,5 +373,29 @@ describe("source jobs", () => {
     });
     expect(done.state.jobs[0]!.status).toBe("done");
     expect(runningJobForSource(done.state, "src-1")).toBeUndefined();
+  });
+
+  it("a collect job carries the joined sources on its result", () => {
+    const state = createSeedState();
+    const started = startSourceJob(state, {
+      id: "job-collect",
+      kind: "collect",
+      sourceId: null,
+      postId: null,
+      accountId: "acc-1",
+      startedAt: "2026-11-12T01:00:00.000Z",
+    });
+    expect(started.state.jobs[0]!.kind).toBe("collect");
+    const done = updateSourceJob(started.state, "job-collect", {
+      status: "done",
+      newPosts: 2,
+      result: {
+        sources: [
+          { id: "src-a", name: "Stocks To Watch", type: "group", url: "https://facebook.com/groups/111", memberCount: 12000, joinedByAccountId: "acc-1" },
+        ],
+      },
+    });
+    expect(done.state.jobs[0]!.result?.sources).toHaveLength(1);
+    expect(done.state.jobs[0]!.result?.sources[0]!.name).toBe("Stocks To Watch");
   });
 });
