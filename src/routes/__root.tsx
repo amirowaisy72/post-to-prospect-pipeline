@@ -17,6 +17,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { StoreProvider, useStore } from "@/lib/store";
+import { ThemeProvider } from "@/lib/theme";
 
 function NotFoundComponent() {
   return (
@@ -118,6 +119,11 @@ function RootShell({ children }: { children: ReactNode }) {
     <html lang="en">
       <head>
         <HeadContent />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var m=localStorage.getItem("leadhunter-theme")||"system";var d=m==="dark"||(m==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("dark",d);}catch(e){}})();`,
+          }}
+        />
       </head>
       <body>
         {children}
@@ -150,7 +156,8 @@ function RootComponent() {
   return (
     <QueryClientProvider client={queryClient}>
       <StoreProvider>
-        <SidebarProvider>
+        <ThemeProvider>
+          <SidebarProvider>
           <div className="flex min-h-screen w-full">
             <AppSidebar />
             <SidebarInset className="min-w-0 bg-background">
@@ -160,7 +167,8 @@ function RootComponent() {
               </main>
             </SidebarInset>
           </div>
-        </SidebarProvider>
+          </SidebarProvider>
+        </ThemeProvider>
         <Toaster richColors position="top-right" />
       </StoreProvider>
     </QueryClientProvider>
