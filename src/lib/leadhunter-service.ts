@@ -5,6 +5,9 @@
  */
 import type {
   Account,
+  AgentState,
+  AgentStatus,
+  AgentTask,
   AccountStatus,
   Activity,
   ActivityType,
@@ -77,10 +80,12 @@ export function createAccount(
 }
 
 export function setAccountStatus(state: AppState, id: string, status: AccountStatus): AppState {
-  return {
+  const next = {
     ...state,
     accounts: state.accounts.map((a) => (a.id === id ? { ...a, status } : a)),
   };
+  // A paused or blocked account's agent goes offline, so whatever it was doing stops.
+  return status === "active" ? next : finishAgentTask(next, id, new Date().toISOString());
 }
 
 /* ---------------- Sources ---------------- */
@@ -661,4 +666,76 @@ export function meetsSourcingRules(
   rules: Settings["sourcing"],
 ): boolean {
   return stats.comments >= rules.minComments && stats.members >= rules.minMembers;
+}
+
+// ---------------------------------------------------------------------------
+// Account agents — one per account; it can work on one task at a time.
+// ---------------------------------------------------------------------------
+
+export function agentFor(state: AppState, accountId: string): AgentState {
+  return (
+    state.agents?.find((a) => a.accountId === accountId) ?? {
+      accountId,
+      task: null,
+      lastTaskLabel: null,
+      lastFinishedAt: null,
+    }
+  );
+}
+
+/** Busy while it has a task, offline while its account is paused/blocked, otherwise free. */
+export function agentStatus(state: AppState, accountId: string): AgentStatus {
+  const account = state.accounts.find((a) => a.id === accountId);
+  if (!account || account.status !== "active") return "offline";
+  return agentFor(state, accountId).task ? "busy" : "free";
+}
+
+function putAgent(state: AppState, agent: AgentState): AppState {
+  const others = (state.agents ?? []).filter((a) => a.accountId !== agent.accountId);
+  return { ...state, agents: [...others, agent] };
+}
+
+/** Give an account's agent a task. Fails when the agent is offline or already busy. */
+export function startAgentTask(
+  state: AppState,
+  accountId: string,
+  task: Omit<AgentTask, "startedAt">,
+  now: string,
+): Result<AppState> {
+  const account = state.accounts.find((a) => a.id === accountId);
+  if (!account) return { ok: false, error: "Account not found." };
+  const status = agentStatus(state, accountId);
+  if (status === "offline")
+    return { ok: false, error: `${account.name} is ${account.status}, so its agent is offline.` };
+  const agent = agentFor(state, accountId);
+  if (agent.task)
+    return { ok: false, error: `${account.name}'s agent is busy: ${agent.task.label}. Wait for it or stop that task.` };
+  return { ok: true, value: putAgent(state, { ...agent, task: { ...task, startedAt: now } }) };
+}
+
+/** Mark the agent's current task done (or stopped). No-op when the agent is free. */
+export function finishAgentTask(state: AppState, accountId: string, now: string): AppState {
+  const agent = agentFor(state, accountId);
+  if (!agent.task) return state;
+  return putAgent(state, { ...agent, task: null, lastTaskLabel: agent.task.label, lastFinishedAt: now });
+}
+
+/** Simulated tasks whose expected time has passed. */
+export function dueAgentTasks(state: AppState, nowMs: number): AgentState[] {
+  return (state.agents ?? []).filter(
+    (a) => a.task?.expectedMs != null && Date.parse(a.task.startedAt) + a.task.expectedMs <= nowMs,
+  );
+}
+
+/** Finish every simulated task that is due. Returns the same state object when nothing changed. */
+export function finishDueAgentTasks(state: AppState, nowMs: number): AppState {
+  const due = dueAgentTasks(state, nowMs);
+  const now = new Date(nowMs).toISOString();
+  return due.reduce((s, a) => finishAgentTask(s, a.accountId, now), state);
+}
+
+/** 0–1 progress of a simulated task, or null when the length is unknown. */
+export function agentProgress(task: AgentTask, nowMs: number): number | null {
+  if (!task.expectedMs) return null;
+  return Math.min(1, Math.max(0, (nowMs - Date.parse(task.startedAt)) / task.expectedMs));
 }
