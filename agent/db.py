@@ -188,6 +188,17 @@ def upsert_source(source_id, name, type_, url, member_count=None,
     return source_id
 
 
+def touch_source_scraped(source_id, when_iso):
+    """Record when a source was last scraped: a completed run
+    re-visited the source even with 0 new posts, so the row shows
+    this run instead of an old failure."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE sources SET last_scraped_at=? WHERE id=?",
+            (when_iso, source_id),
+        )
+
+
 def get_source_by_id(source_id):
     """One source row as a dict, or None."""
     with _connect() as conn:

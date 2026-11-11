@@ -554,6 +554,25 @@ export function mergePostActivity(
 
 /* ---------------- Source scrap/sync jobs ---------------- */
 
+/**
+ * Mark a source as scraped/synced just now. A completed run
+ * re-visited the source even when it found nothing new, so the
+ * "Last scraped" column must advance — otherwise the row keeps
+ * showing an old failure after a run that actually finished.
+ */
+export function markSourceScraped(
+  state: AppState,
+  sourceId: string,
+  now: string,
+): { state: AppState } {
+  return {
+    state: {
+      ...state,
+      sources: state.sources.map((s) => (s.id === sourceId ? { ...s, lastScrapedAt: now } : s)),
+    },
+  };
+}
+
 export function startSourceJob(
   state: AppState,
   job: {

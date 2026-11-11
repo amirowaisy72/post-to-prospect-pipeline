@@ -25,7 +25,14 @@ if str(AGENT_DIR) not in sys.path:
 
 import db  # noqa: E402
 import jobs  # noqa: E402
-from facebook import FacebookWorker  # noqa: E402
+from facebook import (  # noqa: E402
+    _ARTICLE_COUNT_JS,
+    _CLOSE_DIALOG_JS,
+    _FEED_DIAG_JS,
+    _FEED_POSTS_JS,
+    _OPEN_FEED_POST_JS,
+    FacebookWorker,
+)
 from timestamps import (  # noqa: E402
     extract_timestamp_label,
     parse_exact_description,
@@ -113,7 +120,8 @@ class _FakePage:
                  anchors_by_url=None, gate_by_url=None, join_urls=None,
                  leave_flow=None, gate_sequence_by_url=None,
                  feed_loading_by_url=None, goto_raises_for=None,
-                 blank=False):
+                 blank=False, feed_diag=None, open_post_result=True,
+                 open_post_url=None, ready_after=0):
         self._pages = dict(pages or {})
         self._feed_posts = list(feed_posts or [])
         self._extract_payload = extract_payload
@@ -145,6 +153,33 @@ class _FakePage:
         self._scrolls = 0
         self._expand_calls = 0
         self._expanded = False
+        # feed_diag: canned result for the "feed-diag" diagnostic
+        # pass (None = a plausible mixed feed). open_post_result /
+        # open_post_url: what the "open-feed-post" click does — True
+        # sets the address bar to open_post_url (the dialog's real
+        # post URL), False means the post was not found in the feed.
+        # ready_after: inner_text("body") stays "" for the first N
+        # calls (a mid-render page) and links stay hidden until
+        # then — 0 keeps the old behaviour (content at once).
+        self._feed_diag = feed_diag if feed_diag is not None else {
+            "total": 3, "article_tags": 3, "role_articles": 0,
+            "top_level": 3, "nested": 0, "with_heading": 3,
+            "with_permalink": 2, "with_comment_button": 3,
+            "samples": [
+                {"aria_label": "Amit's post",
+                 "text_head": "Amit's post Market opens strong today",
+                 "has_permalink": True, "has_comment_button": True},
+                {"aria_label": "Barbara's post",
+                 "text_head": "Barbara's post Check this chart",
+                 "has_permalink": False, "has_comment_button": True},
+            ]}
+        self._open_post_result = open_post_result
+        self._open_post_url = (open_post_url or
+            "https://www.facebook.com/groups/572426944223825/permalink/999/")
+        self.open_calls = []
+        self.close_calls = 0
+        self._ready_after = ready_after
+        self._ready_calls = 0
         self.url = ""
         # blank=True: a fresh tab that never rendered (empty body) —
         # the session check must prove the session at the job's
@@ -174,11 +209,17 @@ class _FakePage:
 
     def inner_text(self, selector):
         if selector == "body":
+            self._ready_calls += 1
+            if self._ready_calls <= self._ready_after:
+                return ""
             return self._body
         return ""
 
     def query_selector_all(self, selector):
         if "a[href]" in selector:
+            if self._ready_after > 0 and \
+                    self._ready_calls <= self._ready_after:
+                return []
             return list(self._anchors_by_url.get(self.url, []))
         return []
 
@@ -240,6 +281,16 @@ class _FakePage:
         if "feed-posts" in js:
             self.eval_calls += 1
             return [dict(p) for p in self._feed_posts]
+        if "feed-diag" in js:
+            return dict(self._feed_diag)
+        if "open-feed-post" in js:
+            self.open_calls.append(args[0] if args else None)
+            if self._open_post_result:
+                self.url = self._open_post_url
+            return self._open_post_result
+        if "close-dialog" in js:
+            self.close_calls += 1
+            return True
         if "dialog-state" in js:
             return self._dialog_state()
         if "dialog-scroll" in js:
@@ -1199,3 +1250,166 @@ class TestChromeProfile:
         assert db.get_source_by_id("src1") is not None
         health = client.get("/health")
         assert health.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# (i) Feed selectors: literal <article> tags + comment-button opening
+# ---------------------------------------------------------------------------
+
+class TestFeedSelectors:
+    def test_feed_js_selects_literal_article_tags(self):
+        # Live feed posts are literal <article> tags (implicit role,
+        # no role attribute) — the old div[role="article"]-only
+        # selector found nothing. Both forms must be selected, and a
+        # nested <article> must count as nested just like a nested
+        # role="article" ancestor.
+        assert 'article, div[role="article"]' in _FEED_POSTS_JS
+        assert 'article, div[role="article"]' in _ARTICLE_COUNT_JS
+        assert "tagName === 'ARTICLE'" in _FEED_POSTS_JS
+        assert "tagName === 'ARTICLE'" in _FEED_DIAG_JS
+        assert "tagName === 'ARTICLE'" in _OPEN_FEED_POST_JS
+
+    def test_feed_js_keeps_comment_button_posts_without_permalink(self):
+        # A post with no /permalink/ or /posts/ link (e.g. a photo
+        # post) is kept when it has a comment button, keyed so it
+        # can be opened via that button later.
+        assert "has_comment_button" in _FEED_POSTS_JS
+        assert "post_url: url" in _FEED_POSTS_JS
+        assert "open-feed-post" in _OPEN_FEED_POST_JS
+        assert "close-dialog" in _CLOSE_DIALOG_JS
+
+
+class TestFeedDiagnostic:
+    def test_zero_new_posts_emits_diagnostic_and_finishes_done(self):
+        # A completed 0-post run is a finish, not a failure: the job
+        # is "done", its message carries the feed diagnostic, and
+        # the source's last_scraped_at advances so the row shows
+        # this run instead of an old failure.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            feed_posts=[])
+        job = _scrape_job()
+        notes = []
+        jobs.run_scrape(FacebookWorker(), page, db, job,
+                        lambda: False, note=notes.append)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["error"] is None
+        assert row["new_posts"] == 0
+        assert any("feed diagnostic:" in n for n in notes)
+        assert any("3 article-ish elements (3 <article>" in n
+                   for n in notes)
+        assert any("comment button" in n for n in notes)
+        assert row["message"] and "feed diagnostic:" in row["message"]
+        src = db.get_source_by_id("src1")
+        assert src is not None and src["last_scraped_at"]
+
+
+class TestCommentButtonOpen:
+    def _barbara_entry(self):
+        return {"post_url": None, "author_name": "Barbara",
+                "comment_count": 17, "key": "Barbara|17|chart",
+                "has_comment_button": True}
+
+    def test_post_without_permalink_opens_via_comment_button(self):
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            feed_posts=[self._barbara_entry()],
+            extract_payload=_extract_payload([_comment("Amit", "nice")]))
+        job = _scrape_job()
+        _run_scrape(page, job)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 1
+        assert page.open_calls == ["Barbara|17|chart"]
+        posts = db.get_posts_for_source("src1")
+        assert len(posts) == 1
+        assert posts[0]["post_url"] == \
+            "https://www.facebook.com/groups/572426944223825/permalink/999/"
+        assert posts[0]["author_name"] == "Poster"
+
+    def test_unopenable_post_is_skipped_not_failed(self):
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            feed_posts=[self._barbara_entry()],
+            extract_payload=_extract_payload([_comment("Amit", "nice")]),
+            open_post_result=False)
+        job = _scrape_job()
+        notes = []
+        jobs.run_scrape(FacebookWorker(), page, db, job,
+                        lambda: False, note=notes.append)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 0
+        assert db.get_posts_for_source("src1") == []
+        assert any("could not open post by comment button" in n
+                   for n in notes)
+
+    def test_dialog_closed_between_posts(self):
+        # Two permalink posts in one run: each extraction closes
+        # its dialog, so the second post starts from a clean page
+        # instead of stranding on the first post's dialog.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            feed_posts=_feed_posts(POST_URLS[:2]),
+            extract_payload=_extract_payload([_comment("Amit", "nice")]))
+        job = _scrape_job()
+        _run_scrape(page, job)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["posts_processed"] == 2
+        assert page.close_calls == 2
+
+
+class TestVerifySessionNoReload:
+    def test_already_on_target_skips_reload(self):
+        # Reproducible live pattern: the second Scrap press failed
+        # "page did not load (state: empty)" because the check
+        # reloaded a heavy feed it was already sitting on. When the
+        # browser is already on the target URL, no reload happens.
+        page = _FakePage(pages={GROUP_URL: {
+            "body_text": "captcha warning",
+            "title": "Stock Market Traders."}})
+        page.goto(GROUP_URL)
+        notes = []
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False, notes.append), GROUP_URL)
+        assert state == "blocked"
+        assert page.goto_calls.count(GROUP_URL) == 1
+        assert any("target_nav=skipped (already on target)" in n
+                   for n in notes)
+
+    def test_readiness_wait_rescues_mid_render_page(self):
+        # A page still rendering after the previous run's scrolling
+        # must not be misread as "empty": the readiness wait lets
+        # the body appear before the first check.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            ready_after=2)
+        page.goto(GROUP_URL)
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False), GROUP_URL)
+        assert state == "ok"
+        assert page.goto_calls == [GROUP_URL]
+
+    def test_failure_note_records_session_path(self):
+        # On failure the note must name the exact step that broke:
+        # current URL + state, and whether the target navigation
+        # was skipped or attempted and failed.
+        page = _FakePage(blank=True, goto_raises_for={GROUP_URL})
+        notes = []
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False, notes.append), GROUP_URL)
+        assert state == "empty"
+        assert any("current_url=" in n and
+                   "target_nav=attempted, goto failed" in n for n in notes)

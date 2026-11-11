@@ -130,11 +130,13 @@ def verification_message(entry):
 
 
 def _finish_job(db, job_id, *, stopped, verification, processed,
-                new_posts=None):
+                new_posts=None, extra_message=None):
     """Write the final job state: verification entries, a plain
     message when anything mismatched, and the terminal status —
     "stopped", "incomplete" (finished, but >=1 post mismatched) or
-    "done" (every touched post verified complete)."""
+    "done" (every touched post verified complete). ``extra_message``
+    (e.g. the 0-found feed diagnostic) is stored alongside but never
+    changes the status — it is information, not a mismatch."""
     messages = [m for m in (verification_message(e) for e in verification)
                 if m]
     if stopped:
@@ -143,6 +145,8 @@ def _finish_job(db, job_id, *, stopped, verification, processed,
         status = "incomplete"
     else:
         status = "done"
+    if extra_message:
+        messages.append(extra_message)
     fields = {"status": status, "finished_at": _now_iso(),
               "posts_processed": processed,
               "verification": verification,
@@ -304,43 +308,65 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
         known = {p["post_url"] for p in db.get_posts_for_source(source_id)} \
             if source_id else set()
         limit = job.get("limit") or 50
-        urls = worker.collect_feed_post_urls(
+        entries, diag = worker.collect_feed_posts(
             page, source_url, known, limit, _ctx(should_stop, note))
         processed = 0
         new_posts = 0
         stopped = False
         verification = []
-        for url in urls:
+        for entry in entries:
             # Stop is checked BEFORE starting each post; a post already
             # in progress is always finished and saved first.
             if should_stop():
                 stopped = True
                 break
             collected_at = _now_dt()
+            ctx = _ctx(should_stop, note)
+            url = (entry or {}).get("post_url")
+            data = None
+            real_url = url
             try:
-                data = worker.extract_post(page, url, _ctx(should_stop, note))
+                if url:
+                    data = worker.extract_post(page, url, ctx)
+                else:
+                    # No permalink link (e.g. a photo post): open it
+                    # via its comment button; the real URL is read
+                    # from the address bar once the dialog opens.
+                    opened = worker.extract_post_via_comment_button(
+                        page, source_url, entry, ctx)
+                    if opened:
+                        real_url, data = opened
             except Exception:
                 data = None
-            if not data:
+                real_url = None
+            if not data or not real_url:
+                # A post that fails to open is skipped with a plain
+                # note (inside the worker) — it never fails the job.
                 continue
-            is_new = not db.known_post_url(url)
-            post_dict = _to_post_dict(data, source_id, account_id, url,
+            is_new = not db.known_post_url(real_url)
+            post_dict = _to_post_dict(data, source_id, account_id, real_url,
                                       collected_at)
             db.save_post(post_dict)
             processed += 1
             if is_new:
                 new_posts += 1
-            entry = verification_entry(
-                url, data.get("comment_total"),
+            ventry = verification_entry(
+                real_url, data.get("comment_total"),
                 count_tree_nodes(post_dict["comments"]))
-            verification.append(entry)
-            msg = verification_message(entry)
+            verification.append(ventry)
+            msg = verification_message(ventry)
             if msg:
-                note(f"{url}: {msg}")
+                note(f"{real_url}: {msg}")
             db.update_job(job_id, posts_processed=processed,
                           new_posts=new_posts, verification=verification)
         _finish_job(db, job_id, stopped=stopped, verification=verification,
-                    processed=processed, new_posts=new_posts)
+                    processed=processed, new_posts=new_posts,
+                    extra_message=diag)
+        if source_id:
+            # A completed run re-visited the source even with 0 new
+            # posts: record it, so the row shows this run instead of
+            # an old failure.
+            db.touch_source_scraped(source_id, _now_iso())
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
 

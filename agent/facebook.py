@@ -76,13 +76,20 @@ BLOCK_MARKERS = [
     "log in to continue",
 ]
 
-# JS: collect the feed's posts. Posts are top-level <article> elements
-# headed "<Name>'s post"; nested "Comment by"/"Reply by" articles and
-# "Loading..." placeholders are skipped. The post URL is the
-# /permalink/<id>/ or /posts/<id>/ link inside the article; the
-# comment count comes from the Comment button's aria-label
+# JS: collect the feed's posts. Posts are top-level <article>
+# elements headed "<Name>'s post" — in the live feed these are
+# literal <article> tags (implicit article role, no role attribute),
+# while the post dialog's comments ARE div[role="article"], so the
+# selector must cover BOTH forms. Nested "Comment by"/"Reply by"
+# articles and "Loading..." placeholders are skipped. The post URL
+# is the /permalink/<id>/ or /posts/<id>/ link inside the article;
+# the comment count comes from the Comment button's aria-label
 # ("Comment on X's post, N comments") inside the same article.
-# Test doubles return their canned data when they see "feed-posts".
+# A post with no permalink link (e.g. a photo post) is still kept
+# when it has a comment button — it is opened via that button
+# later, keyed by author + comment count + text head so it can be
+# found again. Test doubles return their canned data when they see
+# "feed-posts".
 _FEED_POSTS_JS = r"""() => {
  /* feed-posts */
  function toNum(s) {
@@ -109,9 +116,14 @@ _FEED_POSTS_JS = r"""() => {
    if (m) return m[1].trim();
    return null;
  }
+ function entryKey(name, cc, text) {
+   const head = (text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+   return name + '|' + (cc === null || cc === undefined ? '' : cc) + '|' + head;
+ }
  function isNested(art) {
    let anc = art.parentElement;
    while (anc) {
+     if (anc.tagName === 'ARTICLE') return true;
      if (anc.getAttribute && anc.getAttribute('role') === 'article') return true;
      anc = anc.parentElement;
    }
@@ -119,7 +131,8 @@ _FEED_POSTS_JS = r"""() => {
  }
  const out = [];
  const seen = new Set();
- for (const art of document.querySelectorAll('div[role="article"]')) {
+ const seenKeys = new Set();
+ for (const art of document.querySelectorAll('article, div[role="article"]')) {
    if (isNested(art)) continue;
    const lab = art.getAttribute('aria-label') || '';
    if (/^\s*(Comment|Reply) by /i.test(lab)) continue;
@@ -128,17 +141,164 @@ _FEED_POSTS_JS = r"""() => {
    const name = headingName(art);
    if (!name) continue;
    const url = postLink(art);
-   if (!url || seen.has(url)) continue;
-   seen.add(url);
    let cc = null;
+   let btn = null;
    for (const el of art.querySelectorAll('[aria-label]')) {
      const l2 = el.getAttribute('aria-label') || '';
      const cm = l2.match(/Comment on (.+?)'s post,\s*(\d[\d.,]*\s*[KM]?)\s+comments?/i);
-     if (cm) { cc = toNum(cm[2]); break; }
+     if (cm) { btn = el; cc = toNum(cm[2]); break; }
    }
-   out.push({post_url: url, author_name: name, comment_count: cc});
+   if (!url && !btn) continue;
+   const key = entryKey(name, cc, text);
+   if (url) {
+     if (seen.has(url)) continue;
+     seen.add(url);
+   } else {
+     if (seenKeys.has(key)) continue;
+     seenKeys.add(key);
+   }
+   out.push({post_url: url, author_name: name, comment_count: cc, has_comment_button: !!btn, key: key});
  }
  return out;
+}"""
+
+# JS: one diagnostic pass over the feed when a scrape finds 0 new
+# posts — how many article-ish elements exist, in which form, how
+# many are top-level / headed / linkable / openable, plus the first
+# 3 top-level samples (aria-label + text head + which opening path
+# each has). Test doubles return their canned data when they see
+# "feed-diag".
+_FEED_DIAG_JS = r"""() => {
+ /* feed-diag */
+ function postLink(el) {
+   const links = el.querySelectorAll('a[href]');
+   for (const a of links) {
+     const h = a.getAttribute('href') || '';
+     if (/\/(permalink|posts)\/\d+/.test(h)) return true;
+   }
+   return false;
+ }
+ function hasHeading(art) {
+   const lab = art.getAttribute('aria-label') || '';
+   if (/^\s*(.+?)'s post\b/i.test(lab)) return true;
+   return /^\s*(.+?)'s post\b/m.test(art.innerText || '');
+ }
+ function hasCommentButton(art) {
+   for (const el of art.querySelectorAll('[aria-label]')) {
+     if (/Comment on (.+?)'s post,\s*\d[\d.,]*\s*[KM]?\s+comments?/i.test(el.getAttribute('aria-label') || '')) return true;
+   }
+   return false;
+ }
+ function isNested(art) {
+   let anc = art.parentElement;
+   while (anc) {
+     if (anc.tagName === 'ARTICLE') return true;
+     if (anc.getAttribute && anc.getAttribute('role') === 'article') return true;
+     anc = anc.parentElement;
+   }
+   return false;
+ }
+ const els = document.querySelectorAll('article, div[role="article"]');
+ let articleTags = 0, roleArticles = 0, topLevel = 0, nested = 0;
+ let withHeading = 0, withPermalink = 0, withCommentButton = 0;
+ const samples = [];
+ for (const art of els) {
+   if (art.tagName === 'ARTICLE') articleTags++;
+   if (art.getAttribute && art.getAttribute('role') === 'article') roleArticles++;
+   const nest = isNested(art);
+   if (nest) nested++; else topLevel++;
+   const h = hasHeading(art);
+   const p = postLink(art);
+   const c = hasCommentButton(art);
+   if (h) withHeading++;
+   if (p) withPermalink++;
+   if (c) withCommentButton++;
+   if (!nest && samples.length < 3) {
+     samples.push({
+       aria_label: (art.getAttribute('aria-label') || '').slice(0, 120),
+       text_head: (art.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+       has_permalink: p,
+       has_comment_button: c,
+     });
+   }
+ }
+ return {total: els.length, article_tags: articleTags, role_articles: roleArticles, top_level: topLevel, nested: nested, with_heading: withHeading, with_permalink: withPermalink, with_comment_button: withCommentButton, samples: samples};
+}"""
+
+# JS: open one feed post by clicking its comment button — the path
+# for posts with no /permalink/ or /posts/ link (e.g. photo posts).
+# Takes the entry key from _FEED_POSTS_JS (author + comment count +
+# text head); finds the matching top-level article, scrolls it into
+# view and clicks its Comment button, which opens the post as a
+# dialog. Returns true when a button was clicked. Test doubles
+# return their canned result when they see "open-feed-post".
+_OPEN_FEED_POST_JS = r"""(key) => {
+ /* open-feed-post */
+ function toNum(s) {
+   const m = /(\d[\d.,]*)\s*([KM])?/i.exec(s || '');
+   if (!m) return null;
+   if (m[2]) return Math.round(parseFloat(m[1].replace(/,/g, '')) * (m[2].toUpperCase() === 'K' ? 1e3 : 1e6));
+   return parseInt(m[1].replace(/[.,]/g, ''), 10);
+ }
+ function headingName(art) {
+   const lab = art.getAttribute('aria-label') || '';
+   let m = lab.match(/^\s*(.+?)'s post\b/i);
+   if (m) return m[1].trim();
+   const t = (art.innerText || '');
+   m = t.match(/^\s*(.+?)'s post\b/m);
+   if (m) return m[1].trim();
+   return null;
+ }
+ function entryKey(name, cc, text) {
+   const head = (text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+   return name + '|' + (cc === null || cc === undefined ? '' : cc) + '|' + head;
+ }
+ function isNested(art) {
+   let anc = art.parentElement;
+   while (anc) {
+     if (anc.tagName === 'ARTICLE') return true;
+     if (anc.getAttribute && anc.getAttribute('role') === 'article') return true;
+     anc = anc.parentElement;
+   }
+   return false;
+ }
+ for (const art of document.querySelectorAll('article, div[role="article"]')) {
+   if (isNested(art)) continue;
+   const lab = art.getAttribute('aria-label') || '';
+   if (/^\s*(Comment|Reply) by /i.test(lab)) continue;
+   const text = (art.innerText || '');
+   if (/^\s*Loading\.\.\./.test(text)) continue;
+   const name = headingName(art);
+   if (!name) continue;
+   let cc = null, btn = null;
+   for (const el of art.querySelectorAll('[aria-label]')) {
+     const l2 = el.getAttribute('aria-label') || '';
+     const cm = l2.match(/Comment on (.+?)'s post,\s*(\d[\d.,]*\s*[KM]?)\s+comments?/i);
+     if (cm) { btn = el; cc = toNum(cm[2]); break; }
+   }
+   if (!btn) continue;
+   if (entryKey(name, cc, text) !== key) continue;
+   try { art.scrollIntoView({block: 'center'}); } catch (e) {}
+   try { btn.click(); return true; } catch (e) { return false; }
+ }
+ return false;
+}"""
+
+# JS: close the single-post dialog (its Close button, else Escape).
+# Returns true when no dialog remains. Test doubles return their
+# canned result when they see "close-dialog".
+_CLOSE_DIALOG_JS = r"""() => {
+ /* close-dialog */
+ const dlg = document.querySelector('div[role="dialog"]');
+ if (!dlg) return true;
+ const btn = dlg.querySelector('[aria-label="Close"]');
+ if (btn) {
+   try { btn.click(); } catch (e) {}
+ } else {
+   try { document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})); } catch (e) {}
+   try { document.dispatchEvent(new KeyboardEvent('keyup', {key: 'Escape', bubbles: true})); } catch (e) {}
+ }
+ return !document.querySelector('div[role="dialog"]');
 }"""
 
 # JS: extract ONE post from its modal dialog — a port of
@@ -395,12 +555,15 @@ _EXPAND_JS = r"""() => {
  return clicked;
 }"""
 
-# JS: how many div[role="article"] are currently in the DOM. Used to
-# wait for the feed to actually render before the first extraction.
-# Test doubles return their canned count when they see "article-count".
+# JS: how many article-ish elements are currently in the DOM —
+# literal <article> tags AND div[role="article"] (the live feed
+# uses literal <article> tags; the dialog's comments use the role
+# form). Used to wait for the feed to actually render before the
+# first extraction. Test doubles return their canned count when
+# they see "article-count".
 _ARTICLE_COUNT_JS = r"""() => {
  /* article-count */
- try { return document.querySelectorAll('div[role="article"]').length; }
+ try { return document.querySelectorAll('article, div[role="article"]').length; }
  catch (e) { return 0; }
 }"""
 
@@ -489,6 +652,21 @@ _FILE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp|svg|html|htm|php|pdf|mp4|cs
 def _clean_text(text: str, limit: int = 200) -> str:
     """Collapse whitespace and truncate a snippet for logging."""
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
+
+
+def _same_url(a: str, b: str) -> bool:
+    """Same Facebook page, ignoring scheme/host case, a trailing
+    slash and any query/fragment — a feed already open at the
+    target URL must not be reloaded (a same-URL reload of a heavy
+    feed is slow and can time out even with the goto retry)."""
+    def norm(u):
+        try:
+            p = urlparse((u or "").strip())
+            return (p.scheme.lower(), p.netloc.lower(),
+                    (p.path.rstrip("/") or "/"))
+        except Exception:
+            return ("", "", (u or "").strip().rstrip("/"))
+    return bool(a and b) and norm(a) == norm(b)
 
 
 # ----------------------------------------------------------------------
@@ -882,6 +1060,9 @@ class FacebookWorker:
         The Facebook home page is NEVER used as the session gate:
         home hangs in this Chromium, so a home load cannot tell a
         live session from a dead one. The check is, in order:
+        (0) one bounded readiness wait, so a mid-render page (still
+            loading feed content after the previous run's scrolling)
+            is not misread as "empty";
         (1) the page the browser is already on — a loaded,
             signed-in group/feed page proves the session with no
             navigation at all;
@@ -889,35 +1070,69 @@ class FacebookWorker:
             for scrape/sync, the search URL for collect) — if it
             loads with a live session the job is already where it
             needs to be, so the page is left there for the job's
-            own load to reuse;
+            own load to reuse. When the browser is ALREADY on the
+            target URL the reload is skipped entirely: a same-URL
+            reload of a heavy Facebook feed is slow (domcontentloaded
+            can exceed the 20s timeout even with the retry) and is
+            pure cost when the page is already there;
         (3) otherwise the actual detected state (logged_out /
             checkpoint / blocked / empty) — an unloaded page is
-            reported as "empty", never as "not signed in".
+            reported as "empty", never as "not signed in". On
+            failure the note records the path taken (current URL +
+            state, whether the target navigation was skipped or
+            attempted and failed) so the next failure names the
+            exact step that broke.
         """
+        target = (target_url or "").strip()
+        target_nav = "no target"
+        try:
+            self._wait_ready(page, ctx)
+        except Exception:
+            pass
+        try:
+            current_url = page.url or ""
+        except Exception:
+            current_url = ""
         try:
             state = self.check_session(page, ctx)
         except Exception:
             state = "empty"
         if state == "ok":
             return "ok"
-        target = (target_url or "").strip()
         if target:
-            # The current page cannot prove the session (fresh tab,
-            # login wall, checkpoint, block, or an unloaded page) —
-            # prove it at the job's own target instead of home.
-            try:
-                if self._goto(page, target, ctx, "session_target"):
-                    if not self._wait_ready(page, ctx):
-                        # Slow SPA load: one more bounded readiness
-                        # wait before calling the page empty.
-                        self._wait_ready(page, ctx)
+            if _same_url(current_url, target):
+                # Already on the target: wait for it to settle and
+                # check as-is — never reload it.
+                target_nav = "skipped (already on target)"
+                try:
+                    self._wait_ready(page, ctx)
+                except Exception:
+                    pass
+                try:
                     state = self.check_session(page, ctx)
-                else:
+                except Exception:
                     state = "empty"
-            except Exception as exc:  # noqa: BLE001 - never raise on a check
-                _note(ctx, f"session check failed: {exc}")
-                state = "empty"
+            else:
+                target_nav = "attempted"
+                try:
+                    if self._goto(page, target, ctx, "session_target"):
+                        if not self._wait_ready(page, ctx):
+                            # Slow SPA load: one more bounded readiness
+                            # wait before calling the page empty.
+                            self._wait_ready(page, ctx)
+                        state = self.check_session(page, ctx)
+                    else:
+                        state = "empty"
+                        target_nav = "attempted, goto failed"
+                except Exception as exc:  # noqa: BLE001 - never raise
+                    _note(ctx, f"session check failed: {exc}")
+                    state = "empty"
+                    target_nav = "attempted, raised"
         if state != "ok":
+            _note(ctx,
+                  f"session check failed: state={state} "
+                  f"current_url={current_url or '?'} "
+                  f"target={target or 'none'} target_nav={target_nav}")
             if state == "empty":
                 _note(ctx, "Facebook session state: empty — the target "
                            "page did not load; the browser may still "
@@ -1021,27 +1236,97 @@ class FacebookWorker:
                 time.sleep(poll_ms / 1000.0)
         return count
 
+    def _feed_diagnostic(self, page: Page, ctx: dict | None = None):
+        """One diagnostic pass over the feed when a scrape finds 0
+        new posts: how many article-ish elements exist, in which
+        form, how many are top-level / headed / linkable / openable
+        — plus the first 3 top-level samples with which opening path
+        each has. Noted to the job log and returned as text (None
+        when the pass fails). Never raises."""
+        try:
+            diag = page.evaluate(_FEED_DIAG_JS) or {}
+        except Exception:
+            return None
+        if not isinstance(diag, dict) or not diag:
+            return None
+        samples = []
+        for s in (diag.get("samples") or [])[:3]:
+            s = s or {}
+            samples.append(
+                f"\"{s.get('aria_label') or ''}\" "
+                f"\"{s.get('text_head') or ''}\" "
+                f"(permalink: {'yes' if s.get('has_permalink') else 'no'}, "
+                f"comment button: "
+                f"{'yes' if s.get('has_comment_button') else 'no'})")
+        text = (
+            f"feed diagnostic: {diag.get('total') or 0} article-ish elements "
+            f"({diag.get('article_tags') or 0} <article>, "
+            f"{diag.get('role_articles') or 0} div[role=\"article\"]), "
+            f"{diag.get('top_level') or 0} top-level, "
+            f"{diag.get('with_heading') or 0} with \"<Name>'s post\" heading, "
+            f"{diag.get('with_permalink') or 0} with permalink, "
+            f"{diag.get('with_comment_button') or 0} with comment button"
+            + (f"; samples: {'; '.join(samples)}" if samples else ""))
+        _note(ctx, text)
+        return text
+
+    def _close_dialog(self, page: Page, ctx: dict | None = None) -> bool:
+        """Close the single-post dialog (its Close button, else
+        Escape) so the next post starts from a clean page. Returns
+        True when no dialog remains. Never raises."""
+        for _ in range(2):
+            try:
+                closed = page.evaluate(_CLOSE_DIALOG_JS)
+            except Exception:
+                return True
+            if closed is not False:
+                return True
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+        return False
+
+    def _ensure_on_feed(self, page: Page, source_url: str,
+                        ctx: dict | None = None) -> bool:
+        """Make sure the browser is on the source feed: skip the
+        reload when it is already there (a same-URL reload of a
+        heavy feed is slow), else load it. Returns False when the
+        feed did not load with a live session. Never raises."""
+        try:
+            if _same_url(page.url, source_url):
+                self._wait_ready(page, ctx)
+                return self.check_session(page, ctx) == "ok"
+        except Exception:
+            pass
+        return self._load(page, source_url, ctx, "source")
+
     # ------------------------------------------------------------------
     # Feed collection + single-post extraction
     # ------------------------------------------------------------------
-    def collect_feed_post_urls(self, page: Page, source_url: str,
-                               known_urls, limit: int,
-                               ctx: dict | None = None) -> list:
-        """Collect NEW post URLs from a group/page feed.
+    def collect_feed_posts(self, page: Page, source_url: str,
+                           known_urls, limit: int,
+                           ctx: dict | None = None):
+        """Collect NEW feed posts as entries {post_url|None,
+        author_name, comment_count, has_comment_button, key}.
 
         Loads the feed, waits for articles, then rounds of
-        _FEED_POSTS_JS + scroll. Stops at ``limit``, after a streak of
-        10 already-known URLs, or after 5 rounds that bring nothing
-        new (Facebook loads lazily, so a few empty rounds are normal).
-        Each round checks ctx stop. Returns only URLs not in
-        ``known_urls``. Never raises.
+        _FEED_POSTS_JS + scroll. Stops at ``limit``, after a streak
+        of 10 already-known URLs, or after 5 rounds that bring
+        nothing new (Facebook loads lazily, so a few empty rounds
+        are normal). A post with no /permalink/ or /posts/ link
+        (e.g. a photo post) is kept when it has a comment button —
+        it is opened via that button later. Returns (entries, diag):
+        ``diag`` is the 0-found diagnostic text when nothing new
+        was found, else None. Never raises.
         """
         known = set(known_urls or [])
         if not self._load(page, source_url, ctx, "source"):
-            return []
+            return [], None
         self._wait_for_articles(page, ctx)
         found: list = []
         seen = set(known)
+        seen_keys = set()
         known_streak = 0
         empty_rounds = 0
         for _ in range(60):
@@ -1056,17 +1341,24 @@ class FacebookWorker:
             new_this_round = 0
             for row in rows or []:
                 url = (row or {}).get("post_url")
-                if not url:
-                    continue
-                if url in known:
-                    known_streak += 1
-                    if known_streak >= 10:
-                        break
-                    continue
-                if url in seen:
-                    continue
-                seen.add(url)
-                found.append(url)
+                key = (row or {}).get("key") or ""
+                if url:
+                    if url in known:
+                        known_streak += 1
+                        if known_streak >= 10:
+                            break
+                        continue
+                    if url in seen:
+                        continue
+                    seen.add(url)
+                else:
+                    if not (row or {}).get("has_comment_button"):
+                        continue
+                    if key and key in seen_keys:
+                        continue
+                    if key:
+                        seen_keys.add(key)
+                found.append(row)
                 new_this_round += 1
                 known_streak = 0
                 if len(found) >= limit:
@@ -1090,7 +1382,22 @@ class FacebookWorker:
                 page.wait_for_timeout(2000)
             except Exception:
                 time.sleep(2)
-        return found
+        diag = None
+        if not found:
+            diag = self._feed_diagnostic(page, ctx)
+        return found, diag
+
+    def collect_feed_post_urls(self, page: Page, source_url: str,
+                               known_urls, limit: int,
+                               ctx: dict | None = None) -> list:
+        """URLs of new feed posts (see collect_feed_posts). Kept for
+        callers that only need links; posts without a permalink are
+        dropped here — use collect_feed_posts to open those via
+        their comment button. Never raises.
+        """
+        entries, _ = self.collect_feed_posts(
+            page, source_url, known_urls, limit, ctx)
+        return [e.get("post_url") for e in entries if e.get("post_url")]
 
     def _dialog_state(self, page: Page) -> dict:
         """Current dialog state via _DIALOG_STATE_JS, or {} when there
@@ -1163,25 +1470,19 @@ class FacebookWorker:
             _note(ctx, f"expanded {total_clicked} buttons in post dialog")
         return total_clicked
 
-    def extract_post(self, page: Page, post_url: str,
-                     ctx: dict | None = None) -> dict | None:
-        """Extract one post (with comments/replies) from its dialog —
-        EXHAUSTIVELY. No comment or reply may be missed.
-
-        Gotos the post URL, waits up to 20s for the dialog, then
-        repeats scroll+expand cycles until a full pass adds nothing
-        new: scroll the dialog until the stated comment total is
-        loaded (or 5 no-new scrolls with no "Loading..." placeholders
-        left), click every expand button until a pass clicks 0, then
-        scroll again (expanding can trigger more loading). Only then
-        is the post extracted. The returned dict carries
-        ``comment_total`` (the post's stated total, or None) alongside
-        the usual author/text/comments. Returns None when the dialog
-        never appears. Never raises.
-        """
-        if not self._goto(page, post_url, ctx, "post"):
-            return None
-        self._wait_ready(page, ctx)
+    def _extract_dialog_contents(self, page: Page,
+                                 ctx: dict | None = None,
+                                 label: str = "post") -> dict | None:
+        """Wait for the post dialog, then repeat scroll+expand
+        cycles until a full pass adds nothing new: scroll the dialog
+        until the stated comment total is loaded (or 5 no-new
+        scrolls with no "Loading..." placeholders left), click every
+        expand button until a pass clicks 0, then scroll again
+        (expanding can trigger more loading). Only then is the post
+        extracted. The returned dict carries ``comment_total`` (the
+        post's stated total, or None) alongside the usual
+        author/text/comments. Returns None when the dialog never
+        appears. Never raises. The caller closes the dialog."""
         data = None
         for _ in range(40):  # up to ~20s for the dialog to appear
             if _should_stop(ctx):
@@ -1197,7 +1498,7 @@ class FacebookWorker:
             except Exception:
                 time.sleep(0.5)
         if not data or not data.get("author_name"):
-            _note(ctx, f"post dialog never appeared: {post_url}")
+            _note(ctx, f"post dialog never appeared: {label}")
             return None
         for _ in range(6):  # scroll+expand cycles until a pass adds nothing
             if _should_stop(ctx):
@@ -1221,6 +1522,87 @@ class FacebookWorker:
         if data.get("comment_total") is None and state.get("total") is not None:
             data["comment_total"] = state.get("total")
         return data
+
+    def extract_post(self, page: Page, post_url: str,
+                     ctx: dict | None = None) -> dict | None:
+        """Extract one post (with comments/replies) from its dialog —
+        EXHAUSTIVELY. No comment or reply may be missed.
+
+        Gotos the post URL, waits up to 20s for the dialog, then
+        extracts via _extract_dialog_contents. The dialog is closed
+        before returning so the next post starts from a clean page —
+        a dialog left open is what left the second post stranded
+        (its navigation then reported "page did not load").
+        Returns None when the dialog never appears. Never raises.
+        """
+        if not self._goto(page, post_url, ctx, "post"):
+            return None
+        self._wait_ready(page, ctx)
+        data = self._extract_dialog_contents(page, ctx, post_url)
+        self._close_dialog(page, ctx)
+        return data
+
+    def extract_post_via_comment_button(self, page: Page, source_url: str,
+                                        entry, ctx: dict | None = None):
+        """Open a feed post that has no permalink URL by clicking its
+        comment button ("Comment on <Name>'s post, N comments") —
+        the button opens the post as a dialog — then extract from
+        the dialog with the same exhaustive code. The real post URL
+        is read from the address bar once the dialog opens, and is
+        used for dedupe/saving. Returns (post_url, data) or None
+        when the post cannot be opened (noted, never raised — the
+        job skips it and moves on to the next post). The dialog is
+        closed before returning so the next post starts clean.
+        """
+        entry = entry or {}
+        key = (entry.get("key") or "").strip()
+        author = entry.get("author_name") or "post"
+        if not key:
+            _note(ctx, f"cannot open post by comment button "
+                       f"(no feed key): {author}")
+            return None
+        if not self._ensure_on_feed(page, source_url, ctx):
+            return None
+        self._wait_for_articles(page, ctx)
+        opened = False
+        for _ in range(20):  # scroll the feed until the post is found
+            if _should_stop(ctx):
+                return None
+            try:
+                opened = bool(page.evaluate(_OPEN_FEED_POST_JS, key))
+            except Exception:
+                opened = False
+            if opened:
+                break
+            try:
+                page.evaluate("window.scrollBy(0, window.innerHeight)")
+            except Exception:
+                try:
+                    page.mouse.wheel(0, 800)
+                except Exception:
+                    pass
+            try:
+                page.wait_for_timeout(1500)
+            except Exception:
+                time.sleep(1.5)
+        if not opened:
+            _note(ctx, f"could not open post by comment button "
+                       f"(not found in feed): {author}")
+            return None
+        data = self._extract_dialog_contents(
+            page, ctx, f"comment-button:{author}")
+        try:
+            post_url = (page.url or "").strip() or None
+        except Exception:
+            post_url = None
+        self._close_dialog(page, ctx)
+        if not data:
+            return None
+        if not post_url or _same_url(post_url, source_url):
+            _note(ctx, f"post opened via comment button but no post "
+                       f"URL could be read: {author}")
+            return None
+        return (post_url, data)
 
     # ------------------------------------------------------------------
     # Ported from client-hunting: block detection, page state, search,

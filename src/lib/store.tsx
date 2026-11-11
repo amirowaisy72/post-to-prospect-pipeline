@@ -214,6 +214,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 nowIso(),
               );
             }
+            if ((aj.status === "done" || aj.status === "stopped" || aj.status === "incomplete") && job.sourceId) {
+              // A completed run re-visited the source even with 0
+              // new posts: advance "Last scraped" so the row shows
+              // this run instead of an old failure.
+              next = svc.markSourceScraped(next, job.sourceId, nowIso()).state;
+            }
             return svc.updateSourceJob(next, job.id, {
               status: aj.status,
               postsProcessed: aj.postsProcessed,
