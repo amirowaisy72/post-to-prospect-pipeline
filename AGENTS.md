@@ -32,3 +32,4 @@ use the editor.
 ## Project rules
 
 - All LeadHunter business rules live as pure functions in `src/lib/leadhunter-service.ts`; `src/lib/store.tsx` is the only data layer the UI uses and persists to browser storage. Why: swapping storage for a backend later touches one file.
+- The AI Analysis chat UI is built from AI Elements (`src/components/ai-elements/`); its replies come from `src/lib/mock-chat.ts` until a real model call replaces `mockReply`. Why: the design is final while the AI backend is still pending.

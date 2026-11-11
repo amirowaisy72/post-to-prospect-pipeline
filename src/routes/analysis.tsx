@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { BrainCircuit, CheckCircle2, CopyX, ExternalLink, Loader2, ShieldX, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { AiChat } from "@/components/ai-chat";
 import { PriorityBadge } from "@/components/badges";
 import { EmptyState, PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -183,6 +184,8 @@ function AnalysisPage() {
       )}
 
       {result && <AnalysisResults result={result} />}
+
+      <AiChat key={accountId} />
     </>
   );
 }
