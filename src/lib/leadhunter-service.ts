@@ -84,31 +84,35 @@ export function setAccountStatus(state: AppState, id: string, status: AccountSta
 
 /* ---------------- Sources ---------------- */
 
+/**
+ * Add a source by name, type and number of groups/pages. Only joined sources
+ * are listed, so a new source is joined by the account that adds it.
+ */
 export function addSource(
   state: AppState,
-  input: { name: string; type: SourceType; url: string },
+  input: { name: string; type: SourceType; quantity: number },
   accountId: string,
   id: string,
   now: string,
 ): Result<AppState> {
   const name = input.name.trim();
-  const url = input.url.trim();
-  if (!name || !url) return { ok: false, error: "Name and URL are required." };
-  if (!/facebook\.com\//i.test(url)) {
-    return { ok: false, error: "URL must be a facebook.com group or page link." };
+  if (!name) return { ok: false, error: "Name is required." };
+  if (!Number.isInteger(input.quantity) || input.quantity < 1) {
+    return { ok: false, error: "Number must be a whole number of 1 or more." };
   }
-  const existing = state.sources.find((s) => sameUrl(s.url, url));
+  const existing = state.sources.find((s) => s.name.toLowerCase() === name.toLowerCase());
   if (existing) {
-    return { ok: false, error: `This URL is already in the list as "${existing.name}".` };
+    return { ok: false, error: `A source named "${existing.name}" already exists.` };
   }
   const source: Source = {
     id,
     name,
     type: input.type,
-    url,
+    url: "",
+    quantity: input.quantity,
     memberCount: 0,
-    status: "not-joined",
-    joinedByAccountId: null,
+    status: "joined",
+    joinedByAccountId: accountId,
     lastScrapedAt: null,
   };
   return {
@@ -128,7 +132,7 @@ export function joinBlockReason(state: AppState, source: Source, accountId: stri
   }
   // Another source row with the same URL that is already joined also blocks.
   const twin = state.sources.find(
-    (s) => s.id !== source.id && sameUrl(s.url, source.url) && s.joinedByAccountId,
+    (s) => s.id !== source.id && !!s.url && sameUrl(s.url, source.url) && s.joinedByAccountId,
   );
   if (twin) return `Already joined by ${accountName(state, twin.joinedByAccountId)}`;
   return null;

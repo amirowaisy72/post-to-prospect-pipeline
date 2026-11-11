@@ -17,7 +17,10 @@ export interface Source {
   id: string;
   name: string;
   type: SourceType;
+  /** Empty for sources added by number (the API will fill in real links later). */
   url: string;
+  /** How many groups/pages this entry stands for; null for single linked sources. */
+  quantity?: number | null;
   memberCount: number;
   status: SourceStatus;
   joinedByAccountId: string | null;

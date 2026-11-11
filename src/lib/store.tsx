@@ -23,7 +23,7 @@ interface StoreValue {
   setDefaultAccount: (id: string) => void;
   createAccount: (input: { name: string; facebookName: string }) => boolean;
   setAccountStatus: (id: string, status: AccountStatus) => void;
-  addSource: (input: { name: string; type: SourceType; url: string }) => boolean;
+  addSource: (input: { name: string; type: SourceType; quantity: number }) => boolean;
   joinSource: (sourceId: string) => void;
   addPost: (draft: svc.PostDraft, sourceId: string) => boolean;
   runAnalysis: (postIds: string[]) => svc.AnalysisResult;
