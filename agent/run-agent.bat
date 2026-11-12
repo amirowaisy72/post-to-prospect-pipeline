@@ -51,8 +51,8 @@ if defined LEADHUNTER_CHROME_PROFILE (
   echo [leadhunter] first if it is running — one profile can only be
   echo [leadhunter] used by one browser at a time.
 ) else (
-  echo [leadhunter] First run: the agent runs headless (no browser
-  echo [leadhunter] window appears). If Facebook asks for a sign-in,
+  echo [leadhunter] First run: the agent runs headless, no browser
+  echo [leadhunter] window appears. If Facebook asks for a sign-in,
   echo [leadhunter] run it once with LEADHUNTER_HEADED=1 and sign in
   echo [leadhunter] in the window that opens. The session stays saved
   echo [leadhunter] in agent\.chrome-profile, and the agent never asks

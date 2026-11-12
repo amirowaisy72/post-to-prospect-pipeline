@@ -53,7 +53,7 @@ if not errorlevel 1 (
   start "LeadHunter Agent" /d "%~dp0agent" cmd /k run-agent.bat
   set "AGENT_UP="
   if defined NO_CURL (
-    echo [leadhunter] Waiting for the agent (about 60 seconds)...
+    echo [leadhunter] Waiting for the agent, about 60 seconds...
     timeout /t 60 /nobreak >nul
     set "AGENT_UP=1"
   ) else (
@@ -94,7 +94,7 @@ if not errorlevel 1 (
     )
   )
   if not exist "%~dp0node_modules" (
-    echo [leadhunter] Installing frontend dependencies (first run only)...
+    echo [leadhunter] Installing frontend dependencies, first run only...
     "%BUN%" install
     if errorlevel 1 (
       echo [leadhunter] bun install failed — check your connection and try again.
@@ -106,7 +106,7 @@ if not errorlevel 1 (
   start "LeadHunter App" /d "%~dp0" cmd /k ""%BUN%" run dev"
   set "APP_UP="
   if defined NO_CURL (
-    echo [leadhunter] Waiting for the app (about 60 seconds)...
+    echo [leadhunter] Waiting for the app, about 60 seconds...
     timeout /t 60 /nobreak >nul
     set "APP_UP=1"
   ) else (
