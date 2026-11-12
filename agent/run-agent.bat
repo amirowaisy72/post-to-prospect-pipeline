@@ -51,12 +51,16 @@ if defined LEADHUNTER_CHROME_PROFILE (
   echo [leadhunter] first if it is running — one profile can only be
   echo [leadhunter] used by one browser at a time.
 ) else (
-  echo [leadhunter] First run: start a Scrap/Sync in LeadHunter and a Chrome
-  echo [leadhunter] window will open — sign in to Facebook there ONCE.
-  echo [leadhunter] The session stays saved in agent\.chrome-profile, and the
-  echo [leadhunter] agent never asks for or stores your Facebook password.
+  echo [leadhunter] First run: the agent runs headless (no browser
+  echo [leadhunter] window appears). If Facebook asks for a sign-in,
+  echo [leadhunter] run it once with LEADHUNTER_HEADED=1 and sign in
+  echo [leadhunter] in the window that opens. The session stays saved
+  echo [leadhunter] in agent\.chrome-profile, and the agent never asks
+  echo [leadhunter] for or stores your Facebook password.
 )
 echo [leadhunter] Keep this window open while LeadHunter is scraping.
+echo [leadhunter] Stop with Ctrl+C - the browser closes cleanly, so the
+echo [leadhunter] next start never asks to restore pages.
 echo.
 %PY% -m uvicorn main:app --host 127.0.0.1 --port 8001
 pause

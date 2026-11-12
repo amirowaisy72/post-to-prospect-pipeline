@@ -5,9 +5,12 @@ calls it from the user's PC, where the agent drives the user's own
 logged-in Chrome/Facebook session via a persistent Playwright profile
 (``agent/.chrome-profile`` by default, or the dir named by the
 ``LEADHUNTER_CHROME_PROFILE`` env var — e.g. the already-signed-in
-Client Hunting profile, so no Facebook sign-in is needed). The user
-signs in to Facebook once in that Chrome window (unless the profile
-is already signed in — see ``LEADHUNTER_CHROME_PROFILE``); the agent
+Client Hunting profile, so no Facebook sign-in is needed). The
+browser runs headless by default — no window appears, the work is
+silent, exactly like Client Hunting; set ``LEADHUNTER_HEADED=1``
+for the rare case a fresh Facebook sign-in is needed in a visible
+window. The user signs in to Facebook once (unless the profile is
+already signed in — see ``LEADHUNTER_CHROME_PROFILE``); the agent
 NEVER asks for or stores a password.
 
 One running job at a time globally — a second start returns 409.
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import os
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -37,7 +41,21 @@ _AGENT_DIR = Path(__file__).resolve().parent
 
 db.init_db(_AGENT_DIR / "leadhunter.db")
 
-app = FastAPI(title="leadhunter-agent", version=VERSION)
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Close the browser cleanly when the agent stops.
+
+    Uvicorn runs this on SIGINT/SIGTERM (Ctrl+C in run-agent.bat)
+    and on normal shutdown: the Playwright context is closed and
+    the driver stopped, so the next launch never shows Chromium's
+    "Restore pages?" popup and no zombie Chromium holds the profile.
+    """
+    yield
+    _close_browser()
+
+
+app = FastAPI(title="leadhunter-agent", version=VERSION, lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # local-only tool on 127.0.0.1
@@ -50,6 +68,7 @@ _lock = threading.Lock()
 _running_job_id: str | None = None
 _stop_flags: dict[str, bool] = {}
 _page = None
+_context = None
 _playwright = None
 
 
@@ -95,39 +114,93 @@ def _is_profile_in_use_error(exc: BaseException) -> bool:
             or ("profile" in msg and "in use" in msg))
 
 
+def _headed_env() -> bool:
+    """True when LEADHUNTER_HEADED requests a visible browser window.
+
+    Headless is the default (silent, like client-hunting). Set
+    ``LEADHUNTER_HEADED=1`` (1/true/yes, case-insensitive) for the
+    rare case a fresh Facebook sign-in is needed in a visible window.
+    """
+    return (os.environ.get("LEADHUNTER_HEADED") or "").strip().lower() in (
+        "1", "true", "yes")
+
+
+def _close_browser():
+    """Close the Playwright browser/context cleanly, if launched.
+
+    Called on app shutdown (see ``_lifespan``) and when a dead page
+    is rebuilt, so the next launch never shows Chromium's
+    "Restore pages?" popup and no zombie Chromium holds the profile.
+    Never raises.
+    """
+    global _page, _context, _playwright
+    for obj in (_page, _context):
+        try:
+            if obj is not None:
+                obj.close()
+        except Exception:
+            pass
+    _page = None
+    _context = None
+    if _playwright is not None:
+        try:
+            _playwright.stop()
+        except Exception:
+            pass
+        _playwright = None
+
+
 def _get_page():
     """Launch (once) the persistent Chrome profile and return its page.
 
-    headless=False so the user can see the window and sign in to
-    Facebook there on first run; the session persists in the profile
-    dir (see :func:`resolve_chrome_profile`). The same page is reused
-    across jobs. When the profile is locked by another browser the
-    launch raises :class:`ProfileInUseError` with a plain message
-    instead of crashing — the agent stays up and a later job retries
-    the launch.
+    Headless by default — no browser window appears, the work is
+    silent, exactly like Client Hunting (``LEADHUNTER_HEADED=1``
+    forces a visible window for a fresh sign-in). The session
+    persists in the profile dir (see :func:`resolve_chrome_profile`).
+    The same page is reused across jobs; a page that died (browser
+    crashed or closed) is rebuilt on the next call. When the profile
+    is locked by another browser the launch raises
+    :class:`ProfileInUseError` with a plain message instead of
+    crashing — the agent stays up and a later job retries the launch.
     """
-    global _page, _playwright
+    global _page, _context, _playwright
     if _page is not None:
-        return _page
+        try:
+            if not _page.is_closed():
+                return _page
+        except Exception:
+            pass
+        # Page died — drop the browser and relaunch below.
+        _close_browser()
     from playwright.sync_api import sync_playwright
 
     _playwright = sync_playwright().start()
     profile = resolve_chrome_profile()
+    headed = _headed_env()
+    print(f"[leadhunter] Browser: "
+          f"{'headed (visible window)' if headed else 'headless'}",
+          flush=True)
     print(f"[leadhunter] Chrome profile: {profile} "
           f"(exists: {'yes' if profile.exists() else 'no'})", flush=True)
     try:
-        context = _playwright.chromium.launch_persistent_context(
+        _context = _playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile),
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
+            headless=not headed,
+            viewport={"width": 1280, "height": 800},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
         )
     except Exception as exc:
         _playwright.stop()
         _playwright = None
+        _context = None
         if _is_profile_in_use_error(exc):
             raise ProfileInUseError(PROFILE_IN_USE_MESSAGE) from exc
         raise
-    _page = context.pages[0] if context.pages else context.new_page()
+    _page = _context.pages[0] if _context.pages else _context.new_page()
     return _page
 
 

@@ -20,7 +20,9 @@ It also sets the Chrome profile for you (the already-signed-in
 Client Hunting profile, so no Facebook sign-in is needed) and finds
 `bun` / `python` by itself when they are not on PATH. **Close
 Client Hunting first** — one Chrome profile can only be used by one
-browser at a time. To stop everything, close both windows.
+browser at a time. The agent's browser runs **headless** — no window
+appears while it works. To stop everything, press Ctrl+C in the
+agent window (the browser closes cleanly) and close the app window.
 
 ## Setup
 
@@ -43,12 +45,31 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8001
 
 ## First-run Facebook sign-in
 
-The first time you start a Scrap or Sync, a Chrome window opens.
-**Sign in to Facebook there once.** The session is saved in
-`agent/.chrome-profile/` and reused for every later job — you do not
-sign in again unless Facebook logs you out. If a job fails with
-"Facebook session is not signed in", sign in again in that Chrome
-window and run the job again.
+The agent's browser runs **headless** by default — no window
+appears, the work is silent, exactly like Client Hunting. With the
+already-signed-in Client Hunting profile (see below) no sign-in is
+needed at all.
+
+With the agent's own fresh profile (`agent/.chrome-profile/`), the
+first Scrap or Sync needs a Facebook sign-in — and a headless
+browser has no window to type in. So run the agent **once** with a
+visible window:
+
+```powershell
+$env:LEADHUNTER_HEADED=1
+.\run-agent.bat
+```
+
+Sign in to Facebook in the window that opens, once. The session is
+saved in `agent/.chrome-profile/` and reused for every later job —
+you do not sign in again unless Facebook logs you out. If a job
+fails with "Facebook session is not signed in", sign in again the
+same way (visible window, `LEADHUNTER_HEADED=1`) and run the job
+again. The agent never asks for or stores your Facebook password.
+
+Stopping the agent (Ctrl+C in its window) shuts the browser down
+cleanly, so the next start never shows Chromium's "Restore pages?"
+popup.
 
 ## Use an existing signed-in Chrome profile
 
@@ -165,7 +186,8 @@ Posts use the frontend `PostData` shape, plus timestamps:
 
 ## Files
 
-- `main.py` — FastAPI app (lazy Playwright launch, one job at a time)
+- `main.py` — FastAPI app (lazy headless Playwright launch, clean
+  shutdown on stop, one job at a time)
 - `facebook.py` — FacebookWorker (session check, feed collection,
   exhaustive dialog extraction; keyword search, comments gate,
   join/leave — ported from the tested client-hunting finder, see the
