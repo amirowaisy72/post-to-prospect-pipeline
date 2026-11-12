@@ -207,6 +207,33 @@ def _get_page():
 # ----------------------------------------------------------------------
 # Job plumbing
 # ----------------------------------------------------------------------
+def _fresh_page():
+    """Return a brand-new tab for the next job.
+
+    A tab that just scrolled a huge Facebook feed is often hung or
+    half-dead; reusing it made the 2nd Scrap fail with "page did
+    not load (state: empty)". Every job therefore starts on a clean
+    tab (the same state as the very first job after start). The
+    session/cookies live in the profile, so nothing is lost.
+    Never raises - falls back to the existing page.
+    """
+    global _page
+    page = _get_page()
+    context = _context
+    if context is None:
+        return page
+    try:
+        new_page = context.new_page()
+    except Exception:
+        return page
+    try:
+        page.close()
+    except Exception:
+        pass
+    _page = new_page
+    return new_page
+
+
 def _job_view(row: dict) -> dict:
     return {
         "id": row["id"],
@@ -274,7 +301,7 @@ def _run_job_thread(job_id, kind, payload):
     """Background thread for one job; clears the running slot at the end."""
     global _running_job_id
     try:
-        page = _get_page()
+        page = _fresh_page()
         worker = FacebookWorker()
         job = db.get_job(job_id) or {}
         job.update(payload)

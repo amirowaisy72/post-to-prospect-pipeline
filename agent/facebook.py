@@ -1321,10 +1321,33 @@ class FacebookWorker:
                     state = self.check_session_with_retry(page, ctx)
                 except Exception:
                     state = "empty"
+                if state == "empty":
+                    # The page we are sitting on is dead/hung (typical
+                    # after a long scrolled feed). Do NOT give up:
+                    # drop it to a blank page and load the target
+                    # fresh, then check again.
+                    target_nav = "skipped (already on target), reloaded"
+                    try:
+                        try:
+                            page.goto("about:blank", timeout=15000)
+                        except Exception:
+                            pass
+                        if self._goto(page, target, ctx, "session_recover",
+                                      timeout_ms=45000):
+                            if not self._wait_ready(page, ctx):
+                                self._wait_ready(page, ctx)
+                            state = self.check_session_with_retry(page, ctx)
+                        else:
+                            state = "empty"
+                            target_nav += " (goto failed)"
+                    except Exception as exc:  # noqa: BLE001
+                        _note(ctx, f"session recover failed: {exc}")
+                        state = "empty"
             else:
                 target_nav = "attempted"
                 try:
-                    if self._goto(page, target, ctx, "session_target"):
+                    if self._goto(page, target, ctx, "session_target",
+                                  timeout_ms=45000):
                         if not self._wait_ready(page, ctx):
                             # Slow SPA load: one more bounded readiness
                             # wait before calling the page empty.
@@ -1424,7 +1447,7 @@ class FacebookWorker:
         if not self._goto(page, url, ctx, label, timeout_ms=timeout_ms):
             return False
         self._wait_ready(page, ctx)
-        state = self.check_session(page, ctx)
+        state = self.check_session_with_retry(page, ctx)
         if state != "ok":
             _note(ctx, f"session {state} on {label}")
             return False
@@ -1524,10 +1547,11 @@ class FacebookWorker:
         try:
             if _same_url(page.url, source_url):
                 self._wait_ready(page, ctx)
-                return self.check_session(page, ctx) == "ok"
+                if self.check_session_with_retry(page, ctx) == "ok":
+                    return True
         except Exception:
             pass
-        return self._load(page, source_url, ctx, "source")
+        return self._load(page, source_url, ctx, "source", timeout_ms=45000)
 
     # ------------------------------------------------------------------
     # Feed collection + single-post extraction
@@ -1549,9 +1573,10 @@ class FacebookWorker:
         was found, else None. Never raises.
         """
         known = set(known_urls or [])
-        if not self._load(page, source_url, ctx, "source"):
-            return [], None
-        self._wait_for_articles(page, ctx)
+        if not self._ensure_on_feed(page, source_url, ctx):
+            return [], ("feed did not load - Facebook never showed the "
+                        "source page with a live session")
+        self._wait_for_articles(page, ctx, timeout_s=30.0)
         found: list = []
         seen = set(known)
         seen_keys = set()

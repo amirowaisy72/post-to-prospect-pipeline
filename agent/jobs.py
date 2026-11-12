@@ -324,6 +324,11 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
         limit = job.get("limit") or 50
         entries, diag = worker.collect_feed_posts(
             page, source_url, known, limit, _ctx(should_stop, note))
+        if not entries and diag and diag.startswith("feed did not load"):
+            # Never report a page that failed to load as a quiet
+            # "0 posts" success - show it as a real, retryable error.
+            _fail(db, job_id, diag + " - press Scrap again")
+            return
         processed = 0
         new_posts = 0
         stopped = False
