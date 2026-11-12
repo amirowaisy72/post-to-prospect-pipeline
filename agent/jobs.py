@@ -248,7 +248,7 @@ def _fail(db, job_id, error):
 
 
 def _check_session_first(worker, page, db, job_id, should_stop,
-                         target_url=None):
+                         target_url=None, note=None):
     """Session check FIRST, via the worker. Returns True when the
     session is ok. On any other state the job is marked failed with
     a message naming that state, and nothing is scraped.
@@ -258,9 +258,16 @@ def _check_session_first(worker, page, db, job_id, should_stop,
     the search URL for collect). The Facebook home page is never
     used: it hangs in this Chromium and cannot tell a live session
     from a dead one.
+
+    ``note`` (when given) receives the worker's session notes,
+    including the empty-page diagnostic — it must be threaded
+    through, because a ctx built without it silently drops every
+    session note (the live bug: the "session check empty after
+    3 attempts" diagnostic never reached the agent console).
     """
     try:
-        state = worker.verify_session(page, _ctx(should_stop), target_url)
+        state = worker.verify_session(page, _ctx(should_stop, note),
+                                      target_url)
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
         return False
@@ -304,7 +311,7 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
             _fail(db, job_id, "scrape job has no source URL")
             return
         if not _check_session_first(worker, page, db, job_id, should_stop,
-                                    source_url):
+                                    source_url, note):
             return
         if source_id:
             db.upsert_source(
@@ -421,7 +428,7 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
         search_kind = "groups" if type_ in ("group", "both") else "pages"
         if not _check_session_first(
                 worker, page, db, job_id, should_stop,
-                worker.search_url(keyword, search_kind)):
+                worker.search_url(keyword, search_kind), note):
             return
         try:
             max_new = int(job.get("max_new") or 10)
@@ -610,7 +617,7 @@ def run_sync(worker, page, db, job, should_stop, note=None):
         if not target_url and job.get("post_url"):
             target_url = job["post_url"]
         if not _check_session_first(worker, page, db, job_id, should_stop,
-                                    target_url):
+                                    target_url, note):
             return
         targets = []
         if job.get("post_id"):

@@ -1817,3 +1817,51 @@ class TestCheckSessionWithRetry:
         assert page.goto_calls == [GROUP_URL]
         assert any("session check empty after 3 attempts" in n
                    for n in notes)
+
+
+# ---------------------------------------------------------------------------
+# (i) _check_session_first must thread the note through to verify_session
+# ---------------------------------------------------------------------------
+
+class _RecordingDB:
+    """Minimal db stand-in: records update_job calls."""
+
+    def __init__(self):
+        self.updates = []
+
+    def update_job(self, job_id, **fields):
+        self.updates.append((job_id, fields))
+
+
+class TestCheckSessionFirstNotes:
+    def test_empty_diagnostic_reaches_the_note(self):
+        # Regression (live 2026-11-12): _check_session_first built
+        # its ctx WITHOUT the note callable, so verify_session's
+        # notes — including the "session check empty after
+        # 3 attempts" diagnostic — were silently dropped and never
+        # reached the agent console (the user's terminal search
+        # for the line found nothing). The note must be threaded
+        # through from the job runner.
+        page = _FakePage(blank=True, goto_raises_for={GROUP_URL})
+        notes = []
+        db = _RecordingDB()
+        ok = jobs._check_session_first(
+            FacebookWorker(), page, db, "job-1", lambda: False,
+            GROUP_URL, note=notes.append)
+        assert ok is False
+        assert any("session check empty after 3 attempts" in n
+                   for n in notes)
+        assert any("body_len=0" in n for n in notes)
+        assert db.updates and db.updates[0][1]["status"] == "failed"
+        assert "target_nav=attempted, goto failed" in \
+            db.updates[0][1]["error"]
+
+    def test_note_optional_when_omitted(self):
+        # Omitting note must stay safe (old callers): the job still
+        # fails, nothing raises.
+        page = _FakePage(blank=True, goto_raises_for={GROUP_URL})
+        db = _RecordingDB()
+        ok = jobs._check_session_first(
+            FacebookWorker(), page, db, "job-1", lambda: False, GROUP_URL)
+        assert ok is False
+        assert db.updates and db.updates[0][1]["status"] == "failed"
