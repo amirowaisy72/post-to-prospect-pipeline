@@ -2,13 +2,10 @@ import { Link, createFileRoute } from "@tanstack/react-router";
 import { ExternalLink } from "lucide-react";
 
 import { EmptyState, PageHeader } from "@/components/page-header";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { AGENT_NOT_RUNNING_MESSAGE } from "@/lib/agent-client";
 import { fmtDate, shortUrl } from "@/lib/format";
-import { countReplies, postTitle, runningJobForPost } from "@/lib/leadhunter-service";
+import { countReplies, postTitle } from "@/lib/leadhunter-service";
 import { useStore } from "@/lib/store";
-import { useAgentHealth } from "@/lib/use-agent-health";
 
 export const Route = createFileRoute("/data-sourcing/$sourceId/$postId")({
   head: () => ({
@@ -23,11 +20,9 @@ export const Route = createFileRoute("/data-sourcing/$sourceId/$postId")({
 
 function PostDetailPage() {
   const { sourceId, postId } = Route.useParams();
-  const { state, startPostSync, stopJob } = useStore();
-  const { reachable } = useAgentHealth();
+  const { state } = useStore();
   const source = state.sources.find((s) => s.id === sourceId);
   const post = state.posts.find((p) => p.id === postId && p.sourceId === sourceId);
-  const job = runningJobForPost(state, postId);
 
   if (!post) {
     return (
@@ -44,7 +39,6 @@ function PostDetailPage() {
     );
   }
 
-  const agentDown = reachable === false;
   const totalReplies = countReplies(post);
 
   return (
@@ -61,26 +55,6 @@ function PostDetailPage() {
         >
           ← Back to {source?.name ?? "scraped posts"}
         </Link>
-        {job ? (
-          <>
-            <span className="text-sm text-muted-foreground">
-              Syncing… {job.postsProcessed} processed, {job.newPosts} new
-            </span>
-            <Button variant="outline" size="sm" onClick={() => void stopJob(job.id)}>
-              Stop
-            </Button>
-          </>
-        ) : (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={agentDown}
-            title={agentDown ? AGENT_NOT_RUNNING_MESSAGE : undefined}
-            onClick={() => void startPostSync(postId)}
-          >
-            Sync this post
-          </Button>
-        )}
       </div>
 
       <div className="space-y-6">

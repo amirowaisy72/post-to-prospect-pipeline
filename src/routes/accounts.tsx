@@ -2,7 +2,6 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Plus, Star } from "lucide-react";
 import { useState } from "react";
 
-import { AgentStatusTag } from "@/components/agent-status";
 import { AccountStatusBadge } from "@/components/badges";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -83,7 +82,6 @@ function AccountsPage() {
                 <TableRow>
                   <TableHead className="pl-6">Account</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Agent</TableHead>
                   <TableHead className="text-right">Sources</TableHead>
                   <TableHead className="text-right">Posts</TableHead>
                   <TableHead className="text-right">Leads</TableHead>
@@ -93,7 +91,7 @@ function AccountsPage() {
               <TableBody>
                 {state.accounts.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="pl-6 py-6 text-sm text-muted-foreground">
+                    <TableCell colSpan={6} className="pl-6 py-6 text-sm text-muted-foreground">
                       No accounts yet — create your first account on the left.
                     </TableCell>
                   </TableRow>
@@ -131,9 +129,6 @@ function AccountsPage() {
                             </SelectContent>
                           </Select>
                         </div>
-                      </TableCell>
-                      <TableCell>
-                        <AgentStatusTag accountId={a.id} />
                       </TableCell>
                       <TableCell className="text-right tabular">{s.sources}</TableCell>
                       <TableCell className="text-right tabular">{s.posts}</TableCell>

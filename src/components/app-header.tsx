@@ -1,12 +1,10 @@
 import { Link } from "@tanstack/react-router";
 import { Star } from "lucide-react";
 
-import { AgentDot, AgentStatusIndicator } from "@/components/agent-status";
 import { AccountStatusBadge } from "@/components/badges";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { agentStatus } from "@/lib/leadhunter-service";
 import { useStore } from "@/lib/store";
 
 export function AppHeader() {
@@ -28,7 +26,6 @@ export function AppHeader() {
             {state.accounts.map((a) => (
               <SelectItem key={a.id} value={a.id}>
                 <span className="flex items-center gap-2">
-                  <AgentDot status={agentStatus(state, a.id)} className="size-2" />
                   {a.name}
                   {a.id === state.defaultAccountId && <Star className="size-3 fill-current text-primary" />}
                 </span>
@@ -42,7 +39,6 @@ export function AppHeader() {
             <span className="text-xs text-muted-foreground">as {activeAccount.facebookName}</span>
           </span>
         )}
-        <AgentStatusIndicator />
       </div>
       <Link to="/accounts" className="hidden text-xs font-semibold text-primary hover:underline md:inline">
         Manage accounts

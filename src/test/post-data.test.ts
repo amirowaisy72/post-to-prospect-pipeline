@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { addCollectedSources, addPosts, createAccount, mergePostActivity, parsePostDataJson, postTitle, requestSourceJobStop, runningJobForSource, scrapedCount, startSourceJob, updateSourceJob } from "@/lib/leadhunter-service";
+import { addPosts, addSource, createAccount, mergePostActivity, parsePostDataJson, postTitle, scrapedCount } from "@/lib/leadhunter-service";
 import { createSeedState } from "@/lib/seed";
 import type { AppState } from "@/lib/types";
 
@@ -31,12 +31,14 @@ const fixtureState = (): AppState => {
   const acc = createAccount(state, { name: "Ayesha — Main", facebookName: "Ayesha Khan" }, "acc-1", NOW);
   if (!acc.ok) throw new Error("fixture account failed");
   state = acc.value;
-  state = addCollectedSources(
+  const added = addSource(
     state,
-    [{ id: "src-1", name: "PSX Investors Pakistan", type: "group", url: "https://facebook.com/groups/psxinvestorspk", memberCount: 184300, joinedByAccountId: "acc-1" }],
+    { id: "src-1", name: "PSX Investors Pakistan", url: "https://facebook.com/groups/psxinvestorspk", memberCount: 184300 },
     "acc-1",
     NOW,
-  ).state;
+  );
+  if (!added.ok) throw new Error("fixture source failed");
+  state = added.value;
   const parsed = parsePostDataJson(
     JSON.stringify(
       makePost({
@@ -344,58 +346,5 @@ describe("mergePostActivity (Sync)", () => {
     expect(r2.addedComments).toBe(0);
     expect(r2.addedReplies).toBe(0);
     expect(r2.changed).toBe(false);
-  });
-});
-
-describe("source jobs", () => {
-  it("starts running, accepts a graceful stop flag, and finishes", () => {
-    const state = createSeedState();
-    expect(state.jobs).toEqual([]);
-    const started = startSourceJob(state, {
-      id: "job-1",
-      kind: "scrape",
-      sourceId: "src-1",
-      postId: null,
-      accountId: "acc-1",
-      startedAt: "2026-11-12T01:00:00.000Z",
-    });
-    expect(started.state.jobs[0]!.status).toBe("running");
-    expect(runningJobForSource(started.state, "src-1")?.id).toBe("job-1");
-    // Stop is graceful: the flag is set, the job keeps running until the agent finishes the current post.
-    const stopped = requestSourceJobStop(started.state, "job-1");
-    expect(stopped.state.jobs[0]!.status).toBe("stop-requested");
-    expect(runningJobForSource(stopped.state, "src-1")?.id).toBe("job-1");
-    const done = updateSourceJob(stopped.state, "job-1", {
-      status: "done",
-      postsProcessed: 3,
-      newPosts: 2,
-      finishedAt: "2026-11-12T01:05:00.000Z",
-    });
-    expect(done.state.jobs[0]!.status).toBe("done");
-    expect(runningJobForSource(done.state, "src-1")).toBeUndefined();
-  });
-
-  it("a collect job carries the joined sources on its result", () => {
-    const state = createSeedState();
-    const started = startSourceJob(state, {
-      id: "job-collect",
-      kind: "collect",
-      sourceId: null,
-      postId: null,
-      accountId: "acc-1",
-      startedAt: "2026-11-12T01:00:00.000Z",
-    });
-    expect(started.state.jobs[0]!.kind).toBe("collect");
-    const done = updateSourceJob(started.state, "job-collect", {
-      status: "done",
-      newPosts: 2,
-      result: {
-        sources: [
-          { id: "src-a", name: "Stocks To Watch", type: "group", url: "https://facebook.com/groups/111", memberCount: 12000, joinedByAccountId: "acc-1" },
-        ],
-      },
-    });
-    expect(done.state.jobs[0]!.result?.sources).toHaveLength(1);
-    expect(done.state.jobs[0]!.result?.sources[0]!.name).toBe("Stocks To Watch");
   });
 });

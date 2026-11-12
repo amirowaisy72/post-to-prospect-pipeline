@@ -33,4 +33,4 @@ use the editor.
 
 - All LeadHunter business rules live as pure functions in `src/lib/leadhunter-service.ts`; `src/lib/store.tsx` is the only data layer the UI uses and persists to browser storage. Why: swapping storage for a backend later touches one file.
 - The AI Analysis chat UI is built from AI Elements (`src/components/ai-elements/`); its replies come from `src/lib/mock-chat.ts` until a real model call replaces `mockReply`. Why: the design is final while the AI backend is still pending.
-- Each account has one agent (`AppState.agents`, rules in `leadhunter-service.ts`: one task at a time, offline when the account is not active). Demo tasks finish on their own via `expectedMs` in the store ticker until a real agent API pushes status. Why: the status UI stays the same when the real agent is connected.
+- There is no scraping agent in the app: sources are added by hand (name, link, members) and posts will come from the browser extension. The Python `agent/` backend folder stays in the repo, unused. Why: the agent kept failing live (dead browser, 0 posts), so it was removed from the app entirely.

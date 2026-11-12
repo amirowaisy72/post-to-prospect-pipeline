@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { addCollectedSources, createAccount, markSourceScraped } from "@/lib/leadhunter-service";
+import { addSource, createAccount, markSourceScraped } from "@/lib/leadhunter-service";
 import { createSeedState } from "@/lib/seed";
 import type { AppState } from "@/lib/types";
 
@@ -13,22 +13,19 @@ const fixtureState = (): AppState => {
   const acc = createAccount(state, { name: "Master", facebookName: "Amir Owaisy" }, "acc-1", NOW);
   if (!acc.ok) throw new Error("fixture account failed");
   state = acc.value;
-  state = addCollectedSources(
+  const added = addSource(
     state,
-    [
-      {
-        id: "src-1",
-        name: "Stock Market Traders.",
-        type: "group",
-        url: "https://facebook.com/groups/833569388896239",
-        memberCount: 780000,
-        joinedByAccountId: "acc-1",
-      },
-    ],
+    {
+      id: "src-1",
+      name: "Stock Market Traders.",
+      url: "https://facebook.com/groups/833569388896239",
+      memberCount: 780000,
+    },
     "acc-1",
     NOW,
-  ).state;
-  return state;
+  );
+  if (!added.ok) throw new Error("fixture source failed");
+  return added.value;
 };
 
 describe("markSourceScraped", () => {

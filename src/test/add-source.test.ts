@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  addCollectedSources,
   addLeads,
   addPosts,
+  addSource,
   createAccount,
   deleteSource,
   parsePostDataJson,
@@ -20,24 +20,26 @@ function withAccount(): AppState {
   return r.value;
 }
 
-const COLLECTED = [
-  {
-    id: "src-a",
-    name: "Stocks To Watch",
-    type: "group" as const,
-    url: "https://facebook.com/groups/111",
-    memberCount: 12000,
-    joinedByAccountId: "acc-1",
-  },
-  {
-    id: "src-b",
-    name: "Stock Page",
-    type: "page" as const,
-    url: "https://facebook.com/stockpage",
-    memberCount: null,
-    joinedByAccountId: "acc-1",
-  },
-];
+/** State with the two manual sources added (group + page). */
+function withSources(): AppState {
+  let state = withAccount();
+  const g = addSource(
+    state,
+    { id: "src-a", name: "Stocks To Watch", url: "https://facebook.com/groups/111", memberCount: 12000 },
+    "acc-1",
+    NOW,
+  );
+  if (!g.ok) throw new Error(`fixture group failed: ${g.error}`);
+  state = g.value;
+  const p = addSource(
+    state,
+    { id: "src-b", name: "Stock Page", url: "https://facebook.com/stockpage", memberCount: 0 },
+    "acc-1",
+    NOW,
+  );
+  if (!p.ok) throw new Error(`fixture page failed: ${p.error}`);
+  return p.value;
+}
 
 describe("empty initial state", () => {
   it("starts with no accounts, sources, posts, leads or activity", () => {
@@ -47,7 +49,6 @@ describe("empty initial state", () => {
     expect(s.posts).toEqual([]);
     expect(s.leads).toEqual([]);
     expect(s.activity).toEqual([]);
-    expect(s.jobs).toEqual([]);
     expect(s.activeAccountId).toBe("");
     expect(s.defaultAccountId).toBe("");
   });
@@ -67,48 +68,142 @@ describe("empty initial state", () => {
   });
 });
 
-describe("addCollectedSources", () => {
-  it("adds joined sources; an unknown member count becomes 0, never a block", () => {
-    const r = addCollectedSources(withAccount(), COLLECTED, "acc-1", NOW);
-    expect(r.added).toBe(2);
-    expect(r.skipped).toBe(0);
-    expect(r.state.sources).toHaveLength(2);
-    const group = r.state.sources.find((s) => s.id === "src-a")!;
-    expect(group.status).toBe("joined");
-    expect(group.joinedByAccountId).toBe("acc-1");
-    expect(group.memberCount).toBe(12000);
-    // Unknown count is stored as 0 — the run was not blocked by it.
-    expect(r.state.sources.find((s) => s.id === "src-b")!.memberCount).toBe(0);
+describe("addSource (manual)", () => {
+  it("adds a group from a /groups/ link, joined by the account, status joined", () => {
+    const r = addSource(
+      withAccount(),
+      { id: "src-a", name: "Stocks To Watch", url: "https://facebook.com/groups/111", memberCount: 12000 },
+      "acc-1",
+      NOW,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const s = r.value.sources.find((x) => x.id === "src-a")!;
+    expect(s.type).toBe("group");
+    expect(s.status).toBe("joined");
+    expect(s.joinedByAccountId).toBe("acc-1");
+    expect(s.memberCount).toBe(12000);
+    expect(s.lastScrapedAt).toBeNull();
   });
 
-  it("skips a URL already joined by any account, even with a different case/www prefix", () => {
-    const first = addCollectedSources(withAccount(), COLLECTED, "acc-1", NOW);
-    const again = addCollectedSources(first.state, [
-      {
-        id: "src-c",
-        name: "Stocks To Watch",
-        type: "group" as const,
-        url: "https://www.facebook.com/groups/111/",
-        memberCount: 12000,
-        joinedByAccountId: "acc-2",
-      },
-    ], "acc-2", NOW);
-    expect(again.added).toBe(0);
-    expect(again.skipped).toBe(1);
-    expect(again.state.sources).toHaveLength(2);
+  it("derives Page from a link without /groups/", () => {
+    const r = addSource(
+      withAccount(),
+      { id: "src-b", name: "Stock Page", url: "https://facebook.com/stockpage", memberCount: 500 },
+      "acc-1",
+      NOW,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sources[0]?.type).toBe("page");
   });
 
-  it("skips duplicates inside one batch", () => {
-    const r = addCollectedSources(withAccount(), [COLLECTED[0]!, COLLECTED[0]!], "acc-1", NOW);
-    expect(r.added).toBe(1);
-    expect(r.skipped).toBe(1);
+  it("accepts a protocol-less link and still derives the type", () => {
+    const r = addSource(
+      withAccount(),
+      { id: "src-a", name: "Stocks To Watch", url: "www.facebook.com/groups/111", memberCount: 12000 },
+      "acc-1",
+      NOW,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sources[0]?.type).toBe("group");
+    expect(r.value.sources[0]?.url).toBe("https://www.facebook.com/groups/111");
+  });
+
+  it("rejects a URL already joined by any account, even with a different case/www prefix/trailing slash", () => {
+    const state = withSources();
+    const again = addSource(
+      state,
+      { id: "src-c", name: "Stocks To Watch", url: "https://www.facebook.com/groups/111/", memberCount: 12000 },
+      "acc-1",
+      NOW,
+    );
+    expect(again.ok).toBe(false);
+    if (again.ok) return;
+    expect(again.error).toContain("Already joined by Master");
+    expect(state.sources).toHaveLength(2);
+  });
+
+  it("rejects the same URL from a second account, naming the first account", () => {
+    let state = withSources();
+    const acc2 = createAccount(state, { name: "Second", facebookName: "Second Person" }, "acc-2", NOW);
+    if (!acc2.ok) throw new Error("fixture second account failed");
+    state = acc2.value;
+    const r = addSource(
+      state,
+      { id: "src-c", name: "Stocks To Watch", url: "https://facebook.com/groups/111", memberCount: 12000 },
+      "acc-2",
+      NOW,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("Already joined by Master");
+  });
+
+  it("rejects a non-Facebook link", () => {
+    const r = addSource(
+      withAccount(),
+      { id: "src-a", name: "Not Facebook", url: "https://example.com/groups/111", memberCount: 10 },
+      "acc-1",
+      NOW,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("facebook.com");
+  });
+
+  it("rejects an empty name", () => {
+    const r = addSource(
+      withAccount(),
+      { id: "src-a", name: "   ", url: "https://facebook.com/groups/111", memberCount: 10 },
+      "acc-1",
+      NOW,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("name");
+  });
+
+  it("rejects a negative or non-whole member count", () => {
+    const neg = addSource(
+      withAccount(),
+      { id: "src-a", name: "X", url: "https://facebook.com/groups/111", memberCount: -1 },
+      "acc-1",
+      NOW,
+    );
+    expect(neg.ok).toBe(false);
+    const frac = addSource(
+      withAccount(),
+      { id: "src-a", name: "X", url: "https://facebook.com/groups/111", memberCount: 1.5 },
+      "acc-1",
+      NOW,
+    );
+    expect(frac.ok).toBe(false);
+    // 0 is fine — a member count the user does not know yet.
+    const zero = addSource(
+      withAccount(),
+      { id: "src-a", name: "X", url: "https://facebook.com/groups/111", memberCount: 0 },
+      "acc-1",
+      NOW,
+    );
+    expect(zero.ok).toBe(true);
+  });
+
+  it("rejects an unknown account", () => {
+    const r = addSource(
+      withAccount(),
+      { id: "src-a", name: "X", url: "https://facebook.com/groups/111", memberCount: 10 },
+      "no-such-account",
+      NOW,
+    );
+    expect(r.ok).toBe(false);
   });
 });
 
 describe("deleteSource", () => {
   it("removes the source, its posts and leads derived from them", () => {
-    let state = withAccount();
-    state = addCollectedSources(state, COLLECTED, "acc-1", NOW).state;
+    let state = withSources();
     const parsed = parsePostDataJson(
       JSON.stringify({
         postUrl: "https://facebook.com/groups/111/posts/1",

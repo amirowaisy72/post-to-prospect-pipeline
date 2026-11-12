@@ -5,15 +5,11 @@
  */
 import type {
   Account,
-  AgentState,
-  AgentStatus,
-  AgentTask,
   AccountStatus,
   Activity,
   ActivityType,
   AppState,
   Comment,
-  CollectedSource,
   Lead,
   LeadPriority,
   LeadStatus,
@@ -21,8 +17,6 @@ import type {
   PostData,
   Settings,
   Source,
-  SourceJob,
-  SourceJobKind,
 } from "./types";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -102,84 +96,84 @@ export function createAccount(
 }
 
 export function setAccountStatus(state: AppState, id: string, status: AccountStatus): AppState {
-  const next = {
+  return {
     ...state,
     accounts: state.accounts.map((a) => (a.id === id ? { ...a, status } : a)),
   };
-  // A paused or blocked account's agent goes offline, so whatever it was doing stops.
-  return status === "active" ? next : finishAgentTask(next, id, new Date().toISOString());
 }
 
 /* ---------------- Sources ---------------- */
 
-export interface AddCollectedSourcesResult {
-  added: number;
-  skipped: number;
+export interface AddSourceInput {
+  id: string;
+  name: string;
+  /** Pasted Facebook link — with or without the https:// prefix. */
+  url: string;
+  memberCount: number;
 }
 
 /**
- * Add sources the agent's collect job joined (groups) or recorded
- * (pages). Sources enter ONLY through the agent — there is no manual
- * add-by-URL path. A source whose URL is already joined by ANY
- * account is skipped (the no-duplication rule); duplicates inside
- * one batch are skipped too. One summary activity entry per batch.
+ * Add one source by hand (name, Facebook link, member count). The
+ * type is derived from the link: a /groups/ path is a Group,
+ * anything else is a Page. A URL already joined by ANY account is
+ * rejected with "Already joined by <account>" (the no-duplication
+ * rule) — the add is blocked, nothing is overwritten.
  */
-export function addCollectedSources(
+export function addSource(
   state: AppState,
-  sources: CollectedSource[],
+  input: AddSourceInput,
   accountId: string,
   now: string,
-): { state: AppState } & AddCollectedSourcesResult {
-  let next = state;
-  let added = 0;
-  let skipped = 0;
-  const names: string[] = [];
-  for (const c of sources) {
-    if (!c.url || !c.name) {
-      skipped++;
-      continue;
-    }
-    const twin = next.sources.find((s) => !!s.url && sameUrl(s.url, c.url));
-    if (twin) {
-      skipped++;
-      continue;
-    }
-    const source: Source = {
-      id: c.id,
-      name: c.name,
-      type: c.type,
-      url: c.url,
-      quantity: null,
-      memberCount: c.memberCount ?? 0,
-      status: "joined",
-      joinedByAccountId: accountId,
-      lastScrapedAt: null,
-    };
-    next = { ...next, sources: [...next.sources, source] };
-    added++;
-    names.push(c.name);
+): Result<AppState> {
+  if (!state.accounts.some((a) => a.id === accountId)) {
+    return { ok: false, error: "Account not found." };
   }
-  if (added > 0) {
-    next = withActivity(
-      next,
-      activity(
-        "source-collected",
-        accountId,
-        `Collected ${added} new source${added === 1 ? "" : "s"} — ${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}`,
-        `act-collect-${now}`,
-        now,
-      ),
-    );
+  const name = input.name.trim();
+  if (!name) return { ok: false, error: "Enter the page or group name." };
+  const raw = input.url.trim();
+  if (!raw) return { ok: false, error: "Enter the Facebook link." };
+  let parsed: URL;
+  try {
+    parsed = new URL(/:\/\//.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    return { ok: false, error: "Enter a valid Facebook link." };
   }
-  return { state: next, added, skipped };
+  if (!parsed.hostname.toLowerCase().endsWith("facebook.com")) {
+    return { ok: false, error: "The link must be a facebook.com URL." };
+  }
+  if (!Number.isInteger(input.memberCount) || input.memberCount < 0) {
+    return { ok: false, error: "Members must be a whole number, 0 or more." };
+  }
+  const url = parsed.toString();
+  const twin = state.sources.find((s) => !!s.url && sameUrl(s.url, url));
+  if (twin) {
+    return { ok: false, error: `Already joined by ${accountName(state, twin.joinedByAccountId)}.` };
+  }
+  const source: Source = {
+    id: input.id,
+    name,
+    type: parsed.pathname.includes("/groups/") ? "group" : "page",
+    url,
+    quantity: null,
+    memberCount: input.memberCount,
+    status: "joined",
+    joinedByAccountId: accountId,
+    lastScrapedAt: null,
+  };
+  return {
+    ok: true,
+    value: withActivity(
+      { ...state, sources: [...state.sources, source] },
+      activity("source-added", accountId, `Added source ${name}`, `act-add-${input.id}`, now),
+    ),
+  };
 }
 
 /**
- * Remove a source from EVERYWHERE: the Sources list, its collected
- * posts, and any leads derived from those posts. Call only after the
- * agent confirmed the group was left (or the page unfollowed) on
- * Facebook — a failed leave must keep the row (see the agent's
- * delete endpoint).
+ * Remove a source from EVERYWHERE in LeadHunter: the Sources list,
+ * its collected posts, and any leads derived from those posts. This
+ * is local-only — it does NOT leave the group or unfollow the page
+ * on Facebook; the user does that by hand on Facebook if needed.
  */
 export function deleteSource(
   state: AppState,
@@ -202,7 +196,7 @@ export function deleteSource(
       activity(
         "source-deleted",
         source.joinedByAccountId ?? "",
-        `Deleted ${source.name} — left it on Facebook and removed its posts`,
+        `Deleted ${source.name} — removed it from LeadHunter and its posts`,
         `act-del-${sourceId}-${now}`,
         now,
       ),
@@ -552,10 +546,10 @@ export function mergePostActivity(
   return { state: { ...state, posts }, addedComments, addedReplies, changed };
 }
 
-/* ---------------- Source scrap/sync jobs ---------------- */
+/* ---------------- Source last-scraped stamp ---------------- */
 
 /**
- * Mark a source as scraped/synced just now. A completed run
+ * Mark a source as scraped just now. A completed run
  * re-visited the source even when it found nothing new, so the
  * "Last scraped" column must advance — otherwise the row keeps
  * showing an old failure after a run that actually finished.
@@ -571,65 +565,6 @@ export function markSourceScraped(
       sources: state.sources.map((s) => (s.id === sourceId ? { ...s, lastScrapedAt: now } : s)),
     },
   };
-}
-
-export function startSourceJob(
-  state: AppState,
-  job: {
-    id: string;
-    kind: SourceJobKind;
-    sourceId: string | null;
-    postId: string | null;
-    accountId: string;
-    startedAt: string;
-  },
-): { state: AppState } {
-  const entry: SourceJob = {
-    ...job,
-    status: "running",
-    postsProcessed: 0,
-    newPosts: 0,
-    finishedAt: null,
-    error: null,
-    verification: [],
-  };
-  return { state: { ...state, jobs: [entry, ...state.jobs] } };
-}
-
-export function updateSourceJob(
-  state: AppState,
-  jobId: string,
-  patch: Partial<
-    Pick<SourceJob, "status" | "postsProcessed" | "newPosts" | "finishedAt" | "error" | "verification" | "result">
-  >,
-): { state: AppState } {
-  return {
-    state: { ...state, jobs: state.jobs.map((j) => (j.id === jobId ? { ...j, ...patch } : j)) },
-  };
-}
-
-/**
- * Graceful stop: marks the job "stop-requested". The agent only ever
- * checks this flag BETWEEN posts — it finishes the current post
- * fully, saves it, then terminates.
- */
-export function requestSourceJobStop(state: AppState, jobId: string): { state: AppState } {
-  return updateSourceJob(state, jobId, { status: "stop-requested" });
-}
-
-const isJobActive = (j: SourceJob) => j.status === "running" || j.status === "stop-requested";
-
-export function runningJobForSource(state: AppState, sourceId: string): SourceJob | undefined {
-  return state.jobs.find((j) => j.sourceId === sourceId && isJobActive(j));
-}
-
-export function runningJobForPost(state: AppState, postId: string): SourceJob | undefined {
-  return state.jobs.find((j) => j.postId === postId && isJobActive(j));
-}
-
-/** The running (or stop-requested) backend job for an account, if any. */
-export function runningJobForAccount(state: AppState, accountId: string): SourceJob | undefined {
-  return state.jobs.find((j) => j.accountId === accountId && isJobActive(j));
 }
 
 /* ---------------- Analysis (simulated AI) ---------------- */
@@ -902,7 +837,6 @@ export function validateSettings(input: Settings): Result<Settings> {
     model: input.model.trim(),
     ollamaUrl: input.ollamaUrl.trim().replace(/\/+$/, ""),
     geminiApiKey: input.geminiApiKey.trim(),
-    agentUrl: input.agentUrl.trim().replace(/\/+$/, ""),
     database: {
       ...input.database,
       supabaseUrl: input.database.supabaseUrl.trim().replace(/\/+$/, ""),
@@ -912,7 +846,6 @@ export function validateSettings(input: Settings): Result<Settings> {
   };
   if (!s.model) return { ok: false, error: "Enter a model name." };
   if (!isHttpUrl(s.ollamaUrl)) return { ok: false, error: "Ollama server URL must start with http:// or https://." };
-  if (!isHttpUrl(s.agentUrl)) return { ok: false, error: "Agent URL must start with http:// or https://." };
   const { defaultLeadsCount, preferredMinAge, gentleMinAge } = s.leadRules;
   if (!isWhole(defaultLeadsCount, 1)) return { ok: false, error: "Default leads count must be a whole number, 1 or more." };
   if (!isWhole(gentleMinAge, 1) || !isWhole(preferredMinAge, 1))
@@ -945,105 +878,4 @@ export function meetsSourcingRules(
   rules: Settings["sourcing"],
 ): boolean {
   return stats.comments >= rules.minComments && stats.members >= rules.minMembers;
-}
-
-// ---------------------------------------------------------------------------
-// Account agents — one per account; it can work on one task at a time.
-// ---------------------------------------------------------------------------
-
-export function agentFor(state: AppState, accountId: string): AgentState {
-  return (
-    state.agents?.find((a) => a.accountId === accountId) ?? {
-      accountId,
-      task: null,
-      lastTaskLabel: null,
-      lastFinishedAt: null,
-    }
-  );
-}
-
-/** Human label for a running job, e.g. "Collecting sources…" / "Scraping Stocks To Watch…". */
-export function jobTaskLabel(state: AppState, job: SourceJob): string {
-  if (job.kind === "collect") return "Collecting sources…";
-  const name = job.sourceId ? state.sources.find((s) => s.id === job.sourceId)?.name : undefined;
-  const verb = job.kind === "sync" ? "Syncing" : "Scraping";
-  return name ? `${verb} ${name}…` : `${verb}…`;
-}
-
-/**
- * What the account's agent is doing right now: its stored task
- * (AI Analysis) first, else the running backend job (collect /
- * scrape / sync) as a derived task. Null when free. A job-derived
- * task has no expectedMs — its progress comes from the job itself,
- * and it is cleared when the job finishes, not by finishAgentTask.
- */
-export function agentCurrentTask(state: AppState, accountId: string): AgentTask | null {
-  const stored = agentFor(state, accountId).task;
-  if (stored) return stored;
-  const job = runningJobForAccount(state, accountId);
-  if (!job) return null;
-  return {
-    kind: job.kind === "collect" ? "joining" : "scraping",
-    label: jobTaskLabel(state, job),
-    startedAt: job.startedAt,
-    expectedMs: null,
-  };
-}
-
-/** Busy while it has a task or a backend job is running, offline while its account is paused/blocked, otherwise free. */
-export function agentStatus(state: AppState, accountId: string): AgentStatus {
-  const account = state.accounts.find((a) => a.id === accountId);
-  if (!account || account.status !== "active") return "offline";
-  return agentCurrentTask(state, accountId) ? "busy" : "free";
-}
-
-function putAgent(state: AppState, agent: AgentState): AppState {
-  const others = (state.agents ?? []).filter((a) => a.accountId !== agent.accountId);
-  return { ...state, agents: [...others, agent] };
-}
-
-/** Give an account's agent a task. Fails when the agent is offline or already busy. */
-export function startAgentTask(
-  state: AppState,
-  accountId: string,
-  task: Omit<AgentTask, "startedAt">,
-  now: string,
-): Result<AppState> {
-  const account = state.accounts.find((a) => a.id === accountId);
-  if (!account) return { ok: false, error: "Account not found." };
-  const status = agentStatus(state, accountId);
-  if (status === "offline")
-    return { ok: false, error: `${account.name} is ${account.status}, so its agent is offline.` };
-  const agent = agentFor(state, accountId);
-  const current = agentCurrentTask(state, accountId);
-  if (current)
-    return { ok: false, error: `${account.name}'s agent is busy: ${current.label}. Wait for it or stop that task.` };
-  return { ok: true, value: putAgent(state, { ...agent, task: { ...task, startedAt: now } }) };
-}
-
-/** Mark the agent's current task done (or stopped). No-op when the agent is free. */
-export function finishAgentTask(state: AppState, accountId: string, now: string): AppState {
-  const agent = agentFor(state, accountId);
-  if (!agent.task) return state;
-  return putAgent(state, { ...agent, task: null, lastTaskLabel: agent.task.label, lastFinishedAt: now });
-}
-
-/** Simulated tasks whose expected time has passed. */
-export function dueAgentTasks(state: AppState, nowMs: number): AgentState[] {
-  return (state.agents ?? []).filter(
-    (a) => a.task?.expectedMs != null && Date.parse(a.task.startedAt) + a.task.expectedMs <= nowMs,
-  );
-}
-
-/** Finish every simulated task that is due. Returns the same state object when nothing changed. */
-export function finishDueAgentTasks(state: AppState, nowMs: number): AppState {
-  const due = dueAgentTasks(state, nowMs);
-  const now = new Date(nowMs).toISOString();
-  return due.reduce((s, a) => finishAgentTask(s, a.accountId, now), state);
-}
-
-/** 0–1 progress of a simulated task, or null when the length is unknown. */
-export function agentProgress(task: AgentTask, nowMs: number): number | null {
-  if (!task.expectedMs) return null;
-  return Math.min(1, Math.max(0, (nowMs - Date.parse(task.startedAt)) / task.expectedMs));
 }

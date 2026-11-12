@@ -59,14 +59,14 @@ function SourcePostsPage() {
         <CardHeader>
           <CardTitle className="text-base">{posts.length} post{posts.length === 1 ? "" : "s"}</CardTitle>
           <CardDescription>
-            Collected by the local scraping agent (Scrap / Sync on the source row).
+            Posts collected from this source. Post collection is done by the browser extension (coming soon).
           </CardDescription>
         </CardHeader>
         <CardContent className="px-0">
           {posts.length === 0 ? (
             <div className="px-6">
-              <EmptyState title="No posts scraped from this source yet">
-                Use Scrap on the source row in Data Sourcing.
+              <EmptyState title="No posts collected from this source yet">
+                Posts will appear here once the extension import lands.
               </EmptyState>
             </div>
           ) : (

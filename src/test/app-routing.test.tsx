@@ -51,8 +51,6 @@ function seedState(): AppState {
     leads: [],
     activity: [],
     settings: createDefaultSettings(),
-    agents: [],
-    jobs: [],
     activeAccountId: "acc-1",
     defaultAccountId: "acc-1",
   };

@@ -10,23 +10,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AGENT_NOT_RUNNING_MESSAGE } from "@/lib/agent-client";
-import { accountName, runningJobForSource, scrapedCount } from "@/lib/leadhunter-service";
+import { accountName, scrapedCount } from "@/lib/leadhunter-service";
 import { fmtDate, fmtNumber, shortUrl } from "@/lib/format";
 import { useStore } from "@/lib/store";
-import { useAgentHealth } from "@/lib/use-agent-health";
-import type { SourceType } from "@/lib/types";
 
 export const Route = createFileRoute("/data-sourcing")({
   head: () => ({
     meta: [
       { title: "Data Sourcing — LeadHunter" },
-      { name: "description", content: "Join Facebook groups and pages and collect post data with comments and replies." },
+      { name: "description", content: "Add the Facebook groups and pages you joined, and the posts collected from them." },
       { property: "og:title", content: "Data Sourcing — LeadHunter" },
-      { property: "og:description", content: "Join Facebook groups and pages and collect post data with comments and replies." },
+      { property: "og:description", content: "Add the Facebook groups and pages you joined, and the posts collected from them." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -57,8 +53,7 @@ function DataSourcingPage() {
 /* ---------------- Sources ---------------- */
 
 function SourcesSection() {
-  const { state, stopJob } = useStore();
-  const { reachable, refresh } = useAgentHealth();
+  const { state } = useStore();
   const accountId = state.activeAccountId;
   const [filter, setFilter] = useState<"all" | "mine">("all");
   const [open, setOpen] = useState(false);
@@ -71,11 +66,6 @@ function SourcesSection() {
     const rank = (id: string | null) => (id === accountId ? 0 : 1);
     return [...list].sort((a, b) => rank(a.joinedByAccountId) - rank(b.joinedByAccountId));
   }, [state.sources, filter, accountId]);
-
-  // A collect job (Add Source) has no source row — show its progress
-  // as a banner above the table instead.
-  const collectJob = state.jobs.find((j) => j.kind === "collect" && (j.status === "running" || j.status === "stop-requested"));
-  const lastCollectJob = state.jobs.find((j) => j.kind === "collect" && (j.status === "done" || j.status === "failed" || j.status === "stopped"));
 
   return (
     <Card className="shadow-card">
@@ -97,40 +87,17 @@ function SourcesSection() {
         </div>
       </CardHeader>
       <CardContent className="px-0">
-        {reachable === false && (
-          <div className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            <span>{AGENT_NOT_RUNNING_MESSAGE}</span>
-            <Button variant="outline" size="sm" onClick={() => void refresh()}>
-              Recheck
-            </Button>
-          </div>
-        )}
         {!accountId && (
           <div className="mx-6 mb-4 rounded-md border px-3 py-2 text-sm text-muted-foreground">
             No account yet — <Link to="/accounts" className="font-medium text-primary hover:underline">create an account</Link> first.
             Sources belong to the account that collects them.
           </div>
         )}
-        {collectJob && (
-          <div className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
-            <span>
-              Collecting sources… {collectJob.postsProcessed} checked, {collectJob.newPosts} joined
-            </span>
-            <Button variant="outline" size="sm" onClick={() => void stopJob(collectJob.id)}>
-              Stop
-            </Button>
-          </div>
-        )}
-        {lastCollectJob?.status === "failed" && (
-          <div className="mx-6 mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-            Last collect failed: {lastCollectJob.error ?? "unknown error"}
-          </div>
-        )}
         {rows.length === 0 ? (
           <div className="px-6">
             <EmptyState title={accountId ? "No sources here yet" : "No account yet"}>
               {accountId
-                ? "Add a source: search Facebook by keyword — the agent joins groups that pass the comments and member gates."
+                ? "Add a source by hand: paste the group's or page's name, its Facebook link and its member count."
                 : "Create an account first, then add a source."}
             </EmptyState>
           </div>
@@ -193,7 +160,7 @@ function SourcesSection() {
                       )}
                     </TableCell>
                     <TableCell className="pr-6">
-                      <SourceActions sourceId={s.id} reachable={reachable} />
+                      <SourceActions sourceId={s.id} />
                     </TableCell>
                   </TableRow>
                 );
@@ -207,19 +174,12 @@ function SourcesSection() {
   );
 }
 
-/** Per-row Scrap / Sync / Stop / Delete. While a job runs for this
- * source the buttons are replaced by its progress and a Stop button. */
-function SourceActions({ sourceId, reachable }: { sourceId: string; reachable: boolean | null }) {
-  const { state, startScrape, startSync, stopJob, deleteSource } = useStore();
-  const job = runningJobForSource(state, sourceId);
-  const count = scrapedCount(state, sourceId);
-  // Most recent job for this source, so an incomplete run stays
-  // visible after its toast disappears — until a later run succeeds.
-  const latestJob = state.jobs.find((j) => j.sourceId === sourceId);
-  const lastJob =
-    latestJob && (latestJob.status === "incomplete" || latestJob.status === "failed") ? latestJob : undefined;
+/** Per-row Delete. Local-only: it removes the source, its posts and
+ * its derived leads from LeadHunter. It does NOT leave the group/page
+ * on Facebook — that is done by hand on Facebook if needed. */
+function SourceActions({ sourceId }: { sourceId: string }) {
+  const { deleteSource } = useStore();
   const [armed, setArmed] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const armTimer = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -236,106 +196,63 @@ function SourceActions({ sourceId, reachable }: { sourceId: string; reachable: b
     }
     if (armTimer.current) window.clearTimeout(armTimer.current);
     setArmed(false);
-    setDeleting(true);
-    void deleteSource(sourceId).finally(() => setDeleting(false));
+    deleteSource(sourceId);
   };
 
-  if (job) {
-    return (
-      <div className="flex flex-col gap-1">
-        <span className="whitespace-nowrap text-xs text-muted-foreground">
-          {job.kind === "scrape" ? "Scraping" : "Syncing"}… {job.postsProcessed} processed, {job.newPosts} new
-        </span>
-        <div>
-          <Button variant="outline" size="sm" onClick={() => void stopJob(job.id)}>
-            Stop
-          </Button>
-        </div>
-      </div>
-    );
-  }
-  const agentDown = reachable === false;
-  const agentReason = agentDown ? AGENT_NOT_RUNNING_MESSAGE : undefined;
   return (
     <div className="flex flex-col gap-1">
       <div className="flex gap-1.5">
-        <Button variant="outline" size="sm" disabled={agentDown} title={agentReason} onClick={() => void startScrape(sourceId)}>
-          Scrap
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={agentDown || count === 0}
-          title={agentDown ? agentReason : count === 0 ? "No collected posts to sync yet" : undefined}
-          onClick={() => void startSync(sourceId)}
-        >
-          Sync
-        </Button>
         <Button
           variant={armed ? "destructive" : "outline"}
           size="sm"
-          disabled={agentDown || deleting}
           title={
-            agentDown
-              ? agentReason
-              : armed
-                ? "Click again to confirm — this leaves the group/page on Facebook and removes it from everywhere"
-                : "Leave the group/page on Facebook and remove it from everywhere"
+            armed
+              ? "Click again to confirm — this removes the source from LeadHunter only, it stays joined on Facebook"
+              : "Delete from LeadHunter only — it stays joined on Facebook"
           }
           onClick={onDelete}
         >
-          {deleting ? "Deleting…" : armed ? "Confirm delete?" : "Delete"}
+          {armed ? "Confirm delete?" : "Delete"}
         </Button>
       </div>
-      {lastJob?.status === "incomplete" && (
-        <span className="max-w-56 text-xs text-amber-600">
-          Last {lastJob.kind}:{" "}
-          {lastJob.verification
-            .filter((v) => !v.complete)
-            .map((v) => `collected ${v.collectedComments} of ${v.expectedComments ?? "?"} — ${v.missing ?? "?"} missing`)
-            .join("; ")}
-        </span>
-      )}
-      {lastJob?.status === "failed" && (
-        <span className="max-w-56 text-xs text-destructive">Last {lastJob.kind} failed: {lastJob.error ?? "unknown error"}</span>
-      )}
     </div>
   );
 }
 
-type CollectType = SourceType | "both";
-
 /**
- * Add Source = keyword search + collect, exactly like client-hunting.
- * The Name field is the search keyword; Type filters Group/Page (or
- * both); "Number of groups" is how many good sources to collect at
- * most. The agent searches Facebook, applies the comments gate and
- * the member gate from Configurations, joins the good groups, and
- * lists them here. There is no URL input anywhere.
+ * Add Source = manual entry. Three fields only: Name, Link, Members
+ * count. Group or Page is derived from the link — /groups/ in the
+ * URL means Group, otherwise Page. The source is saved under the
+ * active account as Joined. A link already present as a source is
+ * rejected with "Already joined by <account>".
  */
 function AddSourceDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { collectSources, state } = useStore();
-  const [keyword, setKeyword] = useState("");
-  const [type, setType] = useState<CollectType>("group");
-  const [quantity, setQuantity] = useState("");
-  const [busy, setBusy] = useState(false);
-  const qty = Number(quantity);
-  const validQty = Number.isInteger(qty) && qty >= 1;
-  const typeLabel = type === "group" ? "groups" : type === "page" ? "pages" : "groups/pages";
+  const { addSource, state } = useStore();
+  const accountId = state.activeAccountId;
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [members, setMembers] = useState("");
+  const [errors, setErrors] = useState<{ name?: string; url?: string; members?: string }>({});
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!keyword.trim() || !validQty) return;
-    setBusy(true);
-    void collectSources({ keyword: keyword.trim(), type, maxNew: qty })
-      .then((ok) => {
-        if (ok) {
-          setKeyword("");
-          setQuantity("");
-          onOpenChange(false);
-        }
-      })
-      .finally(() => setBusy(false));
+    const errs: typeof errors = {};
+    if (!name.trim()) errs.name = "Enter the group's or page's name.";
+    if (!url.trim()) errs.url = "Paste the group's or page's Facebook link.";
+    const count = Number(members);
+    if (members.trim() === "" || !Number.isInteger(count) || count < 0)
+      errs.members = "Enter a whole number, 0 or more.";
+    setErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+    // addSource toasts the reason itself on failure (e.g. a duplicate
+    // link) — the dialog stays open so the entry can be corrected.
+    const ok = addSource({ name: name.trim(), url: url.trim(), memberCount: count });
+    if (!ok) return;
+    setName("");
+    setUrl("");
+    setMembers("");
+    setErrors({});
+    onOpenChange(false);
   };
 
   return (
@@ -344,49 +261,51 @@ function AddSourceDialog({ open, onOpenChange }: { open: boolean; onOpenChange: 
         <DialogHeader>
           <DialogTitle>Add source</DialogTitle>
           <DialogDescription>
-            Search Facebook by keyword. The agent joins up to {quantity || "N"} active {typeLabel} with posts and comments
-            (at least {state.settings.sourcing.minComments} comments and {state.settings.sourcing.minMembers} members —
-            see Configurations), and lists them here. Dead sources are never saved.
+            Add a group or page you already joined on Facebook. Group or Page is worked out from the link —
+            <span className="font-medium text-foreground"> /groups/</span> in the link means Group, otherwise Page.
+            It is saved under your active account ({accountId ? accountName(state, accountId) : "no account"}) as
+            Joined.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="src-name">Keyword</Label>
+            <Label htmlFor="src-name">Name</Label>
             <Input
               id="src-name"
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              placeholder="e.g. stock market"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Stocks To Watch"
             />
+            {errors.name && <p className="text-sm text-destructive">{errors.name}</p>}
           </div>
           <div className="space-y-1.5">
-            <Label>Type</Label>
-            <Select value={type} onValueChange={(v) => setType(v as CollectType)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="group">Group</SelectItem>
-                <SelectItem value="page">Page</SelectItem>
-                <SelectItem value="both">Groups + Pages</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="src-number">Number of {typeLabel}</Label>
+            <Label htmlFor="src-url">Link</Label>
             <Input
-              id="src-number"
+              id="src-url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://www.facebook.com/groups/…"
+            />
+            {errors.url && <p className="text-sm text-destructive">{errors.url}</p>}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="src-members">Members</Label>
+            <Input
+              id="src-members"
               type="number"
               inputMode="numeric"
-              min={1}
+              min={0}
               step={1}
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              placeholder="e.g. 10"
+              value={members}
+              onChange={(e) => setMembers(e.target.value)}
+              placeholder="e.g. 780000"
             />
+            {errors.members && <p className="text-sm text-destructive">{errors.members}</p>}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={!keyword.trim() || !validQty || busy}>
-              {busy ? "Starting…" : "Search & collect"}
+            <Button type="submit" disabled={!accountId}>
+              Add source
             </Button>
           </DialogFooter>
         </form>

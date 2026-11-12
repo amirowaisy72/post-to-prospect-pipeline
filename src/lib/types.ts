@@ -119,8 +119,6 @@ export interface Settings {
   leadRules: LeadRules;
   sourcing: SourcingRules;
   database: DatabaseConfig;
-  /** Local scraping agent on the user's PC (Python + Playwright). */
-  agentUrl: string;
 }
 
 export type ActivityType =
@@ -151,88 +149,6 @@ export interface AppState {
   leads: Lead[];
   activity: Activity[];
   settings: Settings;
-  /** One entry per account that has run (or is running) a task; missing accounts are free. */
-  agents: AgentState[];
-  /** Scrap/Sync jobs run against the local agent (newest first). */
-  jobs: SourceJob[];
   activeAccountId: string;
   defaultAccountId: string;
 }
-
-/* ---------------- Source scrap/sync/collect jobs ---------------- */
-
-/** Kind of job the local scraping agent runs. */
-export type SourceJobKind = "scrape" | "sync" | "collect";
-
-/** One source the agent's collect job joined (or recorded, for pages). */
-export interface CollectedSource {
-  id: string;
-  name: string;
-  type: SourceType;
-  url: string;
-  /** Null when Facebook never showed a count — never blocks a run. */
-  memberCount: number | null;
-  joinedByAccountId: string | null;
-}
-
-/**
- * Job status. "stop-requested" is the graceful-stop flag: the agent
- * finishes the current post fully, saves it, then terminates — the
- * flag is only ever checked BETWEEN posts, never mid-post.
- * "incomplete" means the run finished but at least one post's
- * collected comment count did not match its stated total (see
- * verification on the job).
- */
-export type SourceJobStatus = "running" | "stop-requested" | "done" | "stopped" | "failed" | "incomplete";
-
-/** Per-post completeness check: collected comments+replies vs the post's stated total. */
-export interface PostVerification {
-  postUrl: string;
-  /** Stated total from the post (null when Facebook never showed one). */
-  expectedComments: number | null;
-  collectedComments: number;
-  /** expectedComments - collectedComments (null when expected is unknown). */
-  missing: number | null;
-  complete: boolean;
-}
-
-export interface SourceJob {
-  id: string;
-  kind: SourceJobKind;
-  sourceId: string | null;
-  postId: string | null;
-  accountId: string;
-  status: SourceJobStatus;
-  postsProcessed: number;
-  newPosts: number;
-  startedAt: string;
-  finishedAt: string | null;
-  error: string | null;
-  /** Count verification, one entry per post the job touched. */
-  verification: PostVerification[];
-  /** Collect jobs only: the sources the agent joined/recorded. */
-  result?: { sources: CollectedSource[] } | null;
-}
-
-/* ---------------- Account agents ---------------- */
-
-/** Each account has exactly one agent that does its work (scraping, joining, analysis). */
-export type AgentTaskKind = "scraping" | "joining" | "analysing";
-
-export interface AgentTask {
-  kind: AgentTaskKind;
-  label: string;
-  startedAt: string;
-  /** Simulated duration so demo tasks finish on their own; the real agent API will report progress instead. */
-  expectedMs: number | null;
-}
-
-export interface AgentState {
-  accountId: string;
-  task: AgentTask | null;
-  lastTaskLabel: string | null;
-  lastFinishedAt: string | null;
-}
-
-/** busy = working on a task, free = ready, offline = the account is paused or blocked. */
-export type AgentStatus = "busy" | "free" | "offline";
