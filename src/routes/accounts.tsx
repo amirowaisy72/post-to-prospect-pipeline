@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Plus, Star } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 
 import { AccountStatusBadge } from "@/components/badges";
 import { PageHeader } from "@/components/page-header";
@@ -30,10 +30,13 @@ export const Route = createFileRoute("/accounts")({
 });
 
 function AccountsPage() {
-  const { state, createAccount, setAccountStatus, setDefaultAccount, setActiveAccount } = useStore();
+  const { state, createAccount, setAccountStatus, setDefaultAccount, setActiveAccount, setFacebookCreatedAt: saveFacebookCreatedAt } = useStore();
   const [name, setName] = useState("");
   const [facebookName, setFacebookName] = useState("");
   const [facebookCreatedAt, setFacebookCreatedAt] = useState("");
+  // Which existing account's Facebook created date is being edited.
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [editingDate, setEditingDate] = useState("");
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -111,8 +114,10 @@ function AccountsPage() {
                   const s = accountStats(state, a.id);
                   const isDefault = a.id === state.defaultAccountId;
                   const isActive = a.id === state.activeAccountId;
+                  const editing = editingAccountId === a.id;
                   return (
-                    <TableRow key={a.id} className={isActive ? "bg-accent/50" : undefined}>
+                    <Fragment key={a.id}>
+                    <TableRow className={isActive ? "bg-accent/50" : undefined}>
                       <TableCell className="pl-6">
                         <div className="flex items-center gap-1.5 font-semibold text-foreground">
                           {a.name}
@@ -147,6 +152,17 @@ function AccountsPage() {
                       <TableCell className="text-right tabular">{s.leads}</TableCell>
                       <TableCell className="pr-6">
                         <div className="flex justify-end gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            aria-label={`Edit Facebook created date for ${a.name}`}
+                            onClick={() => {
+                              setEditingAccountId(a.id);
+                              setEditingDate(a.facebookCreatedAt ?? "");
+                            }}
+                          >
+                            Edit date
+                          </Button>
                           <Button size="sm" variant={isActive ? "secondary" : "outline"} disabled={isActive} onClick={() => setActiveAccount(a.id)}>
                             {isActive ? "Active" : "Switch"}
                           </Button>
@@ -156,6 +172,41 @@ function AccountsPage() {
                         </div>
                       </TableCell>
                     </TableRow>
+                    {editing && (
+                      <TableRow>
+                        <TableCell colSpan={6} className="bg-accent/30 pl-6">
+                          <div className="flex flex-wrap items-end gap-3 py-1">
+                            <div className="space-y-1.5">
+                              <Label htmlFor={`edit-fb-created-${a.id}`}>Facebook account created</Label>
+                              <Input
+                                id={`edit-fb-created-${a.id}`}
+                                type="date"
+                                value={editingDate}
+                                onChange={(e) => setEditingDate(e.target.value)}
+                                className="w-[180px]"
+                              />
+                            </div>
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                if (saveFacebookCreatedAt(a.id, editingDate || null)) {
+                                  setEditingAccountId(null);
+                                }
+                              }}
+                            >
+                              Save date
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => setEditingAccountId(null)}>
+                              Cancel
+                            </Button>
+                            <p className="w-full text-xs text-muted-foreground">
+                              Sets the daily chat limit (under 3 days: none, week 1: 12/day, week 2: 25/day, then 45/day).
+                            </p>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </Fragment>
                   );
                   })
                 )}

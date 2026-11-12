@@ -113,6 +113,36 @@ export function setAccountStatus(state: AppState, id: string, status: AccountSta
   };
 }
 
+/**
+ * Set (or clear) the Facebook account's own created date for one
+ * existing account. The daily chat cap reads this date at once
+ * (dailyChatLimit), so saving an old date lifts a 0/day cap
+ * immediately. Empty clears it back to the date the account was
+ * added here in LeadHunter.
+ */
+export function setFacebookCreatedAt(
+  state: AppState,
+  id: string,
+  facebookCreatedAt: string | null,
+): Result<AppState> {
+  const account = state.accounts.find((a) => a.id === id);
+  if (!account) return { ok: false, error: "Account not found." };
+  const clean = (facebookCreatedAt ?? "").trim() || null;
+  if (clean && !/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    return { ok: false, error: "Facebook created date must be YYYY-MM-DD." };
+  }
+  if (account.facebookCreatedAt === clean) return { ok: true, value: state };
+  return {
+    ok: true,
+    value: {
+      ...state,
+      accounts: state.accounts.map((a) =>
+        a.id === id ? { ...a, facebookCreatedAt: clean } : a,
+      ),
+    },
+  };
+}
+
 /* ---------------- Sources ---------------- */
 
 export interface AddSourceInput {

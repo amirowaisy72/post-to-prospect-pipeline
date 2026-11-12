@@ -68,6 +68,10 @@ interface StoreValue {
     facebookCreatedAt?: string | null;
   }) => boolean;
   setAccountStatus: (id: string, status: AccountStatus) => void;
+  /** Set an existing account's Facebook created date (the daily chat
+   * cap reads it at once). Empty clears it back to the date the
+   * account was added here. */
+  setFacebookCreatedAt: (id: string, facebookCreatedAt: string | null) => boolean;
   /** Add one source by hand (name, Facebook link, member count). Type is derived from the link. */
   addSource: (input: { name: string; url: string; memberCount: number }) => boolean;
   /** Remove a source from LeadHunter only (its posts and derived leads go too). It stays joined on Facebook. */
@@ -251,6 +255,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `Account “${input.name.trim()}” created`,
         ),
       setAccountStatus: (id, status) => setState((s) => svc.setAccountStatus(s, id, status)),
+      setFacebookCreatedAt: (id, facebookCreatedAt) =>
+        apply(
+          svc.setFacebookCreatedAt(stateRef.current, id, facebookCreatedAt),
+          "Facebook created date saved — daily chat limit updated",
+        ),
       addSource: (input) => {
         const s = stateRef.current;
         const accountId = s.activeAccountId;
