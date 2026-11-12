@@ -68,6 +68,25 @@ async function renderAt(path: string) {
   return { router, ...render(<RouterProvider router={router} />) };
 }
 
+describe("Inbox page", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("renders the Inbox heading and the Messenger-not-connected notice", async () => {
+    await renderAt("/inbox");
+    expect(await screen.findByRole("heading", { name: "Inbox" })).toBeInTheDocument();
+    expect(screen.getByText(/Messenger delivery is not connected yet/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /New chat/ })).toBeInTheDocument();
+  });
+
+  it("matches a page for /inbox instead of falling back to not found", () => {
+    const router = createRouter({ routeTree, context: { queryClient: new QueryClient() } });
+    const matches = router.matchRoutes("/inbox");
+    expect(matches.at(-1)?.routeId).not.toBe(rootRouteId);
+  });
+});
+
 describe("Data Sourcing page", () => {
   beforeEach(() => {
     window.localStorage.clear();

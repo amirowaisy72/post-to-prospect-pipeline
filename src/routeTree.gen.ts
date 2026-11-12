@@ -14,6 +14,7 @@ import { Route as AccountsRouteImport } from './routes/accounts'
 import { Route as AnalysisRouteImport } from './routes/analysis'
 import { Route as ConfigurationsRouteImport } from './routes/configurations'
 import { Route as DataSourcingRouteImport } from './routes/data-sourcing'
+import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as LeadsRouteImport } from './routes/leads'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ShortlistedRouteImport } from './routes/shortlisted'
@@ -43,6 +44,11 @@ const ConfigurationsRoute = ConfigurationsRouteImport.update({
 const DataSourcingRoute = DataSourcingRouteImport.update({
   id: '/data-sourcing',
   path: '/data-sourcing',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const InboxRoute = InboxRouteImport.update({
+  id: '/inbox',
+  path: '/inbox',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LeadsRoute = LeadsRouteImport.update({
@@ -78,6 +84,7 @@ export interface FileRoutesByFullPath {
   '/analysis': typeof AnalysisRoute
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
+  '/inbox': typeof InboxRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
   '/shortlisted': typeof ShortlistedRoute
@@ -90,6 +97,7 @@ export interface FileRoutesByTo {
   '/analysis': typeof AnalysisRoute
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
+  '/inbox': typeof InboxRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
   '/shortlisted': typeof ShortlistedRoute
@@ -103,6 +111,7 @@ export interface FileRoutesById {
   '/analysis': typeof AnalysisRoute
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
+  '/inbox': typeof InboxRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
   '/shortlisted': typeof ShortlistedRoute
@@ -117,6 +126,7 @@ export interface FileRouteTypes {
     | '/analysis'
     | '/configurations'
     | '/data-sourcing'
+    | '/inbox'
     | '/leads'
     | '/settings'
     | '/shortlisted'
@@ -129,6 +139,7 @@ export interface FileRouteTypes {
     | '/analysis'
     | '/configurations'
     | '/data-sourcing'
+    | '/inbox'
     | '/leads'
     | '/settings'
     | '/shortlisted'
@@ -141,6 +152,7 @@ export interface FileRouteTypes {
     | '/analysis'
     | '/configurations'
     | '/data-sourcing'
+    | '/inbox'
     | '/leads'
     | '/settings'
     | '/shortlisted'
@@ -154,6 +166,7 @@ export interface RootRouteChildren {
   AnalysisRoute: typeof AnalysisRoute
   ConfigurationsRoute: typeof ConfigurationsRoute
   DataSourcingRoute: typeof DataSourcingRouteWithChildren
+  InboxRoute: typeof InboxRoute
   LeadsRoute: typeof LeadsRoute
   SettingsRoute: typeof SettingsRoute
   ShortlistedRoute: typeof ShortlistedRoute
@@ -194,6 +207,13 @@ declare module '@tanstack/react-router' {
       path: '/data-sourcing'
       fullPath: '/data-sourcing'
       preLoaderRoute: typeof DataSourcingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/inbox': {
+      id: '/inbox'
+      path: '/inbox'
+      fullPath: '/inbox'
+      preLoaderRoute: typeof InboxRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/leads': {
@@ -263,6 +283,7 @@ const rootRouteChildren: RootRouteChildren = {
   AnalysisRoute: AnalysisRoute,
   ConfigurationsRoute: ConfigurationsRoute,
   DataSourcingRoute: DataSourcingRouteWithChildren,
+  InboxRoute: InboxRoute,
   LeadsRoute: LeadsRoute,
   SettingsRoute: SettingsRoute,
   ShortlistedRoute: ShortlistedRoute,

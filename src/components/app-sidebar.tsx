@@ -1,5 +1,15 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { BrainCircuit, Crosshair, Database, LayoutDashboard, Settings, Star, Users, UserSearch } from "lucide-react";
+import {
+  BrainCircuit,
+  Crosshair,
+  Database,
+  Inbox,
+  LayoutDashboard,
+  Settings,
+  Star,
+  Users,
+  UserSearch,
+} from "lucide-react";
 
 import {
   Sidebar,
@@ -21,15 +31,17 @@ const workflow = [
   { title: "Accounts", url: "/accounts", icon: Users },
   { title: "Data Sourcing", url: "/data-sourcing", icon: Database },
   { title: "AI Analysis", url: "/analysis", icon: BrainCircuit },
+  { title: "Inbox", url: "/inbox", icon: Inbox },
   { title: "Leads", url: "/leads", icon: UserSearch },
   { title: "Shortlisted", url: "/shortlisted", icon: Star },
 ] as const;
 
 export function AppSidebar() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
-  const { leads } = useActiveAccountData();
+  const { leads, threads } = useActiveAccountData();
   const newLeads = leads.filter((l) => l.status === "new").length;
   const shortlisted = leads.filter((l) => l.status === "shortlisted").length;
+  const activeChats = threads.filter((t) => t.status === "active").length;
 
   return (
     <Sidebar collapsible="icon">
@@ -39,7 +51,9 @@ export function AppSidebar() {
             <Crosshair className="size-4" strokeWidth={2.5} />
           </span>
           <span className="flex flex-col leading-tight group-data-[collapsible=icon]:hidden">
-            <span className="text-sm font-extrabold tracking-tight text-sidebar-accent-foreground">LeadHunter</span>
+            <span className="text-sm font-extrabold tracking-tight text-sidebar-accent-foreground">
+              LeadHunter
+            </span>
             <span className="text-[11px] text-sidebar-muted">Source · Analyse · Shortlist</span>
           </span>
         </Link>
@@ -57,8 +71,15 @@ export function AppSidebar() {
                       <span>{item.title}</span>
                     </Link>
                   </SidebarMenuButton>
-                  {item.url === "/leads" && newLeads > 0 && <SidebarMenuBadge>{newLeads}</SidebarMenuBadge>}
-                  {item.url === "/shortlisted" && shortlisted > 0 && <SidebarMenuBadge>{shortlisted}</SidebarMenuBadge>}
+                  {item.url === "/leads" && newLeads > 0 && (
+                    <SidebarMenuBadge>{newLeads}</SidebarMenuBadge>
+                  )}
+                  {item.url === "/inbox" && activeChats > 0 && (
+                    <SidebarMenuBadge>{activeChats}</SidebarMenuBadge>
+                  )}
+                  {item.url === "/shortlisted" && shortlisted > 0 && (
+                    <SidebarMenuBadge>{shortlisted}</SidebarMenuBadge>
+                  )}
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>
@@ -68,7 +89,11 @@ export function AppSidebar() {
       <SidebarFooter className="border-t border-sidebar-border">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild isActive={pathname === "/configurations"} tooltip="Configurations">
+            <SidebarMenuButton
+              asChild
+              isActive={pathname === "/configurations"}
+              tooltip="Configurations"
+            >
               <Link to="/configurations">
                 <Settings />
                 <span>Configurations</span>

@@ -9,7 +9,13 @@ import type {
   Activity,
   ActivityType,
   AppState,
+  ChatMessage,
+  ChatMessageRole,
+  ChatScript,
+  ChatThread,
+  ChatThreadStatus,
   Comment,
+  InboxSourceType,
   Lead,
   LeadPriority,
   LeadStatus,
@@ -175,11 +181,7 @@ export function addSource(
  * is local-only — it does NOT leave the group or unfollow the page
  * on Facebook; the user does that by hand on Facebook if needed.
  */
-export function deleteSource(
-  state: AppState,
-  sourceId: string,
-  now: string,
-): Result<AppState> {
+export function deleteSource(state: AppState, sourceId: string, now: string): Result<AppState> {
   const source = state.sources.find((s) => s.id === sourceId);
   if (!source) return { ok: false, error: "Source not found." };
   const postIds = new Set(state.posts.filter((p) => p.sourceId === sourceId).map((p) => p.id));
@@ -276,10 +278,18 @@ function parseOnePost(
   value: unknown,
   label: string,
   state: AppState,
-): { draft: PostDraft | null; errors: string[]; alreadyCollected: { postUrl: string; accountName: string } | null } {
+): {
+  draft: PostDraft | null;
+  errors: string[];
+  alreadyCollected: { postUrl: string; accountName: string } | null;
+} {
   const errors: string[] = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { draft: null, errors: [`${label}: expected a PostData object.`], alreadyCollected: null };
+    return {
+      draft: null,
+      errors: [`${label}: expected a PostData object.`],
+      alreadyCollected: null,
+    };
   }
   const o = value as Loose;
   if (typeof o.postUrl !== "string" || !o.postUrl.trim()) errors.push("postUrl is required.");
@@ -305,7 +315,8 @@ function parseOnePost(
         cc.replies.forEach((r, j) => {
           const rr = (r ?? {}) as Loose;
           const rAuthor = readPerson(rr.author, `comments[${i}].replies[${j}].author`, errors);
-          if (typeof rr.text !== "string") errors.push(`comments[${i}].replies[${j}].text is required.`);
+          if (typeof rr.text !== "string")
+            errors.push(`comments[${i}].replies[${j}].text is required.`);
           if (rAuthor && typeof rr.text === "string")
             replies.push({
               author: rAuthor,
@@ -378,14 +389,19 @@ export function parsePostDataJson(
     items = [json];
     labelFor = (_i, item) => postLabel(item, 0);
   } else {
-    result.errors.push({ label: "File", reason: "Expected a PostData object, a {\"posts\": [...]} wrapper, or an array of posts." });
+    result.errors.push({
+      label: "File",
+      reason: 'Expected a PostData object, a {"posts": [...]} wrapper, or an array of posts.',
+    });
     return result;
   }
   items.forEach((item, i) => {
     const label = labelFor(i, item);
     const parsed = parseOnePost(item, label, state);
-    if (parsed.draft && (!parsed.alreadyCollected || options?.allowExisting)) result.drafts.push(parsed.draft);
-    if (parsed.alreadyCollected && !options?.allowExisting) result.alreadyCollected.push(parsed.alreadyCollected);
+    if (parsed.draft && (!parsed.alreadyCollected || options?.allowExisting))
+      result.drafts.push(parsed.draft);
+    if (parsed.alreadyCollected && !options?.allowExisting)
+      result.alreadyCollected.push(parsed.alreadyCollected);
     for (const e of parsed.errors) result.errors.push({ label, reason: e });
   });
   return result;
@@ -431,7 +447,13 @@ export function addPost(
     ok: true,
     value: withActivity(
       next,
-      activity("post-collected", accountId, `Collected a post from ${source.name}`, `act-${id}`, now),
+      activity(
+        "post-collected",
+        accountId,
+        `Collected a post from ${source.name}`,
+        `act-${id}`,
+        now,
+      ),
     ),
   };
 }
@@ -463,7 +485,10 @@ export function addPosts(
     const existing = findCollectedPost(next, draft.postUrl);
     if (existing) {
       skipped++;
-      alreadyCollected.push({ postUrl: existing.postUrl, accountName: accountName(next, existing.accountId) });
+      alreadyCollected.push({
+        postUrl: existing.postUrl,
+        accountName: accountName(next, existing.accountId),
+      });
       continue;
     }
     const r = addPost(next, draft, sourceId, accountId, makeId(), now);
@@ -642,14 +667,21 @@ export type Classification =
 export function classifyComment(text: string): Classification {
   const reject = matches(text, REJECT_PATTERNS);
   if (reject.length) {
-    return { kind: "reject", reason: `Matches reject criteria (“${reject.slice(0, 2).join("”, “")}”).` };
+    return {
+      kind: "reject",
+      reason: `Matches reject criteria (“${reject.slice(0, 2).join("”, “")}”).`,
+    };
   }
   const wealth = matches(text, WEALTH_PATTERNS);
   const beginner = matches(text, BEGINNER_PATTERNS);
   const experienced = matches(text, EXPERIENCED_PATTERNS);
   const years = text.match(/\b\d+\s+years\b/i);
   if (years) experienced.push(years[0].toLowerCase());
-  const q = (list: string[]) => `“${list.slice(0, 3).map((s) => s.trim()).join("”, “")}”`;
+  const q = (list: string[]) =>
+    `“${list
+      .slice(0, 3)
+      .map((s) => s.trim())
+      .join("”, “")}”`;
 
   if (wealth.length && experienced.length) {
     return {
@@ -708,7 +740,12 @@ export function analysePosts(
       if (verdict.kind === "none") continue;
       seen.add(key);
       if (verdict.kind === "reject") {
-        result.rejected.push({ name: v.author.name, profileUrl: v.author.url, reason: verdict.reason, text: v.text });
+        result.rejected.push({
+          name: v.author.name,
+          profileUrl: v.author.url,
+          reason: verdict.reason,
+          text: v.text,
+        });
         continue;
       }
       const existing = state.leads.find((l) => sameUrl(l.profileUrl, v.author.url));
@@ -773,9 +810,27 @@ export function setLeadStatus(
     leads: state.leads.map((l) => (l.id === leadId ? { ...l, status } : l)),
   };
   if (status === "shortlisted")
-    return withActivity(next, activity("lead-shortlisted", lead.accountId, `Shortlisted ${lead.name}`, `act-${leadId}-${now}`, now));
+    return withActivity(
+      next,
+      activity(
+        "lead-shortlisted",
+        lead.accountId,
+        `Shortlisted ${lead.name}`,
+        `act-${leadId}-${now}`,
+        now,
+      ),
+    );
   if (status === "rejected")
-    return withActivity(next, activity("lead-rejected", lead.accountId, `Rejected ${lead.name}`, `act-${leadId}-${now}`, now));
+    return withActivity(
+      next,
+      activity(
+        "lead-rejected",
+        lead.accountId,
+        `Rejected ${lead.name}`,
+        `act-${leadId}-${now}`,
+        now,
+      ),
+    );
   return next;
 }
 
@@ -808,7 +863,10 @@ export function totals(state: AppState) {
 type Partial2<T> = { [K in keyof T]?: T[K] extends object ? Partial<T[K]> : T[K] };
 
 /** Fill any missing fields (e.g. from data saved by an older version) with defaults. */
-export function mergeSettings(defaults: Settings, saved: Partial2<Settings> | null | undefined): Settings {
+export function mergeSettings(
+  defaults: Settings,
+  saved: Partial2<Settings> | null | undefined,
+): Settings {
   if (!saved || typeof saved !== "object") return defaults;
   return {
     ...defaults,
@@ -845,16 +903,27 @@ export function validateSettings(input: Settings): Result<Settings> {
     },
   };
   if (!s.model) return { ok: false, error: "Enter a model name." };
-  if (!isHttpUrl(s.ollamaUrl)) return { ok: false, error: "Ollama server URL must start with http:// or https://." };
+  if (!isHttpUrl(s.ollamaUrl))
+    return { ok: false, error: "Ollama server URL must start with http:// or https://." };
   const { defaultLeadsCount, preferredMinAge, gentleMinAge } = s.leadRules;
-  if (!isWhole(defaultLeadsCount, 1)) return { ok: false, error: "Default leads count must be a whole number, 1 or more." };
+  if (!isWhole(defaultLeadsCount, 1))
+    return { ok: false, error: "Default leads count must be a whole number, 1 or more." };
   if (!isWhole(gentleMinAge, 1) || !isWhole(preferredMinAge, 1))
     return { ok: false, error: "Ages must be whole numbers, 1 or more." };
   if (gentleMinAge > preferredMinAge)
-    return { ok: false, error: "The gentle age must be lower than or equal to the full-match age." };
-  if (!isWhole(s.sourcing.minComments, 0)) return { ok: false, error: "Min comments must be a whole number, 0 or more." };
-  if (!isWhole(s.sourcing.minMembers, 0)) return { ok: false, error: "Min members must be a whole number, 0 or more." };
-  if (s.database.kind === "supabase" && s.database.supabaseUrl && !s.database.supabaseUrl.startsWith("https://"))
+    return {
+      ok: false,
+      error: "The gentle age must be lower than or equal to the full-match age.",
+    };
+  if (!isWhole(s.sourcing.minComments, 0))
+    return { ok: false, error: "Min comments must be a whole number, 0 or more." };
+  if (!isWhole(s.sourcing.minMembers, 0))
+    return { ok: false, error: "Min members must be a whole number, 0 or more." };
+  if (
+    s.database.kind === "supabase" &&
+    s.database.supabaseUrl &&
+    !s.database.supabaseUrl.startsWith("https://")
+  )
     return { ok: false, error: "Supabase URL must start with https://." };
   if (
     s.database.kind === "connection-string" &&
@@ -866,7 +935,10 @@ export function validateSettings(input: Settings): Result<Settings> {
 }
 
 /** How the age rule treats a person: full match, gentle match, or reject. */
-export function ageVerdict(age: number, rules: Settings["leadRules"]): "match" | "gentle" | "reject" {
+export function ageVerdict(
+  age: number,
+  rules: Settings["leadRules"],
+): "match" | "gentle" | "reject" {
   if (age >= rules.preferredMinAge) return "match";
   if (age >= rules.gentleMinAge) return "gentle";
   return "reject";
@@ -878,4 +950,286 @@ export function meetsSourcingRules(
   rules: Settings["sourcing"],
 ): boolean {
   return stats.comments >= rules.minComments && stats.members >= rules.minMembers;
+}
+
+// ---------------------------------------------------------------------------
+// Inbox — DM chats with shortlisted candidates (v1: in-app only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default chat script. The user has not provided the real script text
+ * yet — this is a sensible starting point they can edit in the Inbox
+ * tab. Goal: convince the client and finally push them.
+ */
+export const DEFAULT_CHAT_SCRIPT: ChatScript = {
+  firstMessageTemplate:
+    "Hi {name}! I read your {sourceKind} where you said “{sourceText}”. {introduction}",
+  introduction:
+    "I'm Amir — I help people take their first steps in investing safely, with a simple plan and no pressure. Would love to hear what you're aiming for.",
+  tone: "Friendly and short. Warm, personal, never pushy. One idea per message — no long paragraphs.",
+  rules: [
+    "Always reference their exact comment or post first — never open cold.",
+    "Never promise guaranteed returns or a fixed profit.",
+    "Never ask for money, passwords, or account access.",
+    "If they say no or stop replying, thank them and stop — do not chase.",
+    "Keep every message under 3 short sentences.",
+  ].join("\n"),
+  goal: "Convince the client that a simple, safe first step in investing is worth taking, and finally push them to book a short introductory call.",
+};
+
+/** Fill any missing script fields (e.g. from data saved by an older version) with defaults. */
+export function mergeChatScript(saved: Partial<ChatScript> | null | undefined): ChatScript {
+  return { ...DEFAULT_CHAT_SCRIPT, ...(saved ?? {}) };
+}
+
+/** A Facebook profile link: facebook.com host with a profile path. */
+export function isFacebookProfileUrl(raw: string): boolean {
+  const value = raw.trim();
+  if (!value) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(/:\/\//.test(value) ? value : `https://${value}`);
+  } catch {
+    return false;
+  }
+  if (!parsed.hostname.toLowerCase().endsWith("facebook.com")) return false;
+  // A profile link has a path beyond "/": /someone, /profile.php?id=…,
+  // /groups/… is a group, not a person — those are not chats.
+  const path = parsed.pathname.replace(/\/+$/, "");
+  if (!path || path === "/") return false;
+  if (path.startsWith("/groups/") || path.startsWith("/events/") || path.startsWith("/pages/"))
+    return false;
+  return true;
+}
+
+export interface CreateThreadInput {
+  id: string;
+  profileUrl: string;
+  profileName: string;
+  sourceType: InboxSourceType;
+  sourceText: string;
+  sourceUrl: string;
+  shortlistNote: string;
+}
+
+export interface CreateThreadResult {
+  state: AppState;
+  thread: ChatThread;
+  firstMessage: ChatMessage;
+}
+
+function fillTemplate(template: string, values: Record<string, string>): string {
+  return Object.entries(values).reduce(
+    (out, [key, value]) => out.split(`{${key}}`).join(value),
+    template,
+  );
+}
+
+/**
+ * Compose the agent's first message for a thread from the current
+ * script: the template references their comment/post, then the
+ * introduction. Pure — no sending, no network.
+ */
+export function composeFirstMessage(script: ChatScript, thread: ChatThread): string {
+  const sourceKind = thread.sourceType === "comment" ? "comment" : "post";
+  const sourceText =
+    thread.sourceText.length > 160 ? `${thread.sourceText.slice(0, 160)}…` : thread.sourceText;
+  return fillTemplate(script.firstMessageTemplate, {
+    name: thread.profileName,
+    sourceKind,
+    sourceText,
+    introduction: script.introduction,
+  }).trim();
+}
+
+/**
+ * Start a new chat thread. Validates the profile link (must look like
+ * a Facebook profile URL) and blocks a second active thread for the
+ * same profile — one conversation per person. The agent's first
+ * message is composed from the script and stored with delivery
+ * "in-app": it is a draft in LeadHunter only and has NOT been sent
+ * to Facebook Messenger (no live connection exists in v1).
+ */
+export function createChatThread(
+  state: AppState,
+  input: CreateThreadInput,
+  accountId: string,
+  messageId: string,
+  now: string,
+): Result<CreateThreadResult> {
+  if (!state.accounts.some((a) => a.id === accountId)) {
+    return { ok: false, error: "Account not found." };
+  }
+  const profileUrl = input.profileUrl.trim();
+  if (!isFacebookProfileUrl(profileUrl)) {
+    return {
+      ok: false,
+      error: "Enter a Facebook profile link, e.g. https://www.facebook.com/someone",
+    };
+  }
+  const profileName = input.profileName.trim();
+  if (!profileName) return { ok: false, error: "Enter the person's name." };
+  const sourceText = input.sourceText.trim();
+  if (!sourceText) {
+    return { ok: false, error: "Paste the comment or post this person was shortlisted from." };
+  }
+  const sourceUrl = input.sourceUrl.trim();
+  if (sourceUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(/:\/\//.test(sourceUrl) ? sourceUrl : `https://${sourceUrl}`);
+    } catch {
+      return { ok: false, error: "The source link must be a valid URL." };
+    }
+    if (!parsed.hostname.toLowerCase().endsWith("facebook.com")) {
+      return { ok: false, error: "The source link must be a facebook.com URL." };
+    }
+  }
+  const existing = state.threads.find(
+    (t) => t.accountId === accountId && sameUrl(t.profileUrl, profileUrl) && t.status === "active",
+  );
+  if (existing) {
+    return { ok: false, error: `There is already an active chat with ${existing.profileName}.` };
+  }
+  const thread: ChatThread = {
+    id: input.id,
+    accountId,
+    profileUrl,
+    profileName,
+    sourceType: input.sourceType,
+    sourceText,
+    sourceUrl,
+    shortlistNote: input.shortlistNote.trim(),
+    status: "active",
+    createdAt: now,
+  };
+  const firstMessage: ChatMessage = {
+    id: messageId,
+    threadId: thread.id,
+    role: "agent",
+    text: composeFirstMessage(state.chatScript, thread),
+    createdAt: now,
+    // Honest by construction: v1 never sends to Messenger.
+    delivery: "in-app",
+  };
+  const next: AppState = {
+    ...state,
+    threads: [thread, ...state.threads],
+    chatMessages: [firstMessage, ...state.chatMessages],
+  };
+  return {
+    ok: true,
+    value: {
+      state: withActivity(
+        next,
+        activity(
+          "chat-started",
+          accountId,
+          `Started a chat with ${profileName}`,
+          `act-${thread.id}`,
+          now,
+        ),
+      ),
+      thread,
+      firstMessage,
+    },
+  };
+}
+
+/**
+ * Append one message to a thread. Agent messages are stored with
+ * delivery "in-app" unless the caller explicitly passes
+ * "pending-messenger" — nothing in v1 may pass that: there is no
+ * live Messenger delivery yet, and a message must never be shown as
+ * sent to Facebook when it was not.
+ */
+export function addChatMessage(
+  state: AppState,
+  input: { threadId: string; role: ChatMessageRole; text: string; id: string; now: string },
+): Result<AppState> {
+  const thread = state.threads.find((t) => t.id === input.threadId);
+  if (!thread) return { ok: false, error: "Chat not found." };
+  const text = input.text.trim();
+  if (!text) return { ok: false, error: "Message is empty." };
+  const message: ChatMessage = {
+    id: input.id,
+    threadId: input.threadId,
+    role: input.role,
+    text,
+    createdAt: input.now,
+    delivery: "in-app",
+  };
+  const next: AppState = { ...state, chatMessages: [...state.chatMessages, message] };
+  return {
+    ok: true,
+    value:
+      input.role === "candidate"
+        ? withActivity(
+            next,
+            activity(
+              "chat-reply",
+              thread.accountId,
+              `${thread.profileName} replied`,
+              `act-${input.id}`,
+              input.now,
+            ),
+          )
+        : next,
+  };
+}
+
+export function setThreadStatus(
+  state: AppState,
+  threadId: string,
+  status: ChatThreadStatus,
+): AppState {
+  const thread = state.threads.find((t) => t.id === threadId);
+  if (!thread) return state;
+  return {
+    ...state,
+    threads: state.threads.map((t) => (t.id === threadId ? { ...t, status } : t)),
+  };
+}
+
+/** Validate and save the editable chat script. */
+export function updateChatScript(state: AppState, script: ChatScript): Result<AppState> {
+  const next: ChatScript = {
+    firstMessageTemplate: script.firstMessageTemplate.trim(),
+    introduction: script.introduction.trim(),
+    tone: script.tone.trim(),
+    rules: script.rules.trim(),
+    goal: script.goal.trim(),
+  };
+  if (!next.firstMessageTemplate)
+    return { ok: false, error: "The first-message template cannot be empty." };
+  if (
+    !next.firstMessageTemplate.includes("{name}") &&
+    !next.firstMessageTemplate.includes("{sourceText}")
+  ) {
+    return {
+      ok: false,
+      error:
+        "The first-message template should use {name} or {sourceText} so it references what they said.",
+    };
+  }
+  if (!next.goal)
+    return {
+      ok: false,
+      error: "The goal cannot be empty — the agent needs to know what it is pushing for.",
+    };
+  return { ok: true, value: { ...state, chatScript: next } };
+}
+
+/** All messages of one thread, oldest first. */
+export function messagesForThread(state: AppState, threadId: string): ChatMessage[] {
+  return state.chatMessages
+    .filter((m) => m.threadId === threadId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** Threads for one account, newest first. */
+export function threadsForAccount(state: AppState, accountId: string): ChatThread[] {
+  return state.threads
+    .filter((t) => t.accountId === accountId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }

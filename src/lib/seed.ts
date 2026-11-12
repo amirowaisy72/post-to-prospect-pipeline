@@ -3,6 +3,7 @@
 // hand (name, Facebook link, member count). Built by a function (not
 // module-scope values) so nothing runs at import time.
 import type { AppState, Settings } from "./types";
+import { DEFAULT_CHAT_SCRIPT } from "./leadhunter-service";
 
 export const DEFAULT_CRITERIA = {
   richBeginner:
@@ -30,7 +31,7 @@ export function createDefaultSettings(): Settings {
 }
 
 /** The app starts empty: no accounts, no sources, no posts, no leads,
- * no activity. The first account the user creates becomes the active
+ * no activity, no chats. The first account the user creates becomes the active
  * and default account (see createAccount in leadhunter-service.ts). */
 export function createSeedState(): AppState {
   return {
@@ -42,5 +43,8 @@ export function createSeedState(): AppState {
     leads: [],
     activity: [],
     settings: createDefaultSettings(),
+    threads: [],
+    chatMessages: [],
+    chatScript: { ...DEFAULT_CHAT_SCRIPT },
   };
 }

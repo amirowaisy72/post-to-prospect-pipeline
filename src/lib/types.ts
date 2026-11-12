@@ -132,7 +132,9 @@ export type ActivityType =
   | "lead-shortlisted"
   | "lead-rejected"
   | "source-scraped"
-  | "source-synced";
+  | "source-synced"
+  | "chat-started"
+  | "chat-reply";
 
 export interface Activity {
   id: string;
@@ -140,6 +142,63 @@ export interface Activity {
   accountId: string;
   message: string;
   at: string;
+}
+
+/* ---------------- Inbox (DM chats with shortlisted candidates) ---------------- */
+
+/** Which kind of Facebook activity the person was shortlisted from. */
+export type InboxSourceType = "comment" | "post";
+
+export type ChatThreadStatus = "active" | "done";
+
+export interface ChatThread {
+  id: string;
+  accountId: string;
+  /** Facebook profile link of the candidate. */
+  profileUrl: string;
+  profileName: string;
+  sourceType: InboxSourceType;
+  /** The comment/post text the person was shortlisted from. */
+  sourceText: string;
+  /** Link to the comment/post the person was shortlisted from. */
+  sourceUrl: string;
+  /** Optional note about why this person was shortlisted. */
+  shortlistNote: string;
+  status: ChatThreadStatus;
+  createdAt: string;
+}
+
+export type ChatMessageRole = "agent" | "candidate" | "system";
+
+/**
+ * How a message relates to Facebook Messenger. v1 has NO live
+ * Messenger connection: agent messages are drafts stored in the app
+ * only ("in-app"). "pending-messenger" is reserved for the future
+ * browser-delivery step — nothing may claim it today.
+ */
+export type ChatDelivery = "in-app" | "pending-messenger";
+
+export interface ChatMessage {
+  id: string;
+  threadId: string;
+  role: ChatMessageRole;
+  text: string;
+  createdAt: string;
+  delivery: ChatDelivery;
+}
+
+/** The editable chat script the agent follows in every thread. */
+export interface ChatScript {
+  /** First-message template. Placeholders: {name}, {sourceKind}, {sourceText}. */
+  firstMessageTemplate: string;
+  /** Short self-introduction used in the first message. */
+  introduction: string;
+  /** Tone and style rules for every reply. */
+  tone: string;
+  /** Hard rules the agent must never break. */
+  rules: string;
+  /** The end goal of every conversation. */
+  goal: string;
 }
 
 export interface AppState {
@@ -151,4 +210,7 @@ export interface AppState {
   settings: Settings;
   activeAccountId: string;
   defaultAccountId: string;
+  threads: ChatThread[];
+  chatMessages: ChatMessage[];
+  chatScript: ChatScript;
 }

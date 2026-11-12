@@ -40,8 +40,11 @@ function ShortlistedPage() {
       <div className="mb-6 flex items-start gap-3 rounded-lg border border-dashed border-primary/40 bg-accent/60 p-4">
         <MessagesSquare className="mt-0.5 size-5 shrink-0 text-primary" />
         <div>
-          <p className="text-sm font-semibold text-accent-foreground">DM chat with shortlisted candidates comes in the next phase.</p>
-          <p className="text-sm text-muted-foreground">For now, open a profile to contact them on Facebook directly.</p>
+          <p className="text-sm font-semibold text-accent-foreground">DM chats live in the Inbox tab now.</p>
+          <p className="text-sm text-muted-foreground">
+            Start a chat from the <Link to="/inbox" className="font-semibold text-primary">Inbox</Link> page — the
+            agent opens with their comment or post and follows your script.
+          </p>
         </div>
       </div>
 

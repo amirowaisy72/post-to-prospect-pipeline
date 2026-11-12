@@ -34,6 +34,88 @@ export const CHAT_SUGGESTIONS = [
   "Kaunsa group sab se acha hai?",
 ];
 
+/**
+ * Inbox draft seam — the agent's next message in a DM thread.
+ *
+ * Demo only: no real model is called yet. When the Gemini backend
+ * arrives, swap `mockInboxReply` for a server call through Lovable's
+ * gateway (never call Gemini from the browser with a key — see
+ * AGENTS.md). The prompt the real call will send is built by
+ * `inboxPrompt`: script + thread source + full history.
+ */
+export interface InboxDraftContext {
+  profileName: string;
+  sourceType: "comment" | "post";
+  sourceText: string;
+  script: {
+    introduction: string;
+    tone: string;
+    rules: string;
+    goal: string;
+  };
+  history: { role: "agent" | "candidate" | "system"; text: string }[];
+}
+
+/** The exact prompt a real Gemini call will receive for the next reply. */
+export function inboxPrompt(ctx: InboxDraftContext): string {
+  const history =
+    ctx.history.length === 0
+      ? "(No messages yet — this is the first reply after the opener.)"
+      : ctx.history
+          .map(
+            (m) =>
+              `${m.role === "agent" ? "Me" : m.role === "candidate" ? ctx.profileName : "Note"}: ${m.text}`,
+          )
+          .join("\n");
+  return [
+    "You are a friendly DM assistant. Follow the script below exactly.",
+    "",
+    `Goal: ${ctx.script.goal}`,
+    `Tone: ${ctx.script.tone}`,
+    `Rules:\n${ctx.script.rules}`,
+    "",
+    `The person (${ctx.profileName}) was shortlisted from this ${ctx.sourceType}: “${ctx.sourceText}”.`,
+    `Introduction used: ${ctx.script.introduction}`,
+    "",
+    "Conversation so far:",
+    history,
+    "",
+    "Write the next short message to send. Keep it under 3 short sentences. Reply with the message text only.",
+  ].join("\n");
+}
+
+/** Demo draft for the agent's next message — follows the script's tone and goal. */
+export function mockInboxReply(ctx: InboxDraftContext): string {
+  const lastCandidate = [...ctx.history].reverse().find((m) => m.role === "candidate");
+  const firstName = ctx.profileName.split(" ")[0];
+  if (!lastCandidate) {
+    return [
+      `Hi ${firstName}! Just checking in — did my last message make sense for you?`,
+      "Happy to share the simple first step whenever you're ready, no pressure at all.",
+    ].join(" ");
+  }
+  const t = lastCandidate.text.toLowerCase();
+  if (has(t, ["no", "not interested", "no thanks", "stop", "busy"])) {
+    return `No problem at all, ${firstName} — thanks for replying. If investing ever comes up for you later, I'm here. All the best!`;
+  }
+  if (has(t, ["how", "what", "tell", "more", "plan", "start", "kya", "kaise"])) {
+    return [
+      `Good question, ${firstName}! The simple start is: a small amount, split across two or three safe options, and we review it together after a month.`,
+      "Want me to sketch that first split for you? It takes two minutes.",
+    ].join(" ");
+  }
+  if (has(t, ["yes", "ok", "sure", "interested", "sounds good", "han", "theek"])) {
+    return [
+      `Great, ${firstName}! Let's keep it easy — can we do a short 10-minute call this week so I can show you the first step properly?`,
+      "You pick the time, I'll work around it.",
+    ].join(" ");
+  }
+  return [
+    `Thanks for sharing that, ${firstName} — that helps me understand where you're coming from.`,
+    "The next step is a small, safe one — want me to lay it out in two lines?",
+  ].join(" ");
+}
+
 export function demoConversation(model: string): ChatMessage[] {
   return [
     {
