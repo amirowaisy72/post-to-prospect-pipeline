@@ -35,6 +35,13 @@ __all__ = [
     "list_jobs",
     "get_source_by_url",
     "delete_source",
+    "upsert_chat_thread",
+    "get_chat_thread",
+    "list_chat_threads",
+    "set_chat_thread",
+    "save_chat_message",
+    "list_chat_messages",
+    "count_agent_sent_on",
 ]
 
 _DEFAULT_PATH = Path(__file__).resolve().parent / "leadhunter.db"
@@ -108,6 +115,38 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_comments_post_id ON comments (post_id);
 CREATE INDEX IF NOT EXISTS idx_replies_comment_id ON replies (comment_id);
 CREATE INDEX IF NOT EXISTS idx_posts_source_id ON posts (source_id);
+-- Inbox live chat (see agent/chat.py). Threads are keyed by the
+-- app's thread id; messages are keyed by the app's message id for
+-- the first message and agent-generated ids afterwards, so the app
+-- can match delivery status exactly. No credentials are ever stored
+-- here — the Gemini key lives in memory only (chat.py _WATCH).
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL DEFAULT '',
+    profile_url TEXT NOT NULL DEFAULT '',
+    profile_name TEXT NOT NULL DEFAULT '',
+    source_type TEXT NOT NULL DEFAULT 'comment',
+    source_text TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'starting',
+    messenger_thread_url TEXT,
+    last_seen_text TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    delivery TEXT NOT NULL DEFAULT 'in-app',
+    sent_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_id
+    ON chat_messages (thread_id);
+CREATE INDEX IF NOT EXISTS idx_chat_threads_account_id
+    ON chat_threads (account_id);
 """
 
 
@@ -363,6 +402,130 @@ def get_posts_for_source(source_id):
             "SELECT * FROM posts WHERE source_id=? ORDER BY collected_at",
             (source_id,)).fetchall()
         return [_post_with_children(conn, r) for r in rows]
+
+
+# ----------------------------------------------------------------------
+# Inbox live chat
+# ----------------------------------------------------------------------
+def upsert_chat_thread(thread_id, account_id, profile_url, profile_name,
+                       source_type, source_text, status="starting",
+                       messenger_thread_url=None, last_seen_text=None,
+                       last_error=None):
+    """Insert or update a chat thread row. Returns the thread id."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO chat_threads (id, account_id, profile_url, "
+            "profile_name, source_type, source_text, status, "
+            "messenger_thread_url, last_seen_text, last_error, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "account_id=excluded.account_id, "
+            "profile_url=excluded.profile_url, "
+            "profile_name=excluded.profile_name, "
+            "source_type=excluded.source_type, "
+            "source_text=excluded.source_text, status=excluded.status, "
+            "messenger_thread_url=COALESCE(excluded.messenger_thread_url, "
+            "chat_threads.messenger_thread_url), "
+            "last_seen_text=COALESCE(excluded.last_seen_text, "
+            "chat_threads.last_seen_text), "
+            "last_error=excluded.last_error, updated_at=excluded.updated_at",
+            (thread_id, account_id or "", profile_url or "",
+             profile_name or "", source_type or "comment",
+             source_text or "", status, messenger_thread_url,
+             last_seen_text, last_error, now, now),
+        )
+    return thread_id
+
+
+def get_chat_thread(thread_id):
+    """One chat thread row as a dict, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM chat_threads WHERE id = ?",
+            (thread_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_chat_threads(account_id=None):
+    """Chat thread rows, oldest first (optionally one account)."""
+    with _connect() as conn:
+        if account_id:
+            rows = conn.execute(
+                "SELECT * FROM chat_threads WHERE account_id=? "
+                "ORDER BY created_at",
+                (account_id,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM chat_threads ORDER BY created_at").fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_chat_thread(thread_id, **fields):
+    """Update chat thread columns. Allowed keys: status,
+    messenger_thread_url, last_seen_text, last_error. Unknown keys
+    are ignored. Always refreshes updated_at."""
+    from datetime import datetime, timezone
+
+    allowed = {"status", "messenger_thread_url", "last_seen_text",
+               "last_error"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    assignments = ", ".join(f"{k}=?" for k in updates)
+    with _connect() as conn:
+        conn.execute(
+            f"UPDATE chat_threads SET {assignments} WHERE id=?",
+            (*updates.values(), thread_id),
+        )
+
+
+def save_chat_message(message_id, thread_id, role, text, delivery,
+                      sent_at=None, created_at=None):
+    """Append a chat message. INSERT OR IGNORE on the id, so a
+    retried send never duplicates a message the app already has.
+    Returns the message id."""
+    from datetime import datetime, timezone
+
+    if created_at is None:
+        created_at = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO chat_messages "
+            "(id, thread_id, role, text, delivery, sent_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (message_id, thread_id, role, text or "", delivery,
+             sent_at, created_at),
+        )
+    return message_id
+
+
+def list_chat_messages(thread_id):
+    """Messages of one thread, oldest first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE thread_id=? "
+            "ORDER BY created_at",
+            (thread_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_agent_sent_on(account_id, date_iso):
+    """Agent messages marked sent on one UTC date (YYYY-MM-DD) for
+    one account — the daily-cap count. Never counts drafts or
+    failures."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM chat_messages m "
+            "JOIN chat_threads t ON t.id = m.thread_id "
+            "WHERE t.account_id=? AND m.role='agent' "
+            "AND m.delivery='sent' AND substr(m.sent_at, 1, 10)=?",
+            (account_id or "", date_iso)).fetchone()
+    return int(row["n"]) if row else 0
 
 
 # ----------------------------------------------------------------------

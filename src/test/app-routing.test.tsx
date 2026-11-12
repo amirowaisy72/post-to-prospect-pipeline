@@ -3,7 +3,7 @@ import { createMemoryHistory, createRouter, RouterProvider, rootRouteId } from "
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createDefaultSettings } from "@/lib/seed";
+import { createDefaultSettings, createSeedState } from "@/lib/seed";
 import type { AppState } from "@/lib/types";
 import { routeTree } from "@/routeTree.gen";
 
@@ -31,7 +31,7 @@ const STORAGE_KEY = "leadhunter:v2";
  * would persist it. */
 function seedState(): AppState {
   return {
-    accounts: [{ id: "acc-1", name: "Master", facebookName: "Amir Owaisy", status: "active", createdAt: "2026-11-12T00:00:00.000Z" }],
+    accounts: [{ id: "acc-1", name: "Master", facebookName: "Amir Owaisy", status: "active", createdAt: "2026-11-12T00:00:00.000Z", facebookCreatedAt: null }],
     sources: [{ id: "src-1", name: "Stocks To Watch", type: "group", url: "https://facebook.com/groups/111", memberCount: 12000, status: "joined", joinedByAccountId: "acc-1", lastScrapedAt: null }],
     posts: [
       {
@@ -50,6 +50,9 @@ function seedState(): AppState {
     ],
     leads: [],
     activity: [],
+    threads: [],
+    chatMessages: [],
+    chatScript: createSeedState().chatScript,
     settings: createDefaultSettings(),
     activeAccountId: "acc-1",
     defaultAccountId: "acc-1",
@@ -76,7 +79,8 @@ describe("Inbox page", () => {
   it("renders the Inbox heading and the Messenger-not-connected notice", async () => {
     await renderAt("/inbox");
     expect(await screen.findByRole("heading", { name: "Inbox" })).toBeInTheDocument();
-    expect(screen.getByText(/Messenger delivery is not connected yet/)).toBeInTheDocument();
+    // The page polls the (absent) agent first, then shows the offline notice.
+    expect(await screen.findByText(/Messenger delivery is not connected/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /New chat/ })).toBeInTheDocument();
   });
 

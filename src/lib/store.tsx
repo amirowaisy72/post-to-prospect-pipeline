@@ -15,6 +15,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 
+import { chatHealth, chatStart, chatStop, chatThreads, chatWatch } from "./chat-client";
 import * as svc from "./leadhunter-service";
 import { createDefaultSettings, createSeedState } from "./seed";
 import type {
@@ -42,7 +43,11 @@ interface StoreValue {
   activeAccount: AppState["accounts"][number] | undefined;
   setActiveAccount: (id: string) => void;
   setDefaultAccount: (id: string) => void;
-  createAccount: (input: { name: string; facebookName: string }) => boolean;
+  createAccount: (input: {
+    name: string;
+    facebookName: string;
+    facebookCreatedAt?: string | null;
+  }) => boolean;
   setAccountStatus: (id: string, status: AccountStatus) => void;
   /** Add one source by hand (name, Facebook link, member count). Type is derived from the link. */
   addSource: (input: { name: string; url: string; memberCount: number }) => boolean;
@@ -60,11 +65,24 @@ interface StoreValue {
     sourceText: string;
     sourceUrl: string;
     shortlistNote: string;
-  }) => ChatThread | null;
+  }) => { thread: ChatThread; firstMessageId: string } | null;
   /** Append a message to a thread (agent draft or a pasted candidate reply). */
   addChatMessage: (threadId: string, role: "agent" | "candidate", text: string) => boolean;
   setThreadStatus: (threadId: string, status: ChatThreadStatus) => void;
   updateChatScript: (script: ChatScript) => boolean;
+  /** Hand a new thread's first message to the chat agent for live
+   * Messenger delivery. Marks it "pending-messenger" while the agent
+   * sends it; the poll reports "sent" or "failed" against the same id. */
+  startChatDelivery: (thread: ChatThread, firstMessageId: string) => Promise<boolean>;
+  /** Poll the agent for live thread states and merge them in.
+   * Returns whether the agent is reachable and watching. */
+  refreshChatLive: () => Promise<{ online: boolean; watching: boolean }>;
+  /** (Re)send the approved-thread watch list + script + key to the
+   * agent, so it watches Messenger for replies. No-op when there is
+   * nothing active to watch. */
+  sendChatWatch: () => Promise<boolean>;
+  /** Stop ALL chatting immediately (agent watcher + in-flight sends). */
+  stopAllChatting: () => Promise<boolean>;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -194,11 +212,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           toast.error("Create an account first — chats belong to an account");
           return null;
         }
+        const firstMessageId = newId("msg");
         const r = svc.createChatThread(
           s,
           { ...input, id: newId("thread") },
           accountId,
-          newId("msg"),
+          firstMessageId,
           nowIso(),
         );
         if (!r.ok) {
@@ -207,7 +226,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         setState(r.value.state);
         toast.success(`Chat started with ${r.value.thread.profileName}`);
-        return r.value.thread;
+        return { thread: r.value.thread, firstMessageId };
       },
       addChatMessage: (threadId, role, text) => {
         const r = svc.addChatMessage(stateRef.current, {
@@ -234,6 +253,89 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         setState(r.value);
         toast.success("Chat script saved on this device");
+        return true;
+      },
+      startChatDelivery: async (thread, firstMessageId) => {
+        const s = stateRef.current;
+        const account = s.accounts.find((a) => a.id === thread.accountId);
+        if (!account) return false;
+        const firstMessage = svc
+          .messagesForThread(s, thread.id)
+          .find((m) => m.id === firstMessageId);
+        if (!firstMessage) return false;
+        const r = await chatStart(s.settings.agentUrl, {
+          accountId: thread.accountId,
+          threadId: thread.id,
+          messageId: firstMessageId,
+          profileUrl: thread.profileUrl,
+          profileName: thread.profileName,
+          sourceType: thread.sourceType,
+          sourceText: thread.sourceText,
+          firstMessage: firstMessage.text,
+          dailyCap: svc.dailyChatLimit(account, nowIso()),
+        });
+        if (!r.ok) {
+          toast.error(`Messenger send failed: ${r.error}`);
+          return false;
+        }
+        const marked = svc.markMessageDelivery(
+          stateRef.current,
+          firstMessageId,
+          "pending-messenger",
+        );
+        if (marked.ok) setState(marked.value);
+        return true;
+      },
+      refreshChatLive: async () => {
+        const s = stateRef.current;
+        const health = await chatHealth(s.settings.agentUrl);
+        if (!health.ok) return { online: false, watching: false };
+        const threads = await chatThreads(s.settings.agentUrl);
+        if (threads.ok) {
+          setState((prev) => svc.mergeLiveThreads(prev, threads.value.threads));
+        }
+        return { online: true, watching: threads.ok ? threads.value.watching : health.value.watching };
+      },
+      sendChatWatch: async () => {
+        const s = stateRef.current;
+        const accountId = s.activeAccountId;
+        const account = s.accounts.find((a) => a.id === accountId);
+        if (!accountId || !account) return false;
+        const active = svc
+          .threadsForAccount(s, accountId)
+          .filter((t) => t.status === "active");
+        if (active.length === 0) return true; // nothing to watch
+        if (!s.settings.geminiApiKey.trim()) {
+          toast.error("Add your Gemini API key in Configurations first — the agent cannot draft replies without it.");
+          return false;
+        }
+        const r = await chatWatch(s.settings.agentUrl, {
+          accountId,
+          threads: active.map((t) => ({
+            threadId: t.id,
+            profileUrl: t.profileUrl,
+            profileName: t.profileName,
+            sourceType: t.sourceType,
+            sourceText: t.sourceText,
+          })),
+          script: s.chatScript,
+          geminiKey: s.settings.geminiApiKey.trim(),
+          model: s.settings.model,
+          dailyCap: svc.dailyChatLimit(account, nowIso()),
+        });
+        if (!r.ok) {
+          toast.error(`Chat watcher failed: ${r.error}`);
+          return false;
+        }
+        return true;
+      },
+      stopAllChatting: async () => {
+        const r = await chatStop(stateRef.current.settings.agentUrl);
+        if (!r.ok) {
+          toast.error(`Stop failed: ${r.error}`);
+          return false;
+        }
+        toast.success("All chatting stopped");
         return true;
       },
     };

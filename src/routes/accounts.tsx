@@ -33,12 +33,14 @@ function AccountsPage() {
   const { state, createAccount, setAccountStatus, setDefaultAccount, setActiveAccount } = useStore();
   const [name, setName] = useState("");
   const [facebookName, setFacebookName] = useState("");
+  const [facebookCreatedAt, setFacebookCreatedAt] = useState("");
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (createAccount({ name, facebookName })) {
+    if (createAccount({ name, facebookName, facebookCreatedAt: facebookCreatedAt || null })) {
       setName("");
       setFacebookName("");
+      setFacebookCreatedAt("");
     }
   };
 
@@ -64,6 +66,15 @@ function AccountsPage() {
               <div className="space-y-1.5">
                 <Label htmlFor="acc-fb">Facebook profile name</Label>
                 <Input id="acc-fb" value={facebookName} onChange={(e) => setFacebookName(e.target.value)} placeholder="e.g. Sara Malik" />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="acc-fb-created">Facebook account created</Label>
+                <Input id="acc-fb-created" type="date" value={facebookCreatedAt} onChange={(e) => setFacebookCreatedAt(e.target.value)} />
+                <p className="text-xs text-muted-foreground">
+                  When the Facebook account itself was created — sets the daily chat limit
+                  (under 3 days: none, week 1: 12/day, week 2: 25/day, then 45/day).
+                  Leave blank to use the date this account was added here.
+                </p>
               </div>
               <Button type="submit" className="w-full" disabled={!name.trim() || !facebookName.trim()}>
                 <Plus /> Create account
@@ -113,6 +124,7 @@ function AccountsPage() {
                         </div>
                         <div className="text-xs text-muted-foreground">
                           {a.facebookName} · since {fmtDate(a.createdAt).split(",")[0]}
+                          {a.facebookCreatedAt ? ` · FB since ${a.facebookCreatedAt}` : ""}
                         </div>
                       </TableCell>
                       <TableCell>

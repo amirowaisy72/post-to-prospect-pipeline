@@ -9,6 +9,7 @@ import type {
   Activity,
   ActivityType,
   AppState,
+  ChatDelivery,
   ChatMessage,
   ChatMessageRole,
   ChatScript,
@@ -72,17 +73,21 @@ export const accountName = (state: AppState, id: string | null | undefined) =>
 
 export function createAccount(
   state: AppState,
-  input: { name: string; facebookName: string },
+  input: { name: string; facebookName: string; facebookCreatedAt?: string | null },
   id: string,
   now: string,
 ): Result<AppState> {
   const name = input.name.trim();
   const facebookName = input.facebookName.trim();
   if (!name || !facebookName) return { ok: false, error: "Name and Facebook name are required." };
+  const facebookCreatedAt = (input.facebookCreatedAt ?? "").trim() || null;
+  if (facebookCreatedAt && !/^\d{4}-\d{2}-\d{2}$/.test(facebookCreatedAt)) {
+    return { ok: false, error: "Facebook created date must be YYYY-MM-DD." };
+  }
   if (state.accounts.some((a) => a.name.toLowerCase() === name.toLowerCase())) {
     return { ok: false, error: `An account named "${name}" already exists.` };
   }
-  const account: Account = { id, name, facebookName, status: "active", createdAt: now };
+  const account: Account = { id, name, facebookName, status: "active", createdAt: now, facebookCreatedAt };
   // The first account becomes the active and default account, so the
   // app never sits on a blank selection after the user starts.
   const isFirst = state.accounts.length === 0;
@@ -895,6 +900,7 @@ export function validateSettings(input: Settings): Result<Settings> {
     model: input.model.trim(),
     ollamaUrl: input.ollamaUrl.trim().replace(/\/+$/, ""),
     geminiApiKey: input.geminiApiKey.trim(),
+    agentUrl: input.agentUrl.trim().replace(/\/+$/, ""),
     database: {
       ...input.database,
       supabaseUrl: input.database.supabaseUrl.trim().replace(/\/+$/, ""),
@@ -905,6 +911,8 @@ export function validateSettings(input: Settings): Result<Settings> {
   if (!s.model) return { ok: false, error: "Enter a model name." };
   if (!isHttpUrl(s.ollamaUrl))
     return { ok: false, error: "Ollama server URL must start with http:// or https://." };
+  if (!isHttpUrl(s.agentUrl))
+    return { ok: false, error: "Chat agent URL must start with http:// or https://." };
   const { defaultLeadsCount, preferredMinAge, gentleMinAge } = s.leadRules;
   if (!isWhole(defaultLeadsCount, 1))
     return { ok: false, error: "Default leads count must be a whole number, 1 or more." };
@@ -1010,6 +1018,10 @@ export interface CreateThreadInput {
   sourceText: string;
   sourceUrl: string;
   shortlistNote: string;
+  /** Delivery of the composed first message. Default "in-app" (a draft
+   * only); the store passes "pending-messenger" when it hands the
+   * message to the chat agent. */
+  firstMessageDelivery?: ChatDelivery;
 }
 
 export interface CreateThreadResult {
@@ -1046,9 +1058,10 @@ export function composeFirstMessage(script: ChatScript, thread: ChatThread): str
  * Start a new chat thread. Validates the profile link (must look like
  * a Facebook profile URL) and blocks a second active thread for the
  * same profile — one conversation per person. The agent's first
- * message is composed from the script and stored with delivery
- * "in-app": it is a draft in LeadHunter only and has NOT been sent
- * to Facebook Messenger (no live connection exists in v1).
+ * message is composed from the script; its delivery is "in-app" by
+ * default (a draft only) and "pending-messenger" when the store
+ * hands it to the chat agent — the poll then reports "sent" or
+ * "failed" against the same message id.
  */
 export function createChatThread(
   state: AppState,
@@ -1109,8 +1122,7 @@ export function createChatThread(
     role: "agent",
     text: composeFirstMessage(state.chatScript, thread),
     createdAt: now,
-    // Honest by construction: v1 never sends to Messenger.
-    delivery: "in-app",
+    delivery: input.firstMessageDelivery ?? "in-app",
   };
   const next: AppState = {
     ...state,
@@ -1232,4 +1244,97 @@ export function threadsForAccount(state: AppState, accountId: string): ChatThrea
   return state.threads
     .filter((t) => t.accountId === accountId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/**
+ * Max outbound chat messages per day for an account, from its age.
+ * Age uses the Facebook account's own created date when the user set
+ * it, else the date the account was created in LeadHunter (the
+ * conservative fallback). Bands match the agent (chat.py):
+ * under 3 days 0 (warmup), days 3–7: 12, days 8–14: 25, day 15+: 45.
+ */
+export function dailyChatLimit(account: Account, now: string): number {
+  const base = account.facebookCreatedAt || account.createdAt.slice(0, 10);
+  const start = new Date(`${base}T00:00:00.000Z`).getTime();
+  const today = new Date(`${now.slice(0, 10)}T00:00:00.000Z`).getTime();
+  if (Number.isNaN(start) || Number.isNaN(today)) return 0;
+  const ageDays = Math.max(0, Math.floor((today - start) / 86_400_000));
+  if (ageDays < 3) return 0;
+  if (ageDays <= 7) return 12;
+  if (ageDays <= 14) return 25;
+  return 45;
+}
+
+/** Update one message's delivery (what the agent reported). */
+export function markMessageDelivery(
+  state: AppState,
+  messageId: string,
+  delivery: ChatDelivery,
+): Result<AppState> {
+  const message = state.chatMessages.find((m) => m.id === messageId);
+  if (!message) return { ok: false, error: "Message not found." };
+  if (message.delivery === delivery) return { ok: true, value: state };
+  return {
+    ok: true,
+    value: {
+      ...state,
+      chatMessages: state.chatMessages.map((m) =>
+        m.id === messageId ? { ...m, delivery } : m,
+      ),
+    },
+  };
+}
+
+/** One live thread as the chat agent reports it (GET /chat/threads). */
+export interface LiveChatThread {
+  threadId: string;
+  status: string;
+  messengerThreadUrl?: string | null;
+  messages: {
+    id: string;
+    role: ChatMessageRole;
+    text: string;
+    delivery: ChatDelivery;
+    sentAt?: string | null;
+  }[];
+}
+
+/**
+ * Merge the agent's live thread states into the store. Messages are
+ * matched by id: an existing message only ever changes its delivery
+ * (pending → sent / failed), and unknown ids are appended — but only
+ * for threads that exist in this app (an agent row the user deleted
+ * here is ignored). Returns the unchanged state reference when
+ * nothing changed, so a quiet poll costs no re-render.
+ */
+export function mergeLiveThreads(state: AppState, live: LiveChatThread[]): AppState {
+  const byId = new Map(state.chatMessages.map((m) => [m.id, m]));
+  let changed = false;
+  const next = new Map<string, ChatMessage>();
+  for (const m of state.chatMessages) next.set(m.id, m);
+  for (const thread of live) {
+    if (!state.threads.some((t) => t.id === thread.threadId)) continue;
+    for (const lm of thread.messages) {
+      const existing = byId.get(lm.id);
+      if (existing) {
+        if (existing.delivery !== lm.delivery) {
+          next.set(lm.id, { ...existing, delivery: lm.delivery });
+          changed = true;
+        }
+        continue;
+      }
+      if (!lm.text.trim()) continue;
+      next.set(lm.id, {
+        id: lm.id,
+        threadId: thread.threadId,
+        role: lm.role,
+        text: lm.text,
+        createdAt: lm.sentAt || new Date().toISOString(),
+        delivery: lm.delivery,
+      });
+      changed = true;
+    }
+  }
+  if (!changed) return state;
+  return { ...state, chatMessages: [...next.values()] };
 }

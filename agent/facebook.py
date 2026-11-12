@@ -63,6 +63,7 @@ signs in to Facebook once in that window.
 
 from __future__ import annotations
 
+import random
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -987,6 +988,35 @@ _DIAG_ARIA_JS = (
     " return {total: total, matched: matched, btns: btns, btnNums: btnNums, samples: samples, parentBtns: parentBtns};"
     "}"
 )
+
+# JS: read one Messenger thread's messages. Marker "chat-thread-messages".
+# Returns [{text, side}] in DOM order (consecutive duplicates collapsed,
+# like client-hunting's read_thread). Side is a bounding-rect heuristic:
+# my bubbles sit on the right half of the message list, theirs on the
+# left. When the rect cannot be read the side is "unknown" and the
+# Python side falls back to comparing text against the agent's own sent
+# texts. Test doubles return canned data when they see the marker.
+_THREAD_MESSAGES_JS = r"""() => {
+ /* chat-thread-messages */
+ const list = document.querySelector('[role="main"]') || document.body;
+ const rect = list.getBoundingClientRect();
+ const mid = rect.left + rect.width / 2;
+ const out = [];
+ const nodes = document.querySelectorAll('[dir="auto"]');
+ let prev = null;
+ for (const n of nodes) {
+   const t = (n.innerText || '').trim();
+   if (!t || t === prev) continue;
+   prev = t;
+   let side = 'unknown';
+   try {
+     const r = n.getBoundingClientRect();
+     if (r && r.width) side = (r.left + r.width / 2) > mid ? 'me' : 'them';
+   } catch (e) {}
+   out.push({text: t, side: side});
+ }
+ return out;
+}"""
 
 
 def _comment_text_for(page, anchor) -> str:
@@ -1934,6 +1964,247 @@ class FacebookWorker:
     # Ported from client-hunting: block detection, page state, search,
     # comments gate, join / leave. Verbatim copies of the tested code.
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Messenger (Inbox chat) — ported from client-hunting's proven
+    # read_threads / read_thread / send_message (same selectors, same
+    # reload-and-verify discipline). No official Messenger API exists
+    # for personal profiles, so the agent drives the user's own
+    # logged-in browser. A message counts as sent ONLY when it is
+    # still present after a reload.
+    # ------------------------------------------------------------------
+    def open_chat_with_profile(self, page: Page, profile_url: str,
+                               ctx: dict | None) -> tuple[str | None, str]:
+        """Open a Messenger chat with a profile page.
+
+        Goes to the profile, clicks its "Message" button, and returns
+        the thread URL (``/messages/t/<id>``) — either from the page
+        URL after navigation or from the chat tab's thread link.
+        Returns (None, detail) when no chat opens: the profile may
+        not accept messages from this account. Never raises.
+        """
+        if _should_stop(ctx):
+            return None, "stopped"
+        try:
+            _pace(ctx)
+            if not self._goto(page, profile_url, ctx, "open_chat"):
+                return None, "profile page did not load"
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                time.sleep(2.5)
+            if self._check_block(page, ctx):
+                return None, "blocked"
+            clicked = self._click_first_visible(page, (
+                'a[aria-label="Message"]',
+                'div[role="button"][aria-label="Message"]',
+                'button:has-text("Message")',
+                'div[role="button"]:has-text("Message")',
+            ))
+            if not clicked:
+                return None, "no Message button on this profile"
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                time.sleep(2.5)
+            try:
+                current = page.url or ""
+            except Exception:
+                current = ""
+            m = re.search(r"/messages/t/(\d+)", current or "")
+            if m:
+                return f"{self.base_url}/messages/t/{m.group(1)}", "opened"
+            for href, _text in self._links(page):
+                m = re.search(r"/messages/t/(\d+)", href or "")
+                if m:
+                    return (f"{self.base_url}/messages/t/{m.group(1)}",
+                            "opened (chat tab)")
+            return None, "Message clicked but no chat thread opened"
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"open chat failed ({profile_url}): {exc}")
+            return None, str(exc)
+
+    def read_messenger_threads(self, page: Page, ctx: dict | None,
+                               source: str = "inbox") -> list[dict]:
+        """Messenger thread list -> [{thread_url, name, last_text,
+        unread, source}]. ``source`` is "inbox" (/messages) or
+        "message_requests" (/messages/requests) — a first message to
+        a stranger lands in Message Requests until they accept.
+        Ported from client-hunting's _collect_threads. Best-effort;
+        never raises.
+        """
+        url = (f"{self.base_url}/messages/requests"
+               if source == "message_requests"
+               else f"{self.base_url}/messages")
+        if _should_stop(ctx):
+            return []
+        try:
+            if not self._load(page, url, ctx, f"threads:{source}"):
+                return []
+            self._scroll_and_collect(page, ctx, rounds=3)
+            seen: dict[str, int] = {}
+            out: list[dict] = []
+            try:
+                anchors = page.query_selector_all("a[href]")
+            except Exception:
+                anchors = []
+            for a in anchors:
+                try:
+                    href = a.get_attribute("href") or ""
+                    text = a.inner_text() or ""
+                    aria = a.get_attribute("aria-label") or ""
+                except Exception:
+                    continue
+                m = re.search(r"/messages/t/(\d+)", href or "")
+                if not m:
+                    continue
+                thread_url = f"{self.base_url}/messages/t/{m.group(1)}"
+                lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+                name = lines[0] if lines else ""
+                if not name and aria:
+                    name = _clean_text(
+                        aria.split(",")[0].replace("unread", ""), 120)
+                last_text = _clean_text(" ".join(lines[1:]), 300)
+                if name and last_text.lower().startswith(name.lower()):
+                    last_text = _clean_text(last_text[len(name):], 300)
+                row = f"{aria} {text}".lower()
+                unread = ("unread" in row
+                          or "mark as read" in text.lower())
+                if thread_url in seen:
+                    stored = out[seen[thread_url]]
+                    if not stored.get("name") and name:
+                        stored["name"] = name
+                    if not stored.get("last_text") and last_text:
+                        stored["last_text"] = last_text
+                    stored["unread"] = bool(stored.get("unread") or unread)
+                    continue
+                seen[thread_url] = len(out)
+                out.append({
+                    "thread_url": thread_url,
+                    "name": _clean_text(name, 120),
+                    "last_text": last_text,
+                    "unread": unread,
+                    "source": source,
+                })
+            if not out:
+                _note(ctx, f"0 threads ({source}): {self._page_state(page)}")
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"read threads failed ({source}): {exc}")
+            return []
+
+    def read_thread_messages(self, page: Page, thread_url: str,
+                             ctx: dict | None) -> list[dict]:
+        """Read one thread -> [{text, side}] oldest first, side "me" /
+        "them" / "unknown" (bounding-rect heuristic, see
+        _THREAD_MESSAGES_JS). Never raises; [] on failure."""
+        if _should_stop(ctx):
+            return []
+        try:
+            if not self._load(page, thread_url, ctx, "read_thread"):
+                return []
+            try:
+                rows = page.evaluate(_THREAD_MESSAGES_JS) or []
+            except Exception:
+                rows = []
+            out = []
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                text = _clean_text(str(row.get("text") or ""), 2000)
+                if not text:
+                    continue
+                side = row.get("side") or "unknown"
+                out.append({"text": text,
+                            "side": side if side in ("me", "them")
+                            else "unknown"})
+            return out
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"read thread failed ({thread_url}): {exc}")
+            return []
+
+    def send_thread_message(self, page: Page, thread_url: str, text: str,
+                            ctx: dict | None) -> tuple[bool, str]:
+        """Send one message, then RELOAD the thread and confirm it is
+        still present before counting it delivered. Returns (ok,
+        detail). Types letter by letter; reads the thread's latest
+        state first so our message does not pile on top of the other
+        person's own message. Ported from client-hunting's
+        send_message. Never raises.
+        """
+        if _should_stop(ctx):
+            return False, "stopped"
+        try:
+            _pace(ctx)
+            if not self._goto(page, thread_url, ctx, "send_message"):
+                return False, "page did not load"
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                time.sleep(2.5)
+            if self._check_block(page, ctx):
+                return False, "blocked"
+            # Latest state first (discipline: never pile on).
+            self.read_thread_messages(page, thread_url, ctx)
+            if _should_stop(ctx):
+                return False, "stopped"
+            box = None
+            for selector in (
+                'div[contenteditable="true"][aria-label*="Message" i]',
+                'div[contenteditable="true"][data-testid*="message" i]',
+                'div[contenteditable="true"]',
+                'textarea[aria-label*="Message" i]',
+            ):
+                try:
+                    loc = page.locator(selector).last
+                    if loc.count() > 0 and loc.is_visible():
+                        box = loc
+                        break
+                except Exception:
+                    continue
+            if box is None:
+                return False, "message box not found"
+            box.click()
+            # Letter by letter (keyboard.type with a per-key delay).
+            try:
+                box.type(text, delay=random.uniform(35, 80))
+            except Exception:
+                try:
+                    page.keyboard.type(text, delay=60)
+                except Exception:
+                    box.fill(text)
+            try:
+                page.wait_for_timeout(800)
+            except Exception:
+                time.sleep(0.8)
+            page.keyboard.press("Enter")
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                time.sleep(2.5)
+            # Verify after reload: the message counts ONLY if still present.
+            tail = _clean_text(text, 120)
+            try:
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_timeout(2500)
+            except Exception:
+                try:
+                    page.goto(thread_url, wait_until="domcontentloaded")
+                    page.wait_for_timeout(2500)
+                except Exception:
+                    pass
+            try:
+                body = page.inner_text("body") or ""
+                # Match on a distinctive tail chunk (last ~60 chars).
+                probe = tail[-60:] if len(tail) > 60 else tail
+                if probe and probe in re.sub(r"\s+", " ", body):
+                    return True, "sent and confirmed after reload"
+                return False, "sent but NOT found after reload"
+            except Exception:
+                return False, "could not verify after reload"
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"send message failed ({thread_url}): {exc}")
+            return False, str(exc)
+
     def detect_block(self, page: Page) -> str | None:
         """Return the matched block marker, or None when no block is seen."""
         try:

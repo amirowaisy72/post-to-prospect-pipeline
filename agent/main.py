@@ -1,4 +1,4 @@
-"""LeadHunter scraping agent — FastAPI app.
+"""LeadHunter agent — FastAPI app.
 
 Local-only tool: bind to 127.0.0.1 (see run-agent.bat). The frontend
 calls it from the user's PC, where the agent drives the user's own
@@ -13,6 +13,13 @@ window. The user signs in to Facebook once (unless the profile is
 already signed in — see ``LEADHUNTER_CHROME_PROFILE``); the agent
 NEVER asks for or stores a password.
 
+Two jobs live here now: the old scraping endpoints (dormant — the
+app no longer calls them) and the Inbox live-chat agent
+(``/chat/*``): it opens Messenger chats for approved candidates,
+sends the first message per the script, and watches Messenger for
+their replies, drafting each reply with Gemini. See ``chat.py`` for
+the safety rails (approval gate, daily cap, stop).
+
 One running job at a time globally — a second start returns 409.
 The browser is launched lazily on the first job (Playwright is
 imported INSIDE the launcher, never at module top) and the same page
@@ -23,10 +30,12 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+import chat
 import db
 import jobs
 from fastapi import FastAPI, Request
@@ -430,12 +439,72 @@ def _valid_facebook_url(url) -> bool:
 
 
 # ----------------------------------------------------------------------
+# Inbox live chat (see chat.py for the rails)
+# ----------------------------------------------------------------------
+_chat_browser_lock = threading.Lock()
+_chat_start_busy = False
+_watch_thread = None
+
+
+def _chat_watch_loop():
+    """Background loop: one watch pass every WATCH_POLL_SECONDS
+    while watching. The browser lock serialises it against chat
+    starts; a dead browser is relaunched by _get_page(). The loop
+    exits when watching stops — chat.request_stop() clears the
+    watch and sets the flag, so one stop ends everything."""
+    while True:
+        if not chat.is_watching() or chat.stop_requested():
+            return
+        try:
+            with _chat_browser_lock:
+                page = _get_page()
+                worker = FacebookWorker()
+                note = lambda msg: print(f"[leadhunter] {msg}", flush=True)  # noqa: E731
+                chat.watch_once(worker, page, note=note)
+        except Exception as exc:  # noqa: BLE001 - pass failed, loop retries
+            print(f"[leadhunter] chat watch pass failed: {exc}", flush=True)
+        for _ in range(chat.WATCH_POLL_SECONDS):
+            if not chat.is_watching() or chat.stop_requested():
+                return
+            time.sleep(1)
+
+
+def _ensure_watch_thread():
+    global _watch_thread
+    if _watch_thread is not None and _watch_thread.is_alive():
+        return
+    _watch_thread = threading.Thread(target=_chat_watch_loop, daemon=True)
+    _watch_thread.start()
+
+
+def _run_chat_start(payload):
+    """Background thread for one chat start; clears the busy flag."""
+    global _chat_start_busy
+    try:
+        with _chat_browser_lock:
+            page = _fresh_page()
+            worker = FacebookWorker()
+            note = lambda msg: print(f"[leadhunter] {msg}", flush=True)  # noqa: E731
+            chat.start_chat(worker, page, payload, note=note)
+    except Exception as exc:  # noqa: BLE001 - start failure, not a crash
+        try:
+            db.set_chat_thread(payload.get("threadId"), status="failed",
+                               last_error=str(exc))
+        except Exception:
+            pass
+    finally:
+        _chat_start_busy = False
+
+
+# ----------------------------------------------------------------------
 # Endpoints
 # ----------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"ok": True, "service": "leadhunter-agent",
-            "version": VERSION, "facebook": "unknown"}
+            "version": VERSION, "facebook": "unknown",
+            "chat": {"watching": chat.is_watching(),
+                     "threads": len(db.list_chat_threads())}}
 
 
 @app.post("/scrape")
@@ -617,6 +686,175 @@ def get_job_endpoint(job_id: str):
     else:
         posts = []
     return {"job": _job_view(row), "posts": posts}
+
+
+# ----------------------------------------------------------------------
+# Inbox live chat
+# ----------------------------------------------------------------------
+@app.post("/chat/start")
+async def chat_start_endpoint(request: Request):
+    """Send the first message to a newly approved candidate.
+
+    Body: {accountId, threadId, messageId, profileUrl, profileName,
+    sourceType, sourceText, firstMessage, dailyCap}. Runs in the
+    background (browser work takes ~10-30s); poll GET /chat/threads
+    for the delivery result on the app's messageId. 409 while a
+    scraping job runs (it owns the page) or another chat start is
+    in flight. The daily cap is enforced in chat.start_chat.
+    """
+    global _chat_start_busy
+    body = await request.json() if request.headers.get("content-length") else {}
+    if not isinstance(body, dict):
+        body = {}
+    thread_id = (body.get("threadId") or "").strip()
+    first_message = (body.get("firstMessage") or "").strip()
+    profile_url = (body.get("profileUrl") or "").strip()
+    if not thread_id or not first_message or not profile_url:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "threadId, profileUrl and firstMessage are required"})
+    if not _valid_facebook_url(profile_url):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "profileUrl is not a valid Facebook URL"})
+    with _lock:
+        if _running_job_id is not None:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "another job is already running"})
+        if _chat_start_busy:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "a chat start is already running"})
+        _chat_start_busy = True
+    try:
+        daily_cap = int(body.get("dailyCap") or 0)
+    except (TypeError, ValueError):
+        daily_cap = 0
+    payload = {
+        "accountId": body.get("accountId") or "",
+        "threadId": thread_id,
+        "messageId": body.get("messageId") or "",
+        "profileUrl": profile_url,
+        "profileName": body.get("profileName") or "",
+        "sourceType": body.get("sourceType") or "comment",
+        "sourceText": body.get("sourceText") or "",
+        "firstMessage": first_message,
+        "dailyCap": daily_cap,
+    }
+    thread = threading.Thread(target=_run_chat_start, args=(payload,),
+                              daemon=True)
+    thread.start()
+    return JSONResponse(status_code=202,
+                        content={"threadId": thread_id, "status": "starting"})
+
+
+@app.post("/chat/watch")
+async def chat_watch_endpoint(request: Request):
+    """Start (or replace) the Messenger watcher.
+
+    Body: {accountId, threads: [{threadId, profileUrl, profileName,
+    sourceType, sourceText}], script, geminiKey, model, dailyCap}.
+    The watch list IS the approval gate: only these threads are ever
+    opened or replied to. The Gemini key is held in memory only and
+    cleared on stop; it is never written to disk or logged. 400 when
+    the key is missing — without it the watcher cannot draft replies.
+    """
+    body = await request.json() if request.headers.get("content-length") else {}
+    if not isinstance(body, dict):
+        body = {}
+    account_id = (body.get("accountId") or "").strip()
+    if not account_id:
+        return JSONResponse(
+            status_code=400, content={"detail": "accountId is required"})
+    threads = body.get("threads") or []
+    if not isinstance(threads, list):
+        return JSONResponse(
+            status_code=400, content={"detail": "threads must be a list"})
+    gemini_key = (body.get("geminiKey") or "").strip()
+    if not gemini_key:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "geminiKey is required to draft replies"})
+    script = body.get("script") or {}
+    if not isinstance(script, dict):
+        return JSONResponse(
+            status_code=400, content={"detail": "script must be an object"})
+    try:
+        daily_cap = int(body.get("dailyCap") or 0)
+    except (TypeError, ValueError):
+        daily_cap = 0
+    clean_threads = []
+    for t in threads:
+        if not isinstance(t, dict) or not (t.get("threadId") or "").strip():
+            continue
+        clean_threads.append({
+            "threadId": t["threadId"].strip(),
+            "profileUrl": (t.get("profileUrl") or "").strip(),
+            "profileName": (t.get("profileName") or "").strip(),
+            "sourceType": (t.get("sourceType") or "comment").strip(),
+            "sourceText": (t.get("sourceText") or "").strip(),
+        })
+    # Rows for new threads (never reset an existing row's status).
+    for t in clean_threads:
+        if db.get_chat_thread(t["threadId"]) is None:
+            db.upsert_chat_thread(
+                t["threadId"], account_id, t["profileUrl"], t["profileName"],
+                t["sourceType"], t["sourceText"], status="starting")
+    # Threads of THIS account that dropped out of the watch list
+    # (marked done in the app) stop being watched.
+    watched_ids = {t["threadId"] for t in clean_threads}
+    for row in db.list_chat_threads(account_id):
+        if (row["id"] not in watched_ids
+                and row.get("status") in ("active", "starting")):
+            db.set_chat_thread(row["id"], status="done")
+    chat.set_watch({
+        "accountId": account_id,
+        "threads": clean_threads,
+        "script": script,
+        "geminiKey": gemini_key,
+        "model": (body.get("model") or chat.DEFAULT_MODEL).strip(),
+        "dailyCap": daily_cap,
+    })
+    _ensure_watch_thread()
+    return {"watching": True, "threads": len(clean_threads)}
+
+
+@app.get("/chat/threads")
+def chat_threads_endpoint():
+    """Live chat state for the app to poll: every thread with its
+    messages (delivery per message id, so the app can match the
+    first message it composed) and whether the watcher runs."""
+    out = []
+    for row in db.list_chat_threads():
+        messages = db.list_chat_messages(row["id"])
+        out.append({
+            "threadId": row["id"],
+            "accountId": row.get("account_id") or "",
+            "profileUrl": row.get("profile_url") or "",
+            "profileName": row.get("profile_name") or "",
+            "status": row.get("status") or "starting",
+            "messengerThreadUrl": row.get("messenger_thread_url"),
+            "lastError": row.get("last_error"),
+            "messages": [{
+                "id": m["id"],
+                "role": m.get("role"),
+                "text": m.get("text") or "",
+                "delivery": m.get("delivery"),
+                "sentAt": m.get("sent_at"),
+            } for m in messages],
+        })
+    return {"threads": out, "watching": chat.is_watching()}
+
+
+@app.post("/chat/stop")
+async def chat_stop_endpoint():
+    """Stop ALL chatting immediately: the watcher loop exits and any
+    in-flight first message aborts between steps. The watch list,
+    script and Gemini key are forgotten — nothing resumes until the
+    app sends a new watch list."""
+    chat.request_stop()
+    return {"watching": False}
 
 
 if __name__ == "__main__":

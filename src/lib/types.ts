@@ -8,6 +8,10 @@ export interface Account {
   facebookName: string;
   status: AccountStatus;
   createdAt: string;
+  /** When the Facebook account itself was created (YYYY-MM-DD).
+   * Drives the daily chat cap (see dailyChatLimit). Null = unknown,
+   * then the app account's createdAt is used (conservative). */
+  facebookCreatedAt: string | null;
 }
 
 export type SourceType = "group" | "page";
@@ -115,6 +119,8 @@ export interface Settings {
   model: string;
   ollamaUrl: string;
   geminiApiKey: string;
+  /** Local chat agent (run-agent.bat) the Inbox talks to. */
+  agentUrl: string;
   criteria: LeadCriteria;
   leadRules: LeadRules;
   sourcing: SourcingRules;
@@ -171,12 +177,19 @@ export interface ChatThread {
 export type ChatMessageRole = "agent" | "candidate" | "system";
 
 /**
- * How a message relates to Facebook Messenger. v1 has NO live
- * Messenger connection: agent messages are drafts stored in the app
- * only ("in-app"). "pending-messenger" is reserved for the future
- * browser-delivery step — nothing may claim it today.
+ * How a message relates to Facebook Messenger.
+ * "in-app" = a draft stored in LeadHunter only, never sent.
+ * "pending-messenger" = handed to the chat agent, delivery unknown yet.
+ * "sent" = the agent confirmed it in Messenger after a reload.
+ * "failed" = the agent could not send it.
+ * "received" = a reply the agent read from Messenger.
  */
-export type ChatDelivery = "in-app" | "pending-messenger";
+export type ChatDelivery =
+  | "in-app"
+  | "pending-messenger"
+  | "sent"
+  | "failed"
+  | "received";
 
 export interface ChatMessage {
   id: string;

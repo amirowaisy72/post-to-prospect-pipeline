@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { BrainCircuit, Database, Eye, EyeOff, Filter, RotateCcw, Save, ShieldCheck } from "lucide-react";
+import { Bot, BrainCircuit, Database, Eye, EyeOff, Filter, RotateCcw, Save, ShieldCheck } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { PageHeader } from "@/components/page-header";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { createDefaultSettings, DEFAULT_CRITERIA, DEFAULT_OLLAMA_URL } from "@/lib/seed";
+import { createDefaultSettings, DEFAULT_AGENT_URL, DEFAULT_CRITERIA, DEFAULT_OLLAMA_URL } from "@/lib/seed";
 import { useStore } from "@/lib/store";
 import type { AiProvider, DatabaseKind, Settings } from "@/lib/types";
 
@@ -175,6 +175,25 @@ function ConfigurationsPage() {
               )}
             </div>
             <Input id="cfg-ollama" value={form.ollamaUrl} onChange={(e) => set("ollamaUrl", e.target.value)} placeholder={DEFAULT_OLLAMA_URL} className="font-mono text-sm" />
+          </div>
+        </Section>
+
+        <Section icon={<Bot className="size-4" />} title="Chat agent" description="Local agent that delivers Inbox chats to Messenger (run-agent.bat).">
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="cfg-agent">Agent URL</Label>
+              {form.agentUrl !== DEFAULT_AGENT_URL && (
+                <button type="button" className="text-xs font-semibold text-primary hover:underline" onClick={() => set("agentUrl", DEFAULT_AGENT_URL)}>
+                  Use default
+                </button>
+              )}
+            </div>
+            <Input id="cfg-agent" value={form.agentUrl} onChange={(e) => set("agentUrl", e.target.value)} placeholder={DEFAULT_AGENT_URL} className="font-mono text-sm" />
+            <p className="text-xs text-muted-foreground">
+              The agent runs on this PC only (localhost). Start it with run-agent.bat — the
+              Inbox then sends first messages and watches Messenger for replies. The Gemini
+              key above is sent to the agent per request and is never stored by it.
+            </p>
           </div>
         </Section>
 

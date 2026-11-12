@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { BrainCircuit, Database, Download, FileText, RefreshCw, Star, UserPlus, UserSearch, Users, X } from "lucide-react";
+import { BrainCircuit, Database, Download, FileText, MessageSquare, RefreshCw, Send, Star, UserPlus, UserSearch, Users, X } from "lucide-react";
 
 import { AccountStatusBadge } from "@/components/badges";
 import { PageHeader } from "@/components/page-header";
@@ -36,6 +36,8 @@ const ACTIVITY_ICON: Record<ActivityType, typeof Users> = {
   "lead-rejected": X,
   "source-scraped": Download,
   "source-synced": RefreshCw,
+  "chat-started": Send,
+  "chat-reply": MessageSquare,
 };
 
 function Dashboard() {

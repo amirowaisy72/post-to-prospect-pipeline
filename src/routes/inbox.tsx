@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
+  Ban,
   CheckCircle2,
   ExternalLink,
   Inbox as InboxIcon,
@@ -7,7 +8,7 @@ import {
   Send,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -58,8 +59,35 @@ const timeOf = (iso: string) =>
     minute: "2-digit",
   });
 
+/** Honest per-message delivery label — never claims a send that did not happen. */
+const deliveryLabel = (m: { role: string; delivery: string }) => {
+  if (m.role === "candidate") {
+    return m.delivery === "received" ? "Reply from Messenger" : "Reply recorded in-app";
+  }
+  switch (m.delivery) {
+    case "sent":
+      return "Sent to Messenger";
+    case "failed":
+      return "Failed to send to Messenger";
+    case "pending-messenger":
+      return "Sending to Messenger…";
+    default:
+      return "Agent draft · In-app only — not sent to Messenger";
+  }
+};
+
 function InboxPage() {
-  const { state, createChatThread, addChatMessage, setThreadStatus, updateChatScript } = useStore();
+  const {
+    state,
+    createChatThread,
+    addChatMessage,
+    setThreadStatus,
+    updateChatScript,
+    startChatDelivery,
+    refreshChatLive,
+    sendChatWatch,
+    stopAllChatting,
+  } = useStore();
   const { accountId } = useActiveAccountData();
   const account = state.accounts.find((a) => a.id === accountId);
 
@@ -74,6 +102,11 @@ function InboxPage() {
   const [formError, setFormError] = useState("");
   const [replyText, setReplyText] = useState("");
   const [draft, setDraft] = useState<ChatScript>(state.chatScript);
+  // Live agent state: null = not checked yet.
+  const [agentOnline, setAgentOnline] = useState<boolean | null>(null);
+  const [watching, setWatching] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   // Switching account resets the page.
   useEffect(() => {
@@ -82,6 +115,34 @@ function InboxPage() {
   }, [accountId]);
   // Keep the script editor in sync when the saved script changes elsewhere.
   useEffect(() => setDraft(state.chatScript), [state.chatScript]);
+
+  // Poll the chat agent for live thread states; (re)start the watcher
+  // when it is down but active threads exist. Polls every 10s while
+  // this page is open. The ref holds the latest store actions so the
+  // interval never restarts on store changes.
+  const liveRef = useRef({ refreshChatLive, sendChatWatch });
+  liveRef.current = { refreshChatLive, sendChatWatch };
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      void liveRef.current.refreshChatLive().then((r) => {
+        if (cancelled) return;
+        setAgentOnline(r.online);
+        setWatching(r.watching);
+        if (r.online && !r.watching) {
+          void liveRef.current.sendChatWatch().then((ok) => {
+            if (!cancelled && ok) setWatching(true);
+          });
+        }
+      });
+    };
+    poll();
+    const timer = window.setInterval(poll, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [accountId]);
 
   const sortedThreads = threadsForAccount(state, accountId);
   const selected = sortedThreads.find((t) => t.id === selectedId) ?? null;
@@ -94,7 +155,7 @@ function InboxPage() {
       setFormError("Create an account first — chats belong to an account.");
       return;
     }
-    const thread = createChatThread({
+    const created = createChatThread({
       profileUrl,
       profileName,
       sourceType,
@@ -102,7 +163,7 @@ function InboxPage() {
       sourceUrl,
       shortlistNote,
     });
-    if (!thread) return; // the store already showed the validation error
+    if (!created) return; // the store already showed the validation error
     setProfileUrl("");
     setProfileName("");
     setSourceType("comment");
@@ -110,7 +171,13 @@ function InboxPage() {
     setSourceUrl("");
     setShortlistNote("");
     setShowForm(false);
-    setSelectedId(thread.id);
+    setSelectedId(created.thread.id);
+    // Hand the first message to the chat agent for live delivery.
+    // A failed hand-off leaves the message as an in-app draft.
+    setSending(true);
+    void startChatDelivery(created.thread, created.firstMessageId).finally(() =>
+      setSending(false),
+    );
   };
 
   const addReply = () => {
@@ -146,18 +213,66 @@ function InboxPage() {
         }
       />
 
-      <div className="mb-6 flex items-start gap-3 rounded-lg border border-dashed border-primary/40 bg-accent/60 p-4">
+      <div
+        className={`mb-6 flex items-start gap-3 rounded-lg border p-4 ${
+          agentOnline
+            ? "border-success/40 bg-success/10"
+            : "border-dashed border-primary/40 bg-accent/60"
+        }`}
+      >
         <InboxIcon className="mt-0.5 size-5 shrink-0 text-primary" />
-        <div>
-          <p className="text-sm font-semibold text-accent-foreground">
-            In-app only — Messenger delivery is not connected yet.
-          </p>
-          <p className="text-sm text-muted-foreground">
-            Agent messages below are drafts stored in LeadHunter; they have <strong>not</strong>{" "}
-            been sent to Facebook Messenger. Paste the candidate&apos;s real replies from Messenger
-            here, generate the next draft, and send it yourself until live delivery arrives.
-          </p>
+        <div className="min-w-0 flex-1">
+          {agentOnline === null ? (
+            <>
+              <p className="text-sm font-semibold text-accent-foreground">
+                Checking the chat agent…
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Looking for the agent on this PC (run-agent.bat).
+              </p>
+            </>
+          ) : agentOnline ? (
+            <>
+              <p className="text-sm font-semibold text-accent-foreground">
+                Live — Messenger connected{watching ? " · watching for replies" : ""}.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                New chats send their first message to Messenger right away, and the agent
+                replies the moment a selected candidate answers. It only ever chats with
+                the candidates you started here.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-semibold text-accent-foreground">
+                In-app only — Messenger delivery is not connected.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                The chat agent is not running, so agent messages below are drafts stored in
+                LeadHunter; they have <strong>not</strong> been sent to Facebook Messenger.
+                Start the agent (run-agent.bat, agent window), then come back — new chats
+                will send live. Until then, paste the candidate&apos;s real replies from
+                Messenger here, generate the next draft, and send it yourself.
+              </p>
+            </>
+          )}
         </div>
+        {agentOnline && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={stopping}
+            onClick={() => {
+              setStopping(true);
+              void stopAllChatting().finally(() => {
+                setStopping(false);
+                setWatching(false);
+              });
+            }}
+          >
+            <Ban /> {stopping ? "Stopping…" : "Stop all chatting"}
+          </Button>
+        )}
       </div>
 
       {!account ? (
@@ -245,11 +360,14 @@ function InboxPage() {
                     />
                   </div>
                   {formError && <p className="text-sm text-destructive">{formError}</p>}
-                  <Button className="w-full" onClick={startChat}>
-                    <Send /> Start chat
+                  <Button className="w-full" onClick={startChat} disabled={sending}>
+                    <Send /> {sending ? "Starting chat…" : "Start chat"}
                   </Button>
                   <p className="text-xs text-muted-foreground">
-                    Starting a chat composes the first message from your script right away.
+                    Starting a chat composes the first message from your script right away
+                    {agentOnline === false
+                      ? " — as an in-app draft, because the agent is not running."
+                      : " — and sends it to Messenger when the agent is running."}
                   </p>
                 </CardContent>
               </Card>
@@ -387,10 +505,7 @@ function InboxPage() {
                               {m.text}
                             </div>
                             <p className="text-[11px] text-muted-foreground tabular">
-                              {m.role === "agent"
-                                ? "Agent draft · In-app only — not sent to Messenger"
-                                : "Reply recorded in-app"}{" "}
-                              · {timeOf(m.createdAt)}
+                              {deliveryLabel(m)} · {timeOf(m.createdAt)}
                             </p>
                           </div>
                         </div>
@@ -421,8 +536,8 @@ function InboxPage() {
                         </Button>
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Demo draft for now — Gemini answers arrive with the backend, through the
-                        same reply seam.
+                        Local draft helper — when the agent is watching, live replies arrive
+                        automatically from Gemini. Use this only to draft a reply by hand.
                       </p>
                     </div>
                   )}

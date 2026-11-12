@@ -1,5 +1,5 @@
 @echo off
-REM LeadHunter scraping agent — run this on your PC (Windows, Python 3.14).
+REM LeadHunter chat agent — run this on your PC (Windows, Python 3.14).
 REM It installs the dependencies, installs Chromium for Playwright, then
 REM serves the agent at http://127.0.0.1:8001 for the LeadHunter frontend.
 setlocal
@@ -37,10 +37,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Tip: double-click start.bat in the repo root to start the agent
-REM AND the app together — it also sets the Chrome profile for you.
-REM See README.md ("Use an existing signed-in Chrome profile").
-REM When the var is unset, the agent uses agent\.chrome-profile as before.
+REM Tip: set LEADHUNTER_CHROME_PROFILE to your signed-in Chrome profile
+REM before starting (see README.md). When the var is unset, the agent
+REM uses agent\.chrome-profile as before.
 
 echo.
 echo [leadhunter] Starting the agent at http://127.0.0.1:8001
@@ -58,7 +57,7 @@ if defined LEADHUNTER_CHROME_PROFILE (
   echo [leadhunter] in agent\.chrome-profile, and the agent never asks
   echo [leadhunter] for or stores your Facebook password.
 )
-echo [leadhunter] Keep this window open while LeadHunter is scraping.
+echo [leadhunter] Keep this window open while LeadHunter is chatting.
 echo [leadhunter] Stop with Ctrl+C - the browser closes cleanly, so the
 echo [leadhunter] next start never asks to restore pages.
 echo.
