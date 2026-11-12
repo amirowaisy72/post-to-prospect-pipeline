@@ -478,15 +478,25 @@ def _ensure_watch_thread():
 
 
 def _run_chat_start(payload):
-    """Background thread for one chat start; clears the busy flag."""
+    """Background thread for one chat start; clears the busy flag.
+
+    Records the send's stage trail (chat.set_send_stage) so the app
+    can show where a send sits instead of one frozen "Sending…":
+    "queued" while it waits for the browser lock, "opening browser"
+    while the page is (re)launched, then chat.start_chat takes over.
+    """
     global _chat_start_busy
+    message_id = payload.get("messageId") or ""
+    chat.set_send_stage(message_id, "queued")
     try:
         with _chat_browser_lock:
+            chat.set_send_stage(message_id, "opening browser")
             page = _fresh_page()
             worker = FacebookWorker()
             note = lambda msg: print(f"[leadhunter] {msg}", flush=True)  # noqa: E731
             chat.start_chat(worker, page, payload, note=note)
     except Exception as exc:  # noqa: BLE001 - start failure, not a crash
+        chat.set_send_stage(message_id, "failed", str(exc))
         try:
             db.set_chat_thread(payload.get("threadId"), status="failed",
                                last_error=str(exc))
@@ -820,6 +830,17 @@ async def chat_watch_endpoint(request: Request):
     return {"watching": True, "threads": len(clean_threads)}
 
 
+def _message_stage_fields(message_id: str) -> dict:
+    """Send-stage fields for one message id (GET /chat/threads)."""
+    stage = chat.get_send_stage(message_id)
+    if not stage:
+        return {"sendStage": None, "sendStageSince": None,
+                "sendStageDetail": None}
+    return {"sendStage": stage.get("stage"),
+            "sendStageSince": stage.get("since"),
+            "sendStageDetail": stage.get("detail") or None}
+
+
 @app.get("/chat/threads")
 def chat_threads_endpoint():
     """Live chat state for the app to poll: every thread with its
@@ -842,6 +863,10 @@ def chat_threads_endpoint():
                 "text": m.get("text") or "",
                 "delivery": m.get("delivery"),
                 "sentAt": m.get("sent_at"),
+                # Send-stage trail for this message (first-message send
+                # only): current stage + when it entered it + the plain
+                # failure reason. Null until the send starts.
+                **_message_stage_fields(m["id"]),
             } for m in messages],
         })
     return {"threads": out, "watching": chat.is_watching()}

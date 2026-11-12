@@ -186,4 +186,32 @@ describe("Inbox first-message retry", () => {
     expect(await screen.findByText(/Sent to Messenger/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Send to Messenger now/ })).toBeNull();
   });
+
+  it("shows the live send stage with its age while a send is in flight", async () => {
+    const pending = seedState();
+    pending.chatMessages = [
+      {
+        ...pending.chatMessages[0]!,
+        delivery: "pending-messenger",
+        sendStage: "opening chat",
+        sendStageSince: new Date(Date.now() - 45000).toISOString(),
+      },
+    ];
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(pending));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).endsWith("/health")) {
+          return jsonResponse({ chat: { watching: true, threads: 0 } });
+        }
+        return jsonResponse({ watching: true, threads: [] });
+      }),
+    );
+
+    await renderAt("/inbox");
+    fireEvent.click(await screen.findByText("Zainab"));
+    // Stage from the poll state + how long it has sat there.
+    expect(await screen.findByText(/Agent: Opening chat… · \d+s/)).toBeInTheDocument();
+    expect(screen.queryByText(/Sending to Messenger…/)).toBeNull();
+  });
 });

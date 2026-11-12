@@ -293,6 +293,60 @@ def _now_iso() -> str:
 
 
 # ----------------------------------------------------------------------
+# Send stages (first-message send only, start_chat)
+#
+# The app shows a static "Sending to Messenger…" while the send runs,
+# so a stall is invisible. Every real step of the send records a
+# short plain-word stage with a timestamp, printed to the agent
+# console as well — a stall names its exact step instead of one
+# frozen caption. In-memory only: an agent restart clears the trail
+# and the app falls back to "Sending…" until a new stage arrives.
+# ----------------------------------------------------------------------
+SEND_STAGES = ("queued", "opening browser", "checking session",
+               "opening chat", "typing message", "verifying sent",
+               "sent", "failed")
+
+_SEND_STAGE: dict[str, dict] = {}
+_SEND_STAGE_HISTORY: dict[str, list] = {}
+_SEND_STAGE_LOCK = threading.Lock()
+
+
+def set_send_stage(message_id: str, stage: str, detail: str = "") -> None:
+    """Record the send's current stage (in-memory + agent console).
+
+    Re-setting the same stage is a no-op, so the clock keeps the
+    moment the send first entered this stage.
+    """
+    if not message_id or stage not in SEND_STAGES:
+        return
+    now = _now_iso()
+    with _SEND_STAGE_LOCK:
+        current = _SEND_STAGE.get(message_id)
+        if current and current.get("stage") == stage:
+            return
+        _SEND_STAGE[message_id] = {"stage": stage, "since": now,
+                                    "detail": detail or ""}
+        _SEND_STAGE_HISTORY.setdefault(message_id, []).append(
+            {"stage": stage, "since": now, "detail": detail or ""})
+    short = message_id[-8:] if len(message_id) > 8 else message_id
+    suffix = f" — {detail}" if detail else ""
+    print(f"[leadhunter] send {short}: {stage}{suffix}", flush=True)
+
+
+def get_send_stage(message_id: str) -> dict | None:
+    """Current stage for a message id, or None when never started."""
+    with _SEND_STAGE_LOCK:
+        row = _SEND_STAGE.get(message_id or "")
+        return dict(row) if row else None
+
+
+def get_send_stage_history(message_id: str) -> list:
+    """Stage trail in order (diagnostics / tests)."""
+    with _SEND_STAGE_LOCK:
+        return [dict(r) for r in _SEND_STAGE_HISTORY.get(message_id or "", [])]
+
+
+# ----------------------------------------------------------------------
 # One watcher pass
 # ----------------------------------------------------------------------
 def watch_once(worker, page, note=None) -> dict:
@@ -459,6 +513,7 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
               "detail": ""}
     if not thread_id or not profile_url or not first_message:
         result["detail"] = "threadId, profileUrl and firstMessage are required"
+        set_send_stage(message_id, "failed", result["detail"])
         return result
     # The row exists from here on, so every failure path below is
     # visible to the app via GET /chat/threads.
@@ -466,9 +521,22 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
         thread_id, account_id, profile_url,
         payload.get("profileName") or "", payload.get("sourceType") or "comment",
         payload.get("sourceText") or "", status="starting")
+
+    def _record_failed_first_message() -> None:
+        """Save the first message as failed under the app's message
+        id, so the app learns the failure (otherwise its message
+        stays "pending" forever with no stage and no reason).
+        INSERT OR IGNORE: a retry never duplicates it."""
+        if message_id:
+            db.save_chat_message(message_id, thread_id, "agent",
+                                 first_message, "failed", sent_at=None,
+                                 created_at=_now_iso())
+
     if count_sent_today(account_id) >= cap:
         result["detail"] = (f"daily limit reached ({cap} messages today) — "
                             "no outbound")
+        set_send_stage(message_id, "failed", result["detail"])
+        _record_failed_first_message()
         db.set_chat_thread(thread_id, status="failed",
                            last_error=result["detail"])
         return result
@@ -476,21 +544,35 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
         "should_stop": lambda: stop_requested(),
         "pace": lambda: time.sleep(2.5),
         "note": note,
+        # Stage callback for the browser steps the send runs through
+        # (facebook.py reports "verifying sent" through it); the
+        # watcher builds its own ctx without one, so it stays silent.
+        "stage": lambda s, d="": set_send_stage(message_id, s, d),
     }
+    set_send_stage(message_id, "checking session")
     try:
         state = worker.verify_session(page, ctx, target_url=profile_url)
     except Exception as exc:  # noqa: BLE001
         result["detail"] = f"session check failed: {exc}"
+        set_send_stage(message_id, "failed", result["detail"])
+        _record_failed_first_message()
+        db.set_chat_thread(thread_id, status="failed",
+                           last_error=result["detail"])
         return result
     if state != "ok":
         result["detail"] = (f"Facebook session {state} — sign in to "
                             "Facebook in the agent Chrome window")
+        set_send_stage(message_id, "failed", result["detail"])
+        _record_failed_first_message()
         db.set_chat_thread(thread_id, status="failed",
                            last_error=result["detail"])
         return result
+    set_send_stage(message_id, "opening chat")
     thread_url, detail = worker.open_chat_with_profile(page, profile_url, ctx)
     if not thread_url:
         result["detail"] = f"could not open a chat: {detail}"
+        set_send_stage(message_id, "failed", result["detail"])
+        _record_failed_first_message()
         db.set_chat_thread(thread_id, status="failed",
                            last_error=result["detail"])
         return result
@@ -498,6 +580,10 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
     db.set_chat_thread(thread_id, messenger_thread_url=thread_url)
     if stop_requested():
         result["detail"] = "stopped before sending"
+        set_send_stage(message_id, "failed", result["detail"])
+        _record_failed_first_message()
+        db.set_chat_thread(thread_id, status="failed",
+                           last_error=result["detail"])
         return result
     sent_any = False
     last_error = ""
@@ -505,11 +591,23 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
     for index, part in enumerate(parts):
         if stop_requested():
             result["detail"] = "stopped before sending"
+            set_send_stage(message_id, "failed", result["detail"])
+            _record_failed_first_message()
+            db.set_chat_thread(thread_id, status="failed",
+                               last_error=result["detail"])
             return result
         if count_sent_today(account_id) >= cap:
             result["detail"] = (f"daily limit reached ({cap} messages "
                                 "today) — stopped")
+            # Keep the real reason: the not-sent-any block below
+            # reports last_error, and without this it would say
+            # "unknown" instead of the cap.
+            last_error = result["detail"]
+            set_send_stage(message_id, "failed", result["detail"])
             break
+        set_send_stage(
+            message_id, "typing message",
+            f"part {index + 1} of {len(parts)}" if len(parts) > 1 else "")
         ok, detail = worker.send_thread_message(page, thread_url, part, ctx)
         part_id = message_id if (index == 0 and message_id) else _new_id("msg")
         db.save_chat_message(
@@ -522,9 +620,12 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
         sent_any = True
     if not sent_any:
         result["detail"] = f"first message failed: {last_error or 'unknown'}"
+        set_send_stage(message_id, "failed", result["detail"])
+        _record_failed_first_message()
         db.set_chat_thread(thread_id, status="failed",
                            last_error=result["detail"])
         return result
+    set_send_stage(message_id, "sent")
     # A first message to a stranger lands in Message Requests until
     # they accept — check honestly and report it.
     try:

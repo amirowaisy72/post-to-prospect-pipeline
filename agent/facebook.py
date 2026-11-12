@@ -1123,6 +1123,22 @@ def _note(ctx: dict | None, msg: str) -> None:
         pass
 
 
+def _stage(ctx: dict | None, stage: str, detail: str = "") -> None:
+    """Report a send step (first-message send only).
+
+    The callback lives on ctx["stage"] when the caller wants it
+    (chat.start_chat sets one); every other caller — the watcher
+    included — has none, so this is a silent no-op for them. Never
+    raises, never changes the send.
+    """
+    try:
+        fn = (ctx or {}).get("stage")
+        if callable(fn):
+            fn(stage, detail)
+    except Exception:
+        pass
+
+
 class FacebookWorker:
     """Facebook browsing worker. Methods take a live ``page`` + ``ctx``."""
 
@@ -2182,6 +2198,7 @@ class FacebookWorker:
             except Exception:
                 time.sleep(2.5)
             # Verify after reload: the message counts ONLY if still present.
+            _stage(ctx, "verifying sent")
             tail = _clean_text(text, 120)
             try:
                 page.reload(wait_until="domcontentloaded")

@@ -12,8 +12,10 @@ import {
   createChatThread,
   dailyChatLimit,
   firstUnsentMessage,
+  formatStageAge,
   markMessageDelivery,
   mergeLiveThreads,
+  sendStatusCaption,
   setThreadStatus,
   validateSettings,
 } from "@/lib/leadhunter-service";
@@ -367,5 +369,181 @@ describe("mergeLiveThreads first-message delivery", () => {
     const delivery = merged.chatMessages.find((m) => m.id === "msg-1")?.delivery;
     expect(delivery).toBe("failed");
     expect(delivery).not.toBe("sent");
+  });
+});
+
+describe("mergeLiveThreads send stages", () => {
+  const live = (over: Record<string, unknown> = {}) => ({
+    threadId: "thread-1",
+    status: "active",
+    messengerThreadUrl: "https://www.facebook.com/messages/t/123",
+    messages: [
+      {
+        id: "msg-1",
+        role: "agent" as const,
+        text: "Hi Sana!",
+        delivery: "pending-messenger" as const,
+        sentAt: NOW,
+        sendStage: "opening chat",
+        sendStageSince: "2026-11-13T02:45:00.000Z",
+        sendStageDetail: null,
+      },
+    ],
+    ...over,
+  });
+
+  it("merges stage fields onto a known pending message", () => {
+    const pending = markMessageDelivery(withThread(), "msg-1", "pending-messenger");
+    if (!pending.ok) throw new Error("fixture failed");
+    const merged = mergeLiveThreads(pending.value, [live()]);
+    const m = merged.chatMessages.find((x) => x.id === "msg-1")!;
+    expect(m.sendStage).toBe("opening chat");
+    expect(m.sendStageSince).toBe("2026-11-13T02:45:00.000Z");
+  });
+
+  it("clears a stale stage when the agent reports null (agent restarted)", () => {
+    const state = withThread();
+    const stale = {
+      ...state,
+      chatMessages: state.chatMessages.map((m) => ({
+        ...m,
+        delivery: "pending-messenger" as const,
+        sendStage: "opening chat",
+        sendStageSince: "2026-11-13T02:45:00.000Z",
+      })),
+    };
+    const merged = mergeLiveThreads(stale, [
+      live({
+        messages: [
+          {
+            id: "msg-1",
+            role: "agent" as const,
+            text: "Hi Sana!",
+            delivery: "pending-messenger" as const,
+            sentAt: NOW,
+            sendStage: null,
+            sendStageSince: null,
+            sendStageDetail: null,
+          },
+        ],
+      }),
+    ]);
+    const m = merged.chatMessages.find((x) => x.id === "msg-1")!;
+    expect(m.sendStage).toBeNull();
+    expect(m.sendStageSince).toBeNull();
+  });
+
+  it("returns the same state reference when the stage is unchanged", () => {
+    const state = withThread();
+    const merged = mergeLiveThreads(state, [
+      live({
+        messages: [
+          {
+            id: "msg-1",
+            role: "agent" as const,
+            text: "Hi Sana!",
+            delivery: "in-app" as const,
+            sentAt: NOW,
+            sendStage: null,
+            sendStageSince: null,
+            sendStageDetail: null,
+          },
+        ],
+      }),
+    ]);
+    expect(merged).toBe(state);
+  });
+
+  it("carries stage fields on appended messages", () => {
+    const merged = mergeLiveThreads(withThread(), [
+      live({
+        messages: [
+          { id: "msg-1", role: "agent" as const, text: "Hi Sana!", delivery: "sent" as const, sentAt: NOW },
+          {
+            id: "msg-2",
+            role: "agent" as const,
+            text: "Second part",
+            delivery: "pending-messenger" as const,
+            sentAt: NOW,
+            sendStage: "typing message",
+            sendStageSince: "2026-11-13T02:45:10.000Z",
+            sendStageDetail: "part 2 of 2",
+          },
+        ],
+      }),
+    ]);
+    const m = merged.chatMessages.find((x) => x.id === "msg-2")!;
+    expect(m.sendStage).toBe("typing message");
+    expect(m.sendStageDetail).toBe("part 2 of 2");
+  });
+});
+
+describe("sendStatusCaption", () => {
+  const NOWMS = Date.parse("2026-11-13T02:45:00.000Z");
+  const msg = (over: Record<string, unknown> = {}) => ({
+    id: "msg-1",
+    threadId: "thread-1",
+    role: "agent" as const,
+    text: "Hi Sana!",
+    createdAt: NOW,
+    delivery: "pending-messenger" as const,
+    ...over,
+  });
+
+  it("shows the live stage with its age while a send is in flight", () => {
+    expect(
+      sendStatusCaption(
+        msg({ sendStage: "opening chat", sendStageSince: "2026-11-13T02:44:15.000Z" }),
+        NOWMS,
+      ),
+    ).toBe("Agent: Opening chat… · 45s");
+  });
+  it("shows the stage without an age when the start time is missing", () => {
+    expect(sendStatusCaption(msg({ sendStage: "checking session" }), NOWMS)).toBe(
+      "Agent: Checking session…",
+    );
+  });
+  it("falls back to Sending… before the first stage arrives", () => {
+    expect(sendStatusCaption(msg(), NOWMS)).toBe("Sending to Messenger…");
+  });
+  it("shows the agent's plain reason on a failed send", () => {
+    expect(
+      sendStatusCaption(
+        msg({ delivery: "failed", sendStage: "failed", sendStageDetail: "no Message button on this profile" }),
+        NOWMS,
+      ),
+    ).toBe("Failed — no Message button on this profile");
+  });
+  it("falls back to a plain failure label with no reason", () => {
+    expect(sendStatusCaption(msg({ delivery: "failed" }), NOWMS)).toBe(
+      "Failed to send to Messenger",
+    );
+  });
+  it("shows sent once confirmed", () => {
+    expect(sendStatusCaption(msg({ delivery: "sent" }), NOWMS)).toBe("Sent to Messenger");
+  });
+  it("keeps candidate replies honest", () => {
+    expect(sendStatusCaption(msg({ role: "candidate", delivery: "received" }), NOWMS)).toBe(
+      "Reply from Messenger",
+    );
+    expect(sendStatusCaption(msg({ role: "candidate", delivery: "in-app" }), NOWMS)).toBe(
+      "Reply recorded in-app",
+    );
+  });
+});
+
+describe("formatStageAge", () => {
+  const NOWMS = Date.parse("2026-11-13T02:45:00.000Z");
+  it("counts seconds under a minute", () => {
+    expect(formatStageAge("2026-11-13T02:44:15.000Z", NOWMS)).toBe("45s");
+    expect(formatStageAge("2026-11-13T02:45:00.000Z", NOWMS)).toBe("0s");
+  });
+  it("counts minutes and seconds past a minute", () => {
+    expect(formatStageAge("2026-11-13T02:42:55.000Z", NOWMS)).toBe("2m 05s");
+  });
+  it("returns null without a start time, or for a bad one", () => {
+    expect(formatStageAge(null, NOWMS)).toBeNull();
+    expect(formatStageAge(undefined, NOWMS)).toBeNull();
+    expect(formatStageAge("not-a-date", NOWMS)).toBeNull();
   });
 });

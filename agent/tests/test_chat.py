@@ -43,9 +43,18 @@ SCRIPT = {
 
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path):
+    # main.py resets the db path to agent/leadhunter.db at import
+    # time — import it BEFORE init_db, so the temp path below sticks
+    # and the health test never reads leftover rows from real runs.
+    try:
+        import main  # noqa: F401
+    except ImportError:
+        pass
     db.init_db(tmp_path / "test_chat.db")
     chat.clear_watch()
     chat._STOP.clear()
+    chat._SEND_STAGE.clear()
+    chat._SEND_STAGE_HISTORY.clear()
     yield
     chat.clear_watch()
     chat._STOP.clear()
@@ -687,6 +696,46 @@ class TestChatEndpoints:
         # The app can now poll the delivery against its own message id.
         threads = client.get("/chat/threads").json()
         assert threads["threads"][0]["messages"][0]["delivery"] == "sent"
+
+    def test_start_records_send_stages_in_order(self, monkeypatch):
+        client, main = self._client()
+        page = _FakeChatPage(message_button_url=THREAD_URL)
+        monkeypatch.setattr(main, "_fresh_page", lambda: page)
+        r = client.post("/chat/start", json=self._start_body())
+        assert r.status_code == 202
+        assert self._wait_start_done(main)
+        # Every real step of the send, in order — the trail the app
+        # shows instead of one frozen "Sending…".
+        history = chat.get_send_stage_history("msg-1")
+        assert [h["stage"] for h in history] == [
+            "queued", "opening browser", "checking session", "opening chat",
+            "typing message", "verifying sent", "sent",
+        ]
+        stage = chat.get_send_stage("msg-1")
+        assert stage["stage"] == "sent"
+        assert stage["since"]
+        # GET /chat/threads carries the current stage per message.
+        threads = client.get("/chat/threads").json()
+        msg = threads["threads"][0]["messages"][0]
+        assert msg["sendStage"] == "sent"
+        assert msg["sendStageSince"]
+        assert msg["sendStageDetail"] is None
+
+    def test_start_cap_failure_reports_failed_stage(self, monkeypatch):
+        client, main = self._client()
+        page = _FakeChatPage(message_button_url=THREAD_URL)
+        monkeypatch.setattr(main, "_fresh_page", lambda: page)
+        r = client.post("/chat/start", json=self._start_body(dailyCap=0))
+        assert r.status_code == 202
+        assert self._wait_start_done(main)
+        stage = chat.get_send_stage("msg-1")
+        assert stage["stage"] == "failed"
+        assert "daily limit" in stage["detail"]
+        threads = client.get("/chat/threads").json()
+        msg = threads["threads"][0]["messages"][0]
+        assert msg["sendStage"] == "failed"
+        assert "daily limit" in (msg["sendStageDetail"] or "")
+        assert msg["delivery"] == "failed"
 
     def test_start_409_while_another_start_runs(self, monkeypatch):
         client, main = self._client()

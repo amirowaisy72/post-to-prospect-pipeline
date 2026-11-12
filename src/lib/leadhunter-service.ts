@@ -1308,16 +1308,72 @@ export interface LiveChatThread {
     text: string;
     delivery: ChatDelivery;
     sentAt?: string | null;
+    sendStage?: string | null;
+    sendStageSince?: string | null;
+    sendStageDetail?: string | null;
   }[];
+}
+
+/**
+ * How long a send has sat at its current stage ("45s", "2m 05s").
+ * Null when the stage has no start time.
+ */
+export function formatStageAge(
+  sinceIso: string | null | undefined,
+  nowMs: number,
+): string | null {
+  if (!sinceIso) return null;
+  const since = Date.parse(sinceIso);
+  if (Number.isNaN(since)) return null;
+  const secs = Math.max(0, Math.floor((nowMs - since) / 1000));
+  if (secs < 60) return `${secs}s`;
+  return `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s`;
+}
+
+const stageDisplay = (stage: string) =>
+  stage.charAt(0).toUpperCase() + stage.slice(1);
+
+/**
+ * Honest per-message delivery label — never claims a send that did
+ * not happen. A send in flight shows the agent's live stage plus
+ * how long it has sat there ("Agent: Opening chat… · 45s"); a
+ * failed send shows the agent's plain reason. "Sending to
+ * Messenger…" is only the initial state before the first stage
+ * arrives from the agent.
+ */
+export function sendStatusCaption(m: ChatMessage, nowMs: number): string {
+  if (m.role === "candidate") {
+    return m.delivery === "received" ? "Reply from Messenger" : "Reply recorded in-app";
+  }
+  switch (m.delivery) {
+    case "sent":
+      return "Sent to Messenger";
+    case "failed":
+      return m.sendStageDetail
+        ? `Failed — ${m.sendStageDetail}`
+        : "Failed to send to Messenger";
+    case "pending-messenger": {
+      if (m.sendStage) {
+        const age = formatStageAge(m.sendStageSince, nowMs);
+        return age
+          ? `Agent: ${stageDisplay(m.sendStage)}… · ${age}`
+          : `Agent: ${stageDisplay(m.sendStage)}…`;
+      }
+      return "Sending to Messenger…";
+    }
+    default:
+      return "Agent draft · In-app only — not sent to Messenger";
+  }
 }
 
 /**
  * Merge the agent's live thread states into the store. Messages are
  * matched by id: an existing message only ever changes its delivery
- * (pending → sent / failed), and unknown ids are appended — but only
- * for threads that exist in this app (an agent row the user deleted
- * here is ignored). Returns the unchanged state reference when
- * nothing changed, so a quiet poll costs no re-render.
+ * (pending → sent / failed) and its send-stage trail, and unknown
+ * ids are appended — but only for threads that exist in this app (an
+ * agent row the user deleted here is ignored). Returns the unchanged
+ * state reference when nothing changed, so a quiet poll costs no
+ * re-render.
  */
 export function mergeLiveThreads(state: AppState, live: LiveChatThread[]): AppState {
   const byId = new Map(state.chatMessages.map((m) => [m.id, m]));
@@ -1329,8 +1385,32 @@ export function mergeLiveThreads(state: AppState, live: LiveChatThread[]): AppSt
     for (const lm of thread.messages) {
       const existing = byId.get(lm.id);
       if (existing) {
-        if (existing.delivery !== lm.delivery) {
-          next.set(lm.id, { ...existing, delivery: lm.delivery });
+        // The agent always sends the stage keys (null when a message
+        // was never staged, or after an agent restart cleared the
+        // in-memory trail) — an explicit null clears a stale stage
+        // instead of leaving it on screen with a growing age.
+        const stageChanged =
+          lm.sendStage !== undefined &&
+          (existing.sendStage ?? null) !== (lm.sendStage ?? null);
+        const sinceChanged =
+          lm.sendStageSince !== undefined &&
+          (existing.sendStageSince ?? null) !== (lm.sendStageSince ?? null);
+        const detailChanged =
+          lm.sendStageDetail !== undefined &&
+          (existing.sendStageDetail ?? null) !== (lm.sendStageDetail ?? null);
+        if (
+          existing.delivery !== lm.delivery ||
+          stageChanged ||
+          sinceChanged ||
+          detailChanged
+        ) {
+          next.set(lm.id, {
+            ...existing,
+            delivery: lm.delivery,
+            sendStage: lm.sendStage ?? null,
+            sendStageSince: lm.sendStageSince ?? null,
+            sendStageDetail: lm.sendStageDetail ?? null,
+          });
           changed = true;
         }
         continue;
@@ -1343,6 +1423,9 @@ export function mergeLiveThreads(state: AppState, live: LiveChatThread[]): AppSt
         text: lm.text,
         createdAt: lm.sentAt || new Date().toISOString(),
         delivery: lm.delivery,
+        sendStage: lm.sendStage ?? null,
+        sendStageSince: lm.sendStageSince ?? null,
+        sendStageDetail: lm.sendStageDetail ?? null,
       });
       changed = true;
     }

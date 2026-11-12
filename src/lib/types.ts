@@ -198,6 +198,12 @@ export interface ChatMessage {
   text: string;
   createdAt: string;
   delivery: ChatDelivery;
+  /** Live send stage from the agent (first-message send only):
+   * which step the send sits at, when it entered it, and the plain
+   * failure reason. Null until the send starts. */
+  sendStage?: string | null;
+  sendStageSince?: string | null;
+  sendStageDetail?: string | null;
 }
 
 /** The editable chat script the agent follows in every thread. */

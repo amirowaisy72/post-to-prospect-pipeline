@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, PageHeader } from "@/components/page-header";
-import { firstUnsentMessage, messagesForThread, threadsForAccount } from "@/lib/leadhunter-service";
+import { firstUnsentMessage, messagesForThread, sendStatusCaption, threadsForAccount } from "@/lib/leadhunter-service";
 import { mockInboxReply } from "@/lib/mock-chat";
 import { useActiveAccountData, useStore } from "@/lib/store";
 import type { ChatScript, InboxSourceType } from "@/lib/types";
@@ -59,22 +59,9 @@ const timeOf = (iso: string) =>
     minute: "2-digit",
   });
 
-/** Honest per-message delivery label — never claims a send that did not happen. */
-const deliveryLabel = (m: { role: string; delivery: string }) => {
-  if (m.role === "candidate") {
-    return m.delivery === "received" ? "Reply from Messenger" : "Reply recorded in-app";
-  }
-  switch (m.delivery) {
-    case "sent":
-      return "Sent to Messenger";
-    case "failed":
-      return "Failed to send to Messenger";
-    case "pending-messenger":
-      return "Sending to Messenger…";
-    default:
-      return "Agent draft · In-app only — not sent to Messenger";
-  }
-};
+/** Per-message delivery label — see sendStatusCaption in
+ * leadhunter-service (live send stage + age, or the plain reason
+ * when a send failed). */
 
 function InboxPage() {
   const {
@@ -150,6 +137,16 @@ function InboxPage() {
   // The first message, when it never reached Messenger (draft, or a
   // send the agent reported as failed) — the retry target.
   const firstUnsent = selected ? firstUnsentMessage(state, selected.id) : null;
+  // Wall clock for the send-stage age ("· 45s"). Ticks once a second
+  // only while the open thread has a send in flight — otherwise the
+  // captions are static and no re-render is needed.
+  const hasPendingSend = messages.some((m) => m.delivery === "pending-messenger");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasPendingSend) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasPendingSend]);
   const lastMessage = (threadId: string) => messagesForThread(state, threadId).at(-1);
 
   const startChat = () => {
@@ -532,7 +529,7 @@ function InboxPage() {
                               {m.text}
                             </div>
                             <p className="text-[11px] text-muted-foreground tabular">
-                              {deliveryLabel(m)} · {timeOf(m.createdAt)}
+                              {sendStatusCaption(m, nowMs)} · {timeOf(m.createdAt)}
                             </p>
                             {m.id === firstUnsent?.id && (
                               <div className="pt-1">
