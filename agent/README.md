@@ -2,7 +2,7 @@
 
 Local agent that delivers Inbox chats to Facebook Messenger and
 watches for replies, for the LeadHunter frontend (`src/`, Inbox
-page). It runs on **your PC**, in your own Chrome, with your own
+page). It runs on **your PC**, in its own Chrome, with your own
 logged-in Facebook session. The agent **never asks for, handles, or
 stores any Facebook password**.
 
@@ -11,21 +11,41 @@ old scraping endpoints (`/collect-sources`, `/scrape`, `/sync`,
 `/sources/{id}/delete`) stay registered in `main.py` but are dormant
 and unused by the app; posts come from the browser extension.
 
-## Quick start — two windows
+**Browser — exactly like Client Hunting.** All Playwright calls run
+on ONE dedicated browser thread owned by `browser.py`
+(`BrowserManager`, single-worker executor); every endpoint, the
+watcher loop and the job threads dispatch browser work to it and
+never touch Playwright themselves. That is what fixed the live
+"Cannot switch to a different thread" / "Sync API inside the
+asyncio loop" errors. The agent also owns its own Chrome profile
+under `agent/profiles/<account>` — one profile per account, never
+another app's profile. The session check distinguishes "page did
+not load" (`empty`) from "not signed in" (`logged_out`), so a
+failure message never says "sign in" when the page simply did not
+load.
+
+## Quick start — one double-click
+
+Double-click **`start.bat`** in the repo root. It opens two windows:
+
+- **LeadHunter App** — the app (`bun run dev`, http://localhost:8080/)
+- **LeadHunter Agent** — the chat agent (`run-agent.bat`,
+  http://127.0.0.1:8001)
+
+No env var, no typing. Keep both windows open while LeadHunter is
+running; close them (or Ctrl+C in each) to stop. If `start.bat`
+says Bun was not found, install it once in PowerShell
+(`irm bun.sh/install.ps1 | iex`) and double-click again.
+
+Manual start (if you prefer two windows by hand):
 
 **Window 1 — agent.** In PowerShell, in the `agent/` folder:
 
 ```powershell
-$env:LEADHUNTER_CHROME_PROFILE = "G:\Web Apps\client-hunting\data\profiles\Master"
 .\run-agent.bat
 ```
 
-That path is Client Hunting's profile for its `Master` account
-(`<client-hunting>\data\profiles\<account>`) — already signed in to
-Facebook, so no sign-in is needed. Use your own account folder name
-if it differs. The var must be set in the **same** window before
-`run-agent.bat` — without it the agent uses its own fresh profile
-(`agent/.chrome-profile/`), which is not signed in.
+The agent runs **headless** — no window appears while it works. To stop, press Ctrl+C in the agent window (the browser closes cleanly) and close the app window.
 
 **Window 2 — app.** In PowerShell, in the repo root:
 
@@ -33,11 +53,32 @@ if it differs. The var must be set in the **same** window before
 & "$env:USERPROFILE\.bun\bin\bun.exe" run dev
 ```
 
-Then open http://localhost:8080/ → Inbox. **Close Client Hunting
-first** — one Chrome profile can only be used by one browser at a
-time. The agent's browser runs **headless** — no window appears
-while it works. To stop, press Ctrl+C in the agent window (the
-browser closes cleanly) and close the app window.
+Then open http://localhost:8080/ → Inbox.
+
+## First-run Facebook sign-in (once only)
+
+The agent's own profile starts empty — it is not signed in to
+Facebook yet. Sign in **once**, yourself, in a visible window:
+
+1. Start the agent (`run-agent.bat`) and the app as above.
+2. In LeadHunter, open **Agent Control** and press **"Sign in to
+   Facebook"**. A Chrome window opens at the Facebook login page.
+3. Sign in yourself in that window. The agent never asks for or
+   stores your password — type it only in Facebook's own page.
+4. Leave the window open, go back to Agent Control and press
+   **"Relaunch browser"** — the agent goes back to silent headless
+   with your session saved in `agent/profiles/<account>`.
+
+After that you never sign in again unless Facebook logs you out —
+then repeat the same four steps. If a chat fails with "Facebook
+session is not signed in", that is the `logged_out` state: sign in
+again the same way. If it fails with "Facebook page did not load",
+the browser is fine but the page did not load — press **"Relaunch
+browser"** instead; do not sign in again.
+
+Stopping the agent (Ctrl+C in its window) shuts the browser down
+cleanly, so the next start never shows Chromium's "Restore pages?"
+popup.
 
 ## How it works
 
@@ -47,6 +88,7 @@ browser closes cleanly) and close the app window.
 | **Inbox open** (polls every 10 s) | `GET /chat/threads` + `POST /chat/watch` | The app (re)starts the watcher with the active threads, the script and the Gemini key, then polls live thread states (messages, who replied last, sent/delivered/replied status). |
 | **Watcher** (every ~90 s) | — | Reads Messenger inbox (+ Message Requests for approved threads not yet in the inbox). On a new reply from an **approved candidate only**, drafts a reply with Gemini (script + full chat history) and sends it. Never sends in any other thread. |
 | **Stop all chatting** (Inbox) | `POST /chat/stop` | Stops the watcher and any in-flight send **immediately**; the Gemini key and watch config are forgotten. |
+| **Agent Control** | `GET /agent/status`, `POST /agent/session-check`, `POST /agent/browser-relaunch`, `POST /agent/reload`, `POST /agent/signin`, `POST /agent/unwatch`, `GET /agent/logs` | Status, session re-check, browser relaunch/reload, first-run sign-in window, stop watching, recent log lines. |
 
 Every message the agent sends is saved in `leadhunter.db`
 (`chat_threads` / `chat_messages`) and shown in the app with its
@@ -79,53 +121,6 @@ delivery — `sent`, `failed`, `pending-messenger` (sending),
   restriction. The agent runs only while your PC and its window are
   up.
 
-## First-run Facebook sign-in
-
-With the already-signed-in Client Hunting profile (see above) no
-sign-in is needed at all.
-
-With the agent's own fresh profile (`agent/.chrome-profile/`), the
-first chat needs a Facebook sign-in — and a headless browser has no
-window to type in. So run the agent **once** with a visible window:
-
-```powershell
-$env:LEADHUNTER_HEADED=1
-.\run-agent.bat
-```
-
-Sign in to Facebook in the window that opens, once. The session is
-saved in `agent/.chrome-profile/` and reused for every later run —
-you do not sign in again unless Facebook logs you out. If a chat
-fails with "Facebook session is not signed in", sign in again the
-same way (visible window, `LEADHUNTER_HEADED=1`) and try again. The
-agent never asks for or stores your Facebook password.
-
-Stopping the agent (Ctrl+C in its window) shuts the browser down
-cleanly, so the next start never shows Chromium's "Restore pages?"
-popup.
-
-## Use an existing signed-in Chrome profile
-
-The agent's own fresh profile sometimes cannot finish Facebook's
-sign-in (the two-step verification page stays blank). Instead of
-signing in again, point the agent at a profile that is **already
-signed in** — the Client Hunting profile:
-
-1. **Close Client Hunting first** — one Chrome profile can only be
-   used by one browser at a time. If it is still running, the chat
-   fails with "Chrome profile is in use — close Client Hunting
-   first, then run the job again."
-2. Set the env var **before** starting the agent (in the same
-   PowerShell window, or via Windows env settings):
-   ```powershell
-   $env:LEADHUNTER_CHROME_PROFILE = "G:\Web Apps\client-hunting\data\profiles\Master"
-   ```
-3. Start the agent (`run-agent.bat`) — chats now need **no sign-in
-   at all**.
-4. To go back to the agent's own profile, unset the var
-   (`Remove-Item Env:LEADHUNTER_CHROME_PROFILE`) and restart the
-   agent.
-
 ## Endpoints
 
 - `GET /health` → `{"ok": true, "service": "leadhunter-agent",
@@ -149,12 +144,33 @@ signed in** — the Client Hunting profile:
   "in-app", "sentAt"}]}], "watching": true|false}`
 - `POST /chat/stop` → `{"watching": false}` — stops all chatting
   immediately and forgets the Gemini key and watch config.
+- `POST /agent/signin` `{"accountId"}` → `{"ok": true,
+  "accountId", "profile", "detail"}` — opens the visible sign-in
+  window for the account (see "First-run Facebook sign-in").
+- `GET /agent/status` `?accountId=` → `{"online", "profile",
+  "profileExists", "headed", "browser", "watching",
+  "watchedThreads", "chatStartBusy", "lastSessionCheck",
+  "sendsToday", "sendsTodayDate"}` — never launches a browser.
+- `POST /agent/session-check` `{"accountId"}` → `{"state", "at",
+  "detail"}` — re-checks the session on the Messenger page.
+- `POST /agent/browser-relaunch` `{"accountId"}` → `{"relaunched",
+  "browser", "profile", "headed"}` — restarts the browser only.
+- `POST /agent/reload` `{"accountId"}` → `{"reloaded", "state",
+  "at", "detail"}` — reloads the Messenger page, re-checks.
+- `POST /agent/unwatch` → `{"watching": false}` — stops watching
+  only. `GET /agent/logs` → `{"lines": [...]}` — last ~50 lines.
 
 ## Files
 
-- `main.py` — FastAPI app (lazy headless Playwright launch, clean
-  shutdown on stop, one job at a time; chat endpoints + watcher
-  loop; the old scraping endpoints are dormant)
+- `main.py` — FastAPI app (one job at a time; chat endpoints +
+  watcher loop; Agent Control endpoints; the old scraping
+  endpoints are dormant). Every browser call dispatches to
+  `browser.BROWSER` — nothing here touches Playwright directly.
+- `browser.py` — BrowserManager: ONE dedicated browser thread
+  (single-worker executor) owns all sync Playwright calls; one
+  persistent Chromium context per account under
+  `agent/profiles/<account>`; `open_for_signin` for the first-run
+  visible window. Ported from Client Hunting's `app/auth.py`.
 - `facebook.py` — FacebookWorker (session check, Messenger:
   `open_chat_with_profile`, `read_messenger_threads`,
   `read_thread_messages`, `send_thread_message` — ported from the
@@ -169,6 +185,9 @@ signed in** — the Client Hunting profile:
 - `tests/test_agent.py` — pytest suite (fake page, no network/browser)
 - `tests/test_chat.py` — chat pytest suite (fake chat page; covers
   thread matching, cap enforcement, stop, key never on disk)
+- `tests/test_browser.py` — browser-thread pytest suite (single
+  thread dispatch, profile dir, sign-in window, no other app's
+  profile anywhere in agent code)
 
 ## Tests
 

@@ -17,7 +17,7 @@ const STORAGE_KEY = "leadhunter:v2";
 
 const STATUS = {
   online: true,
-  profile: "G:\\Web Apps\\client-hunting\\data\\profiles\\Master",
+  profile: "G:\\Web Apps\\post-to-prospect-pipeline\\agent\\profiles\\acc-1",
   profileExists: true,
   headed: false,
   browser: "alive",
@@ -121,6 +121,14 @@ const agentUpFetch = (sessionState = "ok") =>
     if (String(url).endsWith("/agent/logs")) {
       return jsonResponse({ lines: ["2026-11-13T03:00:00Z session check: ok (url=https://www.facebook.com/messages, body_len=12345)"] });
     }
+    if (String(url).endsWith("/agent/signin")) {
+      return jsonResponse({
+        ok: true,
+        accountId: "acc-1",
+        profile: "G:\\Web Apps\\post-to-prospect-pipeline\\agent\\profiles\\acc-1",
+        detail: "Browser opened — sign in to Facebook yourself in that window, then press Relaunch browser.",
+      });
+    }
     if (String(url).endsWith("/agent/session-check")) {
       return jsonResponse({
         state: sessionState,
@@ -168,7 +176,7 @@ describe("Agent Control page", () => {
     await renderAt("/agent-control");
 
     expect(await screen.findByRole("heading", { name: "Agent Control" })).toBeInTheDocument();
-    expect(await screen.findByText(/G:\\Web Apps\\client-hunting\\data\\profiles\\Master/)).toBeInTheDocument();
+    expect(await screen.findByText(/G:\\Web Apps\\post-to-prospect-pipeline\\agent\\profiles\\acc-1/)).toBeInTheDocument();
     expect(await screen.findByText(/Headless \(silent\)/)).toBeInTheDocument();
     expect(await screen.findByText("Alive")).toBeInTheDocument();
     expect(await screen.findByText(/3 \/ 45/)).toBeInTheDocument();
@@ -260,6 +268,24 @@ describe("Agent Control page", () => {
     // The honest limits box is always visible, agent up or down.
     expect(await screen.findByText(/Jo UI se NAHI ho sakta/)).toBeInTheDocument();
     expect(await screen.findByText(/Us window mein Ctrl\+C dabayein/)).toBeInTheDocument();
-    expect(await screen.findByText(/sirf agent start karte waqt badalte hain/)).toBeInTheDocument();
+    expect(await screen.findByText(/Sign-in sirf ek baar/)).toBeInTheDocument();
+  });
+
+  it("opens the sign-in window and tells the user to sign in himself", async () => {
+    const fetchMock = agentUpFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    await renderAt("/agent-control");
+    fireEvent.click(await screen.findByRole("button", { name: /Sign in to Facebook/ }));
+
+    await waitFor(() => {
+      const signin = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/agent/signin"));
+      expect(signin).toBeDefined();
+      // The agent opens the window for the ACTIVE account — no
+      // password, no other app's profile.
+      const init = (signin as unknown as [string, RequestInit | undefined])[1];
+      expect(JSON.parse(String(init?.body ?? "{}"))).toEqual({ accountId: "acc-1" });
+    });
+    expect(await screen.findByText(/Chrome window khul gayi/)).toBeInTheDocument();
+    expect(await screen.findByText(/Relaunch browser dabayein/)).toBeInTheDocument();
   });
 });

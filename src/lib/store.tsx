@@ -20,6 +20,7 @@ import {
   agentLogs,
   agentReloadMessenger,
   agentSessionCheck,
+  agentSignin,
   agentStatus,
   agentUnwatch,
   chatForget,
@@ -130,6 +131,8 @@ interface StoreValue {
   relaunchAgentBrowser: () => Promise<ChatResult<{ relaunched: boolean; browser: string; profile: string; headed: boolean }>>;
   /** Load the Messenger page fresh and re-check the session. */
   reloadAgentMessenger: () => Promise<ChatResult<AgentReloadResult>>;
+  /** Open a visible Chrome window so the user signs in himself, once. */
+  signInAgent: () => Promise<ChatResult<{ ok: boolean; accountId: string; profile: string; detail: string }>>;
   /** Stop watching only — in-flight sends keep running. */
   unwatchAgent: () => Promise<ChatResult<{ watching: boolean }>>;
   /** Last ~50 agent log lines (newest last). */
@@ -461,11 +464,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           stateRef.current.activeAccountId,
         ),
       runAgentSessionCheck: () =>
-        agentSessionCheck(stateRef.current.settings.agentUrl),
+        agentSessionCheck(
+          stateRef.current.settings.agentUrl,
+          stateRef.current.activeAccountId,
+        ),
       relaunchAgentBrowser: () =>
-        agentBrowserRelaunch(stateRef.current.settings.agentUrl),
+        agentBrowserRelaunch(
+          stateRef.current.settings.agentUrl,
+          stateRef.current.activeAccountId,
+        ),
       reloadAgentMessenger: () =>
-        agentReloadMessenger(stateRef.current.settings.agentUrl),
+        agentReloadMessenger(
+          stateRef.current.settings.agentUrl,
+          stateRef.current.activeAccountId,
+        ),
+      signInAgent: () =>
+        agentSignin(
+          stateRef.current.settings.agentUrl,
+          stateRef.current.activeAccountId,
+        ),
       unwatchAgent: () => agentUnwatch(stateRef.current.settings.agentUrl),
       refreshAgentLogs: () => agentLogs(stateRef.current.settings.agentUrl),
     };

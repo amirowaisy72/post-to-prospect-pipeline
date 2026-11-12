@@ -145,7 +145,7 @@ class _FakeChatPage:
 
     def __init__(self, inbox_rows=None, requests_rows=None,
                  thread_messages=None, message_button_url=None,
-                 composer_present=True, session_ok=True):
+                 composer_present=True, session_ok=True, blank=False):
         self.url = "https://www.facebook.com/"
         self._inbox_rows = inbox_rows or []
         self._requests_rows = requests_rows or []
@@ -153,9 +153,13 @@ class _FakeChatPage:
         self._message_button_url = message_button_url
         self._composer_present = composer_present
         self._session_ok = session_ok
+        # blank=True: the page never rendered anything (live "session
+        # empty" shape) — empty body, no links, no selectors, but
+        # NOT a login page: no password field, title not login-ish.
+        self._blank = blank
         self.sent_texts = []
         self.keyboard = _FakeKeyboard(self)
-        self._body = "Facebook"
+        self._body = "" if blank else "Facebook"
 
     def _typed(self, text):
         self.sent_texts.append(text)
@@ -181,6 +185,8 @@ class _FakeChatPage:
         return False
 
     def query_selector_all(self, selector):
+        if self._blank:
+            return []
         if selector != "a[href]":
             return []
         rows = []
@@ -196,6 +202,8 @@ class _FakeChatPage:
         return out
 
     def locator(self, selector):
+        if self._blank:
+            return _FakeLocator(self, selector, 0)
         if selector == 'input[type="password"]':
             return _FakeLocator(self, selector, 0 if self._session_ok else 1)
         if selector in ('a[aria-label="Your profile"]',
@@ -445,7 +453,24 @@ def test_start_chat_logged_out_fails():
     result = chat.start_chat(_worker(), page, _start_payload(),
                              note=lambda m: None)
     assert result["ok"] is False
-    assert "logged_out" in result["detail"]
+    # Truthful message: asks to sign in from Agent Control — and it
+    # must NOT leak the raw state name "logged_out".
+    assert "sign in to Facebook" in result["detail"]
+    assert "logged_out" not in result["detail"]
+    assert page.sent_texts == []
+
+
+def test_start_chat_empty_does_not_say_sign_in():
+    # The live bug: an empty page was reported as "sign in to
+    # Facebook". A page that never loaded is not proof of logout —
+    # the message must say the page did not load, and never say
+    # "sign in".
+    page = _FakeChatPage(message_button_url=THREAD_URL, blank=True)
+    result = chat.start_chat(_worker(), page, _start_payload(),
+                             note=lambda m: None)
+    assert result["ok"] is False
+    assert "did not load" in result["detail"]
+    assert "sign in" not in result["detail"].lower()
     assert page.sent_texts == []
 
 
@@ -683,7 +708,7 @@ class TestChatEndpoints:
     def test_start_happy_path_sends_via_endpoint(self, monkeypatch):
         client, main = self._client()
         page = _FakeChatPage(message_button_url=THREAD_URL)
-        monkeypatch.setattr(main, "_fresh_page", lambda: page)
+        monkeypatch.setattr(main, "BROWSER", _FakeBrowserManager(page))
         r = client.post("/chat/start", json=self._start_body())
         assert r.status_code == 202
         assert r.json()["threadId"] == "thread-1"
@@ -702,7 +727,7 @@ class TestChatEndpoints:
     def test_start_records_send_stages_in_order(self, monkeypatch):
         client, main = self._client()
         page = _FakeChatPage(message_button_url=THREAD_URL)
-        monkeypatch.setattr(main, "_fresh_page", lambda: page)
+        monkeypatch.setattr(main, "BROWSER", _FakeBrowserManager(page))
         r = client.post("/chat/start", json=self._start_body())
         assert r.status_code == 202
         assert self._wait_start_done(main)
@@ -726,7 +751,7 @@ class TestChatEndpoints:
     def test_start_cap_failure_reports_failed_stage(self, monkeypatch):
         client, main = self._client()
         page = _FakeChatPage(message_button_url=THREAD_URL)
-        monkeypatch.setattr(main, "_fresh_page", lambda: page)
+        monkeypatch.setattr(main, "BROWSER", _FakeBrowserManager(page))
         r = client.post("/chat/start", json=self._start_body(dailyCap=0))
         assert r.status_code == 202
         assert self._wait_start_done(main)
@@ -760,11 +785,11 @@ class TestChatEndpoints:
 
     def test_watch_then_threads_then_stop(self, monkeypatch):
         client, main = self._client()
-        # The loop would launch a real browser via _get_page; keep the
+        # The loop would launch a real browser via BROWSER; keep the
         # pass a no-op — this test covers the endpoint wiring, the
         # pass itself is covered by the watch_once tests above.
-        monkeypatch.setattr(main, "_get_page",
-                            lambda: _FakeChatPage())
+        monkeypatch.setattr(main, "BROWSER",
+                            _FakeBrowserManager(_FakeChatPage()))
         monkeypatch.setattr(chat, "watch_once",
                             lambda *a, **k: {"ok": True, "checked": 0,
                                             "replied": 0, "skipped": 0,
@@ -930,6 +955,41 @@ class _FakeContext:
         self.browser = _FakeBrowser(connected)
 
 
+class _FakeBrowserManager:
+    """Stand-in for main.BROWSER: runs the fn on the given fake page
+    synchronously, in whatever thread calls it — exactly what the
+    real single-worker executor does, minus the thread hop. Records
+    sign-in windows so the /agent/signin test can see them."""
+
+    def __init__(self, page=None, relaunch_result=True,
+                 headed_result=False, run_error=None):
+        self._page = page
+        self.relaunch_result = relaunch_result
+        self.headed_result = headed_result
+        self.run_error = run_error
+        self.signin_calls = []
+
+    def run_with_page(self, account, headed, fn, fresh=False):
+        if self.run_error is not None:
+            raise self.run_error
+        return fn(self._page)
+
+    def browser_state(self, account):
+        return "alive" if self._page is not None else "not-started"
+
+    def headed(self, account):
+        return self.headed_result
+
+    def relaunch(self, account):
+        if self.run_error is not None:
+            raise self.run_error
+        return self.relaunch_result
+
+    def open_for_signin(self, account, login_url):
+        self.signin_calls.append((account, login_url))
+        return None
+
+
 # ----------------------------------------------------------------------
 # Agent Control endpoints (main.py): status, session check, relaunch,
 # reload, unwatch, logs — the UI the user fixes "session empty" from.
@@ -977,8 +1037,8 @@ class TestAgentControl:
 
     def test_session_check_ok_and_recorded_on_status(self, monkeypatch):
         client, main = self._client()
-        monkeypatch.setattr(main, "_get_page",
-                            lambda: _FakeChatPage(session_ok=True))
+        monkeypatch.setattr(main, "BROWSER",
+                            _FakeBrowserManager(_FakeChatPage(session_ok=True)))
         r = client.post("/agent/session-check")
         assert r.status_code == 200
         body = r.json()
@@ -997,7 +1057,7 @@ class TestAgentControl:
 
     def test_session_check_empty_names_the_dead_page(self, monkeypatch):
         client, main = self._client()
-        monkeypatch.setattr(main, "_get_page", lambda: _DeadPage())
+        monkeypatch.setattr(main, "BROWSER", _FakeBrowserManager(_DeadPage()))
         r = client.post("/agent/session-check")
         assert r.status_code == 200
         body = r.json()
@@ -1008,21 +1068,17 @@ class TestAgentControl:
 
     def test_session_check_launch_failure_is_502_not_a_crash(self, monkeypatch):
         client, main = self._client()
-
-        def _boom():
-            raise RuntimeError("browser launch failed")
-
-        monkeypatch.setattr(main, "_get_page", _boom)
+        monkeypatch.setattr(
+            main, "BROWSER",
+            _FakeBrowserManager(
+                run_error=RuntimeError("browser launch failed")))
         r = client.post("/agent/session-check")
         assert r.status_code == 502
         assert "browser launch failed" in r.json()["detail"]
 
     def test_browser_relaunch_returns_alive(self, monkeypatch):
         client, main = self._client()
-        page = _FakeChatPage(session_ok=True)
-        page.context = _FakeContext(connected=True)
-        monkeypatch.setattr(main, "_close_browser", lambda: None)
-        monkeypatch.setattr(main, "_get_page", lambda: page)
+        monkeypatch.setattr(main, "BROWSER", _FakeBrowserManager())
         r = client.post("/agent/browser-relaunch")
         assert r.status_code == 200
         body = r.json()
@@ -1031,10 +1087,25 @@ class TestAgentControl:
         assert isinstance(body["profile"], str) and body["profile"]
         assert body["headed"] is False
 
+    def test_signin_opens_visible_window(self, monkeypatch):
+        client, main = self._client()
+        manager = _FakeBrowserManager()
+        monkeypatch.setattr(main, "BROWSER", manager)
+        r = client.post("/agent/signin", json={"accountId": ACCOUNT_ID})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["accountId"] == ACCOUNT_ID
+        assert "profiles" in body["profile"]
+        # The window opens at the Facebook login page, for the same
+        # account — the user signs in himself; no password anywhere.
+        assert manager.signin_calls == [
+            (ACCOUNT_ID, "https://www.facebook.com/login")]
+
     def test_reload_rechecks_the_session(self, monkeypatch):
         client, main = self._client()
-        monkeypatch.setattr(main, "_get_page",
-                            lambda: _FakeChatPage(session_ok=True))
+        monkeypatch.setattr(main, "BROWSER",
+                            _FakeBrowserManager(_FakeChatPage(session_ok=True)))
         r = client.post("/agent/reload")
         assert r.status_code == 200
         body = r.json()

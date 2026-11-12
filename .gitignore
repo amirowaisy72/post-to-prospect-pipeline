@@ -34,3 +34,4 @@ dist-ssr
 # LeadHunter scraping agent (local-only: DB + persistent Chrome profile)
 agent/*.db
 agent/.chrome-profile/
+agent/profiles/

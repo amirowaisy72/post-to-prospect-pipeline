@@ -1173,10 +1173,16 @@ class TestSourceDb:
         assert db.delete_source("src1") is False
 
 # ---------------------------------------------------------------------------
-# (m) Configurable Chrome profile (LEADHUNTER_CHROME_PROFILE)
+# (m) Own Chrome profile + profile-in-use (browser.BROWSER)
 # ---------------------------------------------------------------------------
-# Imports kept local to this section: the profile tests stub the
-# Playwright import, so no real browser is ever launched.
+# The agent owns its own profile per account under
+# agent/profiles/<account> — no env var, no other app's profile.
+# These tests stub the Playwright import, so no real browser is ever
+# launched. What stays here: a locked profile must fail a job (and
+# the delete endpoint) with the plain PROFILE_IN_USE_MESSAGE, and
+# the launch state must reset so a later job retries. The manager
+# mechanics themselves (single-thread dispatch, profile dir,
+# sign-in window, dead-browser relaunch) live in test_browser.py.
 
 import time
 import types
@@ -1210,114 +1216,31 @@ def _install_fake_playwright(monkeypatch, launch_error=None):
     return chromium, handle
 
 
-def _reset_main_browser():
+def _reset_browser_manager():
+    """Drop every cached session/handle in main.BROWSER (test
+    isolation — the manager is a process singleton)."""
     try:
         import main
     except Exception:
         return
-    main._page = None
-    main._context = None
-    main._playwright = None
+    manager = main.BROWSER
+    manager._sessions.clear()
+    manager._playwright = None
 
 
-class TestChromeProfile:
+class TestProfileInUse:
     @pytest.fixture(autouse=True)
     def _reset_browser_state(self):
-        _reset_main_browser()
+        _reset_browser_manager()
         yield
-        _reset_main_browser()
-
-    def test_resolve_chrome_profile_variants(self, monkeypatch, tmp_path):
-        pytest.importorskip("fastapi")
-        import main
-
-        default = Path(main.__file__).resolve().parent / ".chrome-profile"
-        monkeypatch.delenv("LEADHUNTER_CHROME_PROFILE", raising=False)
-        assert main.resolve_chrome_profile() == default
-
-        # Whitespace-only means the default.
-        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", "   \n")
-        assert main.resolve_chrome_profile() == default
-
-        # Plain path, whitespace trimmed.
-        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE",
-                           f"  {tmp_path / 'prof'}  ")
-        assert main.resolve_chrome_profile() == tmp_path / "prof"
-
-        # ~ and env vars are expanded.
-        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", "~/my-profile")
-        resolved = main.resolve_chrome_profile()
-        assert str(resolved).endswith("my-profile")
-        assert not str(resolved).startswith("~")
-        monkeypatch.setenv("LEADHUNTER_HOME", "/tmp/lh-home")
-        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE",
-                           "$LEADHUNTER_HOME/prof")
-        assert main.resolve_chrome_profile() == Path("/tmp/lh-home/prof")
-
-    def test_env_var_profile_used_for_launch(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        monkeypatch.setenv(
-            "LEADHUNTER_CHROME_PROFILE",
-            "G:\\Web Apps\\client-hunting\\data\\profiles\\Master")
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        page = main._get_page()
-        assert page is not None
-        chromium.launch_persistent_context.assert_called_once()
-        kwargs = chromium.launch_persistent_context.call_args.kwargs
-        assert kwargs["user_data_dir"] == (
-            "G:\\Web Apps\\client-hunting\\data\\profiles\\Master")
-        # Headless is the default — a visible window needs
-        # LEADHUNTER_HEADED=1 (see TestHeadlessBrowser).
-        assert kwargs["headless"] is True
-        assert "--disable-blink-features=AutomationControlled" in kwargs["args"]
-        assert "--no-first-run" in kwargs["args"]
-        assert "--no-default-browser-check" in kwargs["args"]
-        assert kwargs["viewport"] == {"width": 1280, "height": 800}
-
-    def test_default_profile_used_when_env_unset(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        monkeypatch.delenv("LEADHUNTER_CHROME_PROFILE", raising=False)
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        main._get_page()
-        kwargs = chromium.launch_persistent_context.call_args.kwargs
-        expected = str(Path(main.__file__).resolve().parent / ".chrome-profile")
-        assert kwargs["user_data_dir"] == expected
-
-    def test_launch_prints_resolved_profile(self, monkeypatch, tmp_path,
-                                            capsys):
-        pytest.importorskip("fastapi")
-        import main
-
-        # Existing dir -> "exists: yes".
-        existing = tmp_path / "prof"
-        existing.mkdir()
-        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", str(existing))
-        _install_fake_playwright(monkeypatch)
-        main._get_page()
-        out = capsys.readouterr().out
-        assert f"[leadhunter] Chrome profile: {existing}" in out
-        assert "(exists: yes)" in out
-
-        # Missing dir -> "exists: no" (the launch still proceeds; the
-        # browser creates the dir on first real use).
-        _reset_main_browser()
-        missing = tmp_path / "nope"
-        monkeypatch.setenv("LEADHUNTER_CHROME_PROFILE", str(missing))
-        _install_fake_playwright(monkeypatch)
-        main._get_page()
-        out = capsys.readouterr().out
-        assert f"[leadhunter] Chrome profile: {missing}" in out
-        assert "(exists: no)" in out
+        _reset_browser_manager()
 
     def test_profile_in_use_fails_job_with_plain_message(self, monkeypatch):
         pytest.importorskip("fastapi")
         pytest.importorskip("httpx")
         from fastapi.testclient import TestClient
         import main
+        from browser import PROFILE_IN_USE_MESSAGE
 
         lock_error = Exception(
             "browserType.launchPersistentContext: Failed to launch: "
@@ -1339,10 +1262,9 @@ class TestChromeProfile:
                 break
             time.sleep(0.05)
         assert row is not None and row["status"] == "failed"
-        assert row["error"] == main.PROFILE_IN_USE_MESSAGE
-        # Launch state is reset, so a later job retries the launch.
-        assert main._page is None and main._playwright is None
-        assert main._context is None
+        assert row["error"] == PROFILE_IN_USE_MESSAGE
+        # No session was cached, so a later job retries the launch.
+        assert "acc1" not in main.BROWSER._sessions
         # ... and the agent itself is still up.
         health = client.get("/health")
         assert health.status_code == 200
@@ -1353,6 +1275,7 @@ class TestChromeProfile:
         pytest.importorskip("httpx")
         from fastapi.testclient import TestClient
         import main
+        from browser import PROFILE_IN_USE_MESSAGE
 
         db.upsert_source("src1", "Stocks To Watch", "group", GROUP_URL,
                          12000, "joined", "acc1")
@@ -1362,263 +1285,11 @@ class TestChromeProfile:
         client = TestClient(main.app)
         resp = client.post("/sources/src1/delete")
         assert resp.status_code == 500
-        assert resp.json()["detail"] == main.PROFILE_IN_USE_MESSAGE
+        assert resp.json()["detail"] == PROFILE_IN_USE_MESSAGE
         # The row was not touched.
         assert db.get_source_by_id("src1") is not None
         health = client.get("/health")
         assert health.status_code == 200
-
-
-# ---------------------------------------------------------------------------
-# (m-b) Headless by default (LEADHUNTER_HEADED escape hatch)
-# ---------------------------------------------------------------------------
-# The agent's browser runs headless — no window, silent, exactly like
-# client-hunting. LEADHUNTER_HEADED=1 forces a visible window for a
-# fresh Facebook sign-in. Closing the agent stops the browser cleanly
-# (FastAPI lifespan), so the next launch never shows Chromium's
-# "Restore pages?" popup.
-
-
-class TestHeadlessBrowser:
-    @pytest.fixture(autouse=True)
-    def _reset_browser_state(self):
-        _reset_main_browser()
-        yield
-        _reset_main_browser()
-
-    @pytest.mark.parametrize("value,expected", [
-        (None, False),
-        ("", False),
-        ("   ", False),
-        ("0", False),
-        ("false", False),
-        ("False", False),
-        ("no", False),
-        ("on", False),
-        ("1", True),
-        (" 1 ", True),
-        ("true", True),
-        ("TRUE", True),
-        ("True", True),
-        ("yes", True),
-        ("Yes", True),
-    ])
-    def test_headed_env_parsing(self, monkeypatch, value, expected):
-        pytest.importorskip("fastapi")
-        import main
-
-        if value is None:
-            monkeypatch.delenv("LEADHUNTER_HEADED", raising=False)
-        else:
-            monkeypatch.setenv("LEADHUNTER_HEADED", value)
-        assert main._headed_env() is expected
-
-    def test_headed_env_forces_visible_window(self, monkeypatch, capsys):
-        pytest.importorskip("fastapi")
-        import main
-
-        monkeypatch.setenv("LEADHUNTER_HEADED", "1")
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        main._get_page()
-        kwargs = chromium.launch_persistent_context.call_args.kwargs
-        assert kwargs["headless"] is False
-        out = capsys.readouterr().out
-        assert "[leadhunter] Browser: headed (visible window)" in out
-
-    def test_launch_is_headless_and_prints_mode(self, monkeypatch, capsys):
-        pytest.importorskip("fastapi")
-        import main
-
-        monkeypatch.delenv("LEADHUNTER_HEADED", raising=False)
-        _install_fake_playwright(monkeypatch)
-        main._get_page()
-        out = capsys.readouterr().out
-        assert "[leadhunter] Browser: headless" in out
-
-    def test_close_browser_closes_context_and_resets(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        chromium, handle = _install_fake_playwright(monkeypatch)
-        context = chromium.launch_persistent_context.return_value
-        main._get_page()
-        assert main._page is not None
-        assert main._context is context
-        assert main._playwright is handle
-        main._close_browser()
-        context.close.assert_called_once()
-        handle.stop.assert_called_once()
-        assert main._page is None
-        assert main._context is None
-        assert main._playwright is None
-        # Idempotent — a second close with nothing launched is a no-op.
-        main._close_browser()
-        context.close.assert_called_once()
-        handle.stop.assert_called_once()
-
-    def test_get_page_reuses_live_page(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        page = chromium.launch_persistent_context.return_value.pages[0]
-        page.is_closed.return_value = False
-        first = main._get_page()
-        second = main._get_page()
-        assert first is second is page
-        chromium.launch_persistent_context.assert_called_once()
-
-    def test_get_page_rebuilds_closed_page(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        context1 = chromium.launch_persistent_context.return_value
-        page1 = context1.pages[0]
-        page1.is_closed.return_value = False
-        assert main._get_page() is page1
-        # The page died — the next call must close the old browser
-        # and relaunch instead of reusing the dead page.
-        page1.is_closed.return_value = True
-        context2 = mock.MagicMock(name="context2")
-        page2 = mock.MagicMock(name="page2")
-        page2.is_closed.return_value = False
-        context2.pages = [page2]
-        chromium.launch_persistent_context.side_effect = [context2]
-        assert main._get_page() is page2
-        assert chromium.launch_persistent_context.call_count == 2
-        context1.close.assert_called_once()
-        assert main._context is context2
-
-    def test_lifespan_shutdown_closes_browser(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        pytest.importorskip("httpx")
-        from fastapi.testclient import TestClient
-        import main
-
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        context = chromium.launch_persistent_context.return_value
-        main._get_page()
-        assert main._page is not None
-        with TestClient(main.app) as client:
-            assert client.get("/health").status_code == 200
-        # Leaving the TestClient context runs the lifespan shutdown.
-        context.close.assert_called_once()
-        assert main._page is None
-        assert main._context is None
-        assert main._playwright is None
-
-
-# ---------------------------------------------------------------------------
-# (m-c) Dead browser connection: relaunch instead of reusing a corpse
-# ---------------------------------------------------------------------------
-# Live 2026-11-12: after the 1st Scrap the headless Chromium process
-# died — the 2nd press's diagnostic read body_len=-1 with every
-# selector "error", and goto failed with "Playwright connection
-# closed". page.is_closed() cannot spot this (it is local state),
-# so the agent kept reusing the dead page. The fix probes
-# browser.is_connected() and relaunches from the same profile.
-
-
-class TestDeadBrowserRelaunch:
-    @pytest.fixture(autouse=True)
-    def _reset_browser_state(self):
-        _reset_main_browser()
-        yield
-        _reset_main_browser()
-
-    def test_dead_connection_error_markers(self):
-        pytest.importorskip("fastapi")
-        import main
-
-        assert main._is_dead_connection_error(
-            Exception("Playwright connection closed"))
-        assert main._is_dead_connection_error(Exception("Target closed"))
-        assert main._is_dead_connection_error(
-            Exception("Browser has been closed"))
-        assert not main._is_dead_connection_error(
-            Exception("Timeout 30000ms exceeded"))
-        assert not main._is_dead_connection_error(
-            Exception("net::ERR_FAILED"))
-
-    def test_get_page_relaunches_dead_connection(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        context1 = chromium.launch_persistent_context.return_value
-        page1 = context1.pages[0]
-        page1.is_closed.return_value = False
-        page1.context.browser.is_connected.return_value = True
-        assert main._get_page() is page1
-        # The browser process died after the 1st job, although the
-        # page itself was never closed — the next call must close
-        # the old browser and relaunch instead of reusing it.
-        page1.context.browser.is_connected.return_value = False
-        context2 = mock.MagicMock(name="context2")
-        page2 = mock.MagicMock(name="page2")
-        page2.is_closed.return_value = False
-        page2.context.browser.is_connected.return_value = True
-        context2.pages = [page2]
-        chromium.launch_persistent_context.side_effect = [context2]
-        assert main._get_page() is page2
-        assert chromium.launch_persistent_context.call_count == 2
-        context1.close.assert_called_once()
-        assert main._context is context2
-
-    def test_get_page_reuses_live_connection(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        page = chromium.launch_persistent_context.return_value.pages[0]
-        page.is_closed.return_value = False
-        page.context.browser.is_connected.return_value = True
-        first = main._get_page()
-        second = main._get_page()
-        assert first is second is page
-        chromium.launch_persistent_context.assert_called_once()
-
-    def test_fresh_page_relaunches_on_closed_connection(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        context1 = chromium.launch_persistent_context.return_value
-        page1 = context1.pages[0]
-        page1.is_closed.return_value = False
-        page1.context.browser.is_connected.return_value = True
-        assert main._get_page() is page1
-        # The browser dies between _get_page() and new_page().
-        context1.new_page.side_effect = Exception(
-            "Playwright connection closed")
-        context2 = mock.MagicMock(name="context2")
-        page2 = mock.MagicMock(name="page2")
-        page2.is_closed.return_value = False
-        page2.context.browser.is_connected.return_value = True
-        context2.pages = [page2]
-        chromium.launch_persistent_context.side_effect = [context2]
-        fresh = main._fresh_page()
-        assert fresh is page2
-        assert fresh is not page1
-        assert chromium.launch_persistent_context.call_count == 2
-        assert main._context is context2
-
-    def test_fresh_page_keeps_old_fallback_for_other_errors(self, monkeypatch):
-        pytest.importorskip("fastapi")
-        import main
-
-        chromium, _handle = _install_fake_playwright(monkeypatch)
-        context1 = chromium.launch_persistent_context.return_value
-        page1 = context1.pages[0]
-        page1.is_closed.return_value = False
-        page1.context.browser.is_connected.return_value = True
-        assert main._get_page() is page1
-        # A non-connection failure opening a tab keeps the old
-        # behaviour: fall back to the existing page, no relaunch.
-        context1.new_page.side_effect = Exception("Timeout 30000ms exceeded")
-        assert main._fresh_page() is page1
-        chromium.launch_persistent_context.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

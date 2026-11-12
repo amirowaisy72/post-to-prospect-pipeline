@@ -4,6 +4,7 @@ import {
   Bot,
   Eye,
   EyeOff,
+  LogIn,
   Play,
   RefreshCw,
   RotateCcw,
@@ -51,7 +52,7 @@ function sessionVerdict(state: AgentSessionState): { title: string; hint: string
     case "logged_out":
       return {
         title: "Logged out",
-        hint: "Apne Chrome profile se Facebook mein khud sign in karein, phir Re-check session dabayein.",
+        hint: "Sign in to Facebook dabayein (upar Controls mein) — Chrome window khulegi, khud sign in karein, phir Relaunch browser dabayein.",
       };
     case "checkpoint":
       return {
@@ -96,6 +97,7 @@ function AgentControl() {
     runAgentSessionCheck,
     relaunchAgentBrowser,
     reloadAgentMessenger,
+    signInAgent,
     unwatchAgent,
     refreshAgentLogs,
     refreshChatLive,
@@ -160,6 +162,19 @@ function AgentControl() {
       setBusy(null);
     }
   };
+
+  const onSignin = () =>
+    run("signin", async () => {
+      const r = await signInAgent();
+      if (r.ok) {
+        setActionNote(
+          "Chrome window khul gayi — Facebook mein khud sign in karein, phir Relaunch browser dabayein.",
+        );
+        await refreshAll();
+      } else {
+        setActionNote(`Sign-in window nahi khuli: ${r.error}`);
+      }
+    });
 
   const onSessionCheck = () =>
     run("check", async () => {
@@ -344,6 +359,9 @@ function AgentControl() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap gap-2">
+            <Button onClick={onSignin} disabled={busy !== null}>
+              <LogIn /> {busy === "signin" ? "Opening…" : "Sign in to Facebook"}
+            </Button>
             <Button onClick={onSessionCheck} disabled={busy !== null}>
               <RefreshCw /> {busy === "check" ? "Checking…" : "Re-check session"}
             </Button>
@@ -381,8 +399,9 @@ function AgentControl() {
                 (run-agent.bat). Us window mein Ctrl+C dabayein, phir run-agent.bat dobara chalayein.
               </li>
               <li>
-                Chrome profile aur headless/headed sirf agent start karte waqt badalte hain
-                (LEADHUNTER_CHROME_PROFILE / LEADHUNTER_HEADED) — chalte hue agent par nahi.
+                Sign-in sirf ek baar: "Sign in to Facebook" dabayein — Chrome window khulegi,
+                khud sign in karein. Session agent ki apni profile (agent\profiles) mein save
+                hoti hai; koi doosri app ki profile use nahi hoti.
               </li>
             </ul>
           </div>
@@ -456,8 +475,7 @@ function AgentControl() {
       </Card>
 
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Play className="size-4" /> Agent start karne ke liye: agent window mein run-agent.bat chalayein
-        (LEADHUNTER_CHROME_PROFILE ke saath).
+        <Play className="size-4" /> Agent start karne ke liye: agent window mein run-agent.bat chalayein.
         <Square className="ml-4 size-4" /> Band karne ke liye usi window mein Ctrl+C.
       </div>
     </div>

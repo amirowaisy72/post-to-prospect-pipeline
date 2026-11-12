@@ -42,11 +42,13 @@ import db
 
 __all__ = [
     "daily_cap_for_age_days",
+    "session_message",
     "draft_reply",
     "split_messages",
     "set_watch",
     "clear_watch",
     "is_watching",
+    "watch_account_id",
     "request_stop",
     "stop_requested",
     "watch_once",
@@ -79,6 +81,28 @@ def count_sent_today(account_id: str) -> int:
     """Agent messages marked sent today (UTC) for this account."""
     today = datetime.now(timezone.utc).date().isoformat()
     return db.count_agent_sent_on(account_id, today)
+
+
+def session_message(state: str) -> str:
+    """Plain, TRUE one-liner for a broken session state (mirrors
+    jobs._SESSION_ERRORS). "empty" is a page-load failure, never
+    proof the session is dead — so it never says "sign in". Only
+    "logged_out" asks the user to sign in again."""
+    if state == "logged_out":
+        return ("Facebook session is not signed in — please sign in to "
+                "Facebook from Agent Control (Sign in button). The agent "
+                "never asks for or stores your Facebook password.")
+    if state == "checkpoint":
+        return ("Facebook is asking for a checkpoint / identity check "
+                "(state: checkpoint) — please complete the check in a "
+                "browser, then try again.")
+    if state == "blocked":
+        return ("Facebook blocked the agent browser (state: blocked) — "
+                "please open Facebook in a browser and check for a "
+                "warning, then try again.")
+    return ("Facebook page did not load (state: empty) — the browser "
+            "may still be signed in; relaunch the browser from Agent "
+            "Control and try again.")
 
 
 # ----------------------------------------------------------------------
@@ -258,6 +282,12 @@ def clear_watch() -> None:
 def is_watching() -> bool:
     with _WATCH_LOCK:
         return bool(_WATCH.get("active"))
+
+
+def watch_account_id() -> str:
+    """Account id of the current watch list ("" when not watching)."""
+    with _WATCH_LOCK:
+        return _WATCH.get("account_id") or ""
 
 
 def watched_count() -> int:
@@ -444,7 +474,7 @@ def watch_once(worker, page, note=None) -> dict:
         summary["errors"].append(f"session check failed: {exc}")
         return summary
     if state != "ok":
-        summary["errors"].append(f"session {state} — not signed in")
+        summary["errors"].append(session_message(state))
         return summary
     summary["ok"] = True
 
@@ -635,8 +665,7 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
                            last_error=result["detail"])
         return result
     if state != "ok":
-        result["detail"] = (f"Facebook session {state} — sign in to "
-                            "Facebook in the agent Chrome window")
+        result["detail"] = session_message(state)
         set_send_stage(message_id, "failed", result["detail"])
         _record_failed_first_message()
         db.set_chat_thread(thread_id, status="failed",

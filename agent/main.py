@@ -2,16 +2,22 @@
 
 Local-only tool: bind to 127.0.0.1 (see run-agent.bat). The frontend
 calls it from the user's PC, where the agent drives the user's own
-logged-in Chrome/Facebook session via a persistent Playwright profile
-(``agent/.chrome-profile`` by default, or the dir named by the
-``LEADHUNTER_CHROME_PROFILE`` env var — e.g. the already-signed-in
-Client Hunting profile, so no Facebook sign-in is needed). The
-browser runs headless by default — no window appears, the work is
-silent, exactly like Client Hunting; set ``LEADHUNTER_HEADED=1``
-for the rare case a fresh Facebook sign-in is needed in a visible
-window. The user signs in to Facebook once (unless the profile is
-already signed in — see ``LEADHUNTER_CHROME_PROFILE``); the agent
-NEVER asks for or stores a password.
+logged-in Chrome/Facebook session via a persistent Playwright
+profile the agent OWNS (``agent/profiles/<account>`` — see
+``browser.py``). The browser runs headless by default — no window
+appears, the work is silent, exactly like Client Hunting. First
+run: open Agent Control → "Sign in to Facebook" and sign in
+yourself once in the visible window; the session stays saved in
+the profile afterwards and the agent never asks for or stores a
+password. No other app's Chrome profile is ever used.
+
+Browser threading (the fix for the live "Cannot switch to a
+different thread" / "Sync API inside the asyncio loop" errors):
+ALL Playwright calls run on ONE dedicated browser thread owned by
+``browser.BROWSER``. FastAPI endpoints, the watcher loop and job
+threads only ever dispatch work to it via ``run_with_page`` — no
+sync Playwright call is made from the asyncio loop or any other
+thread, ever.
 
 Two jobs live here now: the old scraping endpoints (dormant — the
 app no longer calls them) and the Inbox live-chat agent
@@ -22,12 +28,13 @@ the safety rails (approval gate, daily cap, stop).
 
 One running job at a time globally — a second start returns 409.
 The browser is launched lazily on the first job (Playwright is
-imported INSIDE the launcher, never at module top) and the same page
-is reused across jobs.
+imported INSIDE the browser manager, never at module top) and the
+same page is reused across jobs.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import time
@@ -40,6 +47,7 @@ from urllib.parse import urlparse
 import chat
 import db
 import jobs
+from browser import BROWSER, profile_dir
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -58,12 +66,13 @@ async def _lifespan(_app: FastAPI):
     """Close the browser cleanly when the agent stops.
 
     Uvicorn runs this on SIGINT/SIGTERM (Ctrl+C in run-agent.bat)
-    and on normal shutdown: the Playwright context is closed and
-    the driver stopped, so the next launch never shows Chromium's
-    "Restore pages?" popup and no zombie Chromium holds the profile.
+    and on normal shutdown: the browser manager closes every
+    context and stops Playwright, so the next launch never shows
+    Chromium's "Restore pages?" popup and no zombie Chromium holds
+    the profile.
     """
     yield
-    _close_browser()
+    BROWSER.shutdown()
 
 
 app = FastAPI(title="leadhunter-agent", version=VERSION, lifespan=_lifespan)
@@ -108,227 +117,28 @@ def agent_log(message: str) -> None:
 
 
 # ----------------------------------------------------------------------
-# Browser (lazy — Playwright imported inside the function only)
+# Browser — owned by browser.BROWSER (see browser.py)
 # ----------------------------------------------------------------------
-PROFILE_IN_USE_MESSAGE = (
-    "Chrome profile is in use — close Client Hunting first, "
-    "then run the job again."
-)
+# ALL Playwright calls run on ONE dedicated browser thread owned by
+# BROWSER (the Client Hunting pattern). Nothing in this file ever
+# touches Playwright directly: job threads, the watcher loop and the
+# endpoints dispatch work through BROWSER.run_with_page, and async
+# endpoints use asyncio.to_thread so the asyncio loop never runs a
+# sync Playwright call itself. That is the fix for the live
+# "Cannot switch to a different thread" (greenlet) and "Sync API
+# inside the asyncio loop" errors.
+FACEBOOK_LOGIN_URL = "https://www.facebook.com/login"
 
 
-class ProfileInUseError(RuntimeError):
-    """The chosen Chrome profile is locked by another running browser."""
-
-
-def resolve_chrome_profile() -> Path:
-    """Resolve the persistent Chrome profile dir for the agent.
-
-    ``LEADHUNTER_CHROME_PROFILE`` (an absolute path) overrides the
-    default ``agent/.chrome-profile`` — point it at an already-signed-in
-    profile (e.g. the Client Hunting profile) so no Facebook sign-in
-    is needed. Unset, empty, or whitespace-only means the default.
-    ``~`` and env vars in the value are expanded; Windows backslash
-    paths are accepted as-is.
-    """
-    raw = os.environ.get("LEADHUNTER_CHROME_PROFILE") or ""
-    raw = raw.strip()
-    if not raw:
-        return _AGENT_DIR / ".chrome-profile"
-    expanded = os.path.expandvars(os.path.expanduser(raw))
-    return Path(expanded)
-
-
-def _is_profile_in_use_error(exc: BaseException) -> bool:
-    """True when a launch failure is Chromium's profile lock.
-
-    A locked user-data-dir surfaces as "already in use" /
-    "SingletonLock" / "profile ... in use" in Playwright's error text.
-    """
-    msg = str(exc).lower()
-    return ("already in use" in msg or "singleton" in msg
-            or ("profile" in msg and "in use" in msg))
-
-
-def _headed_env() -> bool:
-    """True when LEADHUNTER_HEADED requests a visible browser window.
-
-    Headless is the default (silent, like client-hunting). Set
-    ``LEADHUNTER_HEADED=1`` (1/true/yes, case-insensitive) for the
-    rare case a fresh Facebook sign-in is needed in a visible window.
-    """
-    return (os.environ.get("LEADHUNTER_HEADED") or "").strip().lower() in (
-        "1", "true", "yes")
-
-
-_DEAD_CONNECTION_MARKERS = (
-    "closed",
-    "connection closed",
-    "browser closed",
-    "target closed",
-)
-
-
-def _is_dead_connection_error(exc: BaseException) -> bool:
-    """True when an exception means the browser connection is dead.
-
-    Playwright reports a dead browser as "Playwright connection
-    closed" (and variants: browser closed, target closed). Any such
-    error means the cached page/context is a corpse: it must be
-    relaunched, never reused.
-    """
-    msg = str(exc).lower()
-    return any(marker in msg for marker in _DEAD_CONNECTION_MARKERS)
-
-
-def _browser_is_alive(page) -> bool:
-    """True when the cached page's browser connection is still live.
-
-    ``page.is_closed()`` alone cannot tell: it is local state, so
-    a page whose Chromium process died still reports "not closed"
-    — and every real call then throws "Playwright connection
-    closed" (the live second-press failure: body_len=-1, every
-    selector read "error"). ``browser.is_connected()`` is a local
-    check of the connection itself, so it spots a dead browser
-    instantly with no roundtrip. Any failure of the probe counts
-    as dead — a page we cannot even probe is not worth reusing;
-    relaunching from the profile dir is safe (the session lives
-    there) and cheap compared with reusing a corpse.
-    """
-    try:
-        if page.is_closed():
-            return False
-    except Exception:
-        return False
-    try:
-        browser = page.context.browser
-        return browser is not None and bool(browser.is_connected())
-    except Exception:
-        return False
-
-
-def _close_browser():
-    """Close the Playwright browser/context cleanly, if launched.
-
-    Called on app shutdown (see ``_lifespan``) and when a dead page
-    is rebuilt, so the next launch never shows Chromium's
-    "Restore pages?" popup and no zombie Chromium holds the profile.
-    Never raises.
-    """
-    global _page, _context, _playwright
-    for obj in (_page, _context):
-        try:
-            if obj is not None:
-                obj.close()
-        except Exception:
-            pass
-    _page = None
-    _context = None
-    if _playwright is not None:
-        try:
-            _playwright.stop()
-        except Exception:
-            pass
-        _playwright = None
-
-
-def _get_page():
-    """Launch (once) the persistent Chrome profile and return its page.
-
-    Headless by default — no browser window appears, the work is
-    silent, exactly like Client Hunting (``LEADHUNTER_HEADED=1``
-    forces a visible window for a fresh sign-in). The session
-    persists in the profile dir (see :func:`resolve_chrome_profile`).
-    The same page is reused across jobs; a page that died (browser
-    crashed or closed) is rebuilt on the next call. A dead browser
-    connection is detected first — ``page.is_closed()`` cannot tell,
-    so the cached page is probed with ``browser.is_connected()``;
-    when the connection is dead the browser is relaunched from the
-    same profile (the signed-in session lives in the profile dir),
-    never silently reused. When the profile is locked by another
-    browser the launch raises :class:`ProfileInUseError` with a
-    plain message instead of crashing — the agent stays up and a
-    later job retries the launch.
-    """
-    global _page, _context, _playwright
-    if _page is not None:
-        if _browser_is_alive(_page):
-            return _page
-        # Page closed, or its browser process died (connection
-        # closed) — drop everything and relaunch below.
-        agent_log("Browser page is dead — relaunching")
-        _close_browser()
-    from playwright.sync_api import sync_playwright
-
-    _playwright = sync_playwright().start()
-    profile = resolve_chrome_profile()
-    headed = _headed_env()
-    agent_log(f"Browser: {'headed (visible window)' if headed else 'headless'}")
-    agent_log(f"Chrome profile: {profile} "
-              f"(exists: {'yes' if profile.exists() else 'no'})")
-    try:
-        _context = _playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile),
-            headless=not headed,
-            viewport={"width": 1280, "height": 800},
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        )
-    except Exception as exc:
-        _playwright.stop()
-        _playwright = None
-        _context = None
-        if _is_profile_in_use_error(exc):
-            raise ProfileInUseError(PROFILE_IN_USE_MESSAGE) from exc
-        raise
-    _page = _context.pages[0] if _context.pages else _context.new_page()
-    return _page
-
-
-# ----------------------------------------------------------------------
-# Job plumbing
-# ----------------------------------------------------------------------
-def _fresh_page():
-    """Return a brand-new tab for the next job.
-
-    A tab that just scrolled a huge Facebook feed is often hung or
-    half-dead; reusing it made the 2nd Scrap fail with "page did
-    not load (state: empty)". Every job therefore starts on a clean
-    tab (the same state as the very first job after start). The
-    session/cookies live in the profile, so nothing is lost.
-
-    If opening the new tab fails because the browser connection
-    died ("Playwright connection closed"), the browser is
-    relaunched from the same profile and the fresh tab comes from
-    the new browser — the dead page is NEVER silently returned.
-    Any other new-tab failure still falls back to the existing
-    page. A relaunch failure surfaces (ProfileInUseError / launch
-    error) instead of a silent dead page.
-    """
-    global _page
-    page = _get_page()
-    context = _context
-    if context is None:
-        return page
-    try:
-        new_page = context.new_page()
-    except Exception as exc:
-        if not _is_dead_connection_error(exc):
-            return page
-        # The browser connection died after the job's page was
-        # made: drop everything and relaunch from the same profile,
-        # then take the fresh tab from the new browser.
-        agent_log("Browser connection died while opening a new tab — relaunching")
-        _close_browser()
-        return _get_page()
-    try:
-        page.close()
-    except Exception:
-        pass
-    _page = new_page
-    return new_page
+def _browser_account(account_id: str = "") -> str:
+    """Account key for the agent's own browser profile: the explicit
+    id, else the watching account, else "default". One profile per
+    account, under agent/profiles/ — never another app's profile."""
+    account_id = (account_id or "").strip()
+    if account_id:
+        return account_id
+    watching = chat.watch_account_id()
+    return watching or "default"
 
 
 def _job_view(row: dict) -> dict:
@@ -395,22 +205,33 @@ def _post_view(post: dict) -> dict:
 
 
 def _run_job_thread(job_id, kind, payload):
-    """Background thread for one job; clears the running slot at the end."""
+    """Background thread for one job; clears the running slot at the end.
+
+    The whole job runs on the browser thread (BROWSER.run_with_page,
+    fresh tab) — this thread never touches Playwright itself.
+    """
     global _running_job_id
     try:
-        page = _fresh_page()
-        worker = FacebookWorker()
         job = db.get_job(job_id) or {}
-        job.update(payload)
-        should_stop = lambda: _stop_flags.get(job_id, False)  # noqa: E731
-        note = agent_log
-        if kind == "scrape":
-            jobs.run_scrape(worker, page, db, job, should_stop, note=note)
-        elif kind == "collect":
-            jobs.run_collect_sources(worker, page, db, job, should_stop,
-                                     note=note)
-        else:
-            jobs.run_sync(worker, page, db, job, should_stop, note=note)
+        account_id = _browser_account(job.get("account_id") or "")
+
+        def _run(page):
+            worker = FacebookWorker()
+            job_row = db.get_job(job_id) or {}
+            job_row.update(payload)
+            should_stop = lambda: _stop_flags.get(job_id, False)  # noqa: E731
+            note = agent_log
+            if kind == "scrape":
+                jobs.run_scrape(worker, page, db, job_row, should_stop,
+                                note=note)
+            elif kind == "collect":
+                jobs.run_collect_sources(worker, page, db, job_row,
+                                         should_stop, note=note)
+            else:
+                jobs.run_sync(worker, page, db, job_row, should_stop,
+                              note=note)
+
+        BROWSER.run_with_page(account_id, False, _run, fresh=True)
     except Exception as exc:  # noqa: BLE001 - job failure, not a crash
         try:
             from datetime import datetime, timezone
@@ -463,7 +284,6 @@ def _valid_facebook_url(url) -> bool:
 # ----------------------------------------------------------------------
 # Inbox live chat (see chat.py for the rails)
 # ----------------------------------------------------------------------
-_chat_browser_lock = threading.Lock()
 _chat_start_busy = False
 _chat_start_thread_id = ""
 _watch_thread = None
@@ -471,19 +291,24 @@ _watch_thread = None
 
 def _chat_watch_loop():
     """Background loop: one watch pass every WATCH_POLL_SECONDS
-    while watching. The browser lock serialises it against chat
-    starts; a dead browser is relaunched by _get_page(). The loop
-    exits when watching stops — chat.request_stop() clears the
-    watch and sets the flag, so one stop ends everything."""
+    while watching. Each pass runs on the browser thread
+    (BROWSER.run_with_page) — the loop thread never touches
+    Playwright itself; the single-worker executor serialises passes
+    against chat starts. A dead browser is relaunched by the
+    browser manager. The loop exits when watching stops —
+    chat.request_stop() clears the watch and sets the flag, so one
+    stop ends everything."""
     while True:
         if not chat.is_watching() or chat.stop_requested():
             return
         try:
-            with _chat_browser_lock:
-                page = _get_page()
+            account = _browser_account(chat.watch_account_id())
+
+            def _pass(page):
                 worker = FacebookWorker()
-                note = agent_log
-                chat.watch_once(worker, page, note=note)
+                chat.watch_once(worker, page, note=agent_log)
+
+            BROWSER.run_with_page(account, False, _pass)
         except Exception as exc:  # noqa: BLE001 - pass failed, loop retries
             agent_log(f"chat watch pass failed: {exc}")
         for _ in range(chat.WATCH_POLL_SECONDS):
@@ -505,19 +330,22 @@ def _run_chat_start(payload):
 
     Records the send's stage trail (chat.set_send_stage) so the app
     can show where a send sits instead of one frozen "Sending…":
-    "queued" while it waits for the browser lock, "opening browser"
-    while the page is (re)launched, then chat.start_chat takes over.
+    "queued" while it waits for the browser thread, "opening browser"
+    while the page is (re)launched, then chat.start_chat takes over
+    — all on the browser thread.
     """
     global _chat_start_busy, _chat_start_thread_id
     message_id = payload.get("messageId") or ""
     chat.set_send_stage(message_id, "queued")
     try:
-        with _chat_browser_lock:
-            chat.set_send_stage(message_id, "opening browser")
-            page = _fresh_page()
+        chat.set_send_stage(message_id, "opening browser")
+        account = _browser_account(payload.get("accountId") or "")
+
+        def _start(page):
             worker = FacebookWorker()
-            note = agent_log
-            chat.start_chat(worker, page, payload, note=note)
+            chat.start_chat(worker, page, payload, note=agent_log)
+
+        BROWSER.run_with_page(account, False, _start, fresh=True)
     except Exception as exc:  # noqa: BLE001 - start failure, not a crash
         chat.set_send_stage(message_id, "failed", str(exc))
         try:
@@ -647,9 +475,16 @@ async def delete_source_endpoint(source_id: str):
                 status_code=409,
                 content={"detail": "another job is already running"})
     try:
-        page = _get_page()
-        worker = FacebookWorker()
-        result = jobs.delete_source(worker, page, db, source_id)
+        account = _browser_account(source.get("account_id") or "")
+
+        def _delete(page):
+            worker = FacebookWorker()
+            return jobs.delete_source(worker, page, db, source_id)
+
+        # Async endpoint: the browser work runs off the event loop
+        # (asyncio.to_thread) on the single browser thread.
+        result = await asyncio.to_thread(
+            BROWSER.run_with_page, account, False, _delete)
     except Exception as exc:  # noqa: BLE001 - report, do not crash
         return JSONResponse(status_code=500, content={"detail": str(exc)})
     if not result.get("ok"):
@@ -942,13 +777,10 @@ async def chat_forget_endpoint(request: Request):
 # ----------------------------------------------------------------------
 # Agent Control page (see src/routes/agent-control.tsx)
 # ----------------------------------------------------------------------
-def _browser_state() -> str:
-    """"alive" | "dead" | "not-started" for the cached browser page."""
-    if _page is None:
-        return "not-started"
-    return "alive" if _browser_is_alive(_page) else "dead"
-
-
+# Every browser call here dispatches to BROWSER.run_with_page via
+# asyncio.to_thread — the async endpoints never run a sync Playwright
+# call on the event loop themselves (that was the live "Sync API
+# inside the asyncio loop" error on Re-check session).
 def _record_session_check(state: str, detail: dict) -> dict:
     """Record the last session check for GET /agent/status."""
     global _LAST_SESSION_CHECK
@@ -957,18 +789,15 @@ def _record_session_check(state: str, detail: dict) -> dict:
     return _LAST_SESSION_CHECK
 
 
-def _check_session(page, worker) -> tuple[str, dict]:
-    """Run the Messenger session check on a page and record it:
-    verify_session (current page first, then the Messenger page,
-    with the about:blank recovery) + the structured diagnostic.
-    Returns (state, record)."""
-    state = worker.verify_session(page, {"note": agent_log},
-                                  target_url=_MESSAGES_URL)
-    detail = worker.session_diagnostic(page)
-    record = _record_session_check(state, detail)
-    agent_log(f"session check: {state} "
-              f"(url={detail['url']}, body_len={detail['body_len']})")
-    return state, record
+async def _read_body_account(request: Request) -> str:
+    """Optional accountId from a POST body ("" when absent)."""
+    try:
+        body = await request.json() if request.headers.get("content-length") else {}
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return ""
+    return (body.get("accountId") or "").strip()
 
 
 @app.get("/agent/status")
@@ -977,90 +806,121 @@ def agent_status_endpoint(accountId: str = ""):
     headed, browser state, watching + watched threads, last session
     check, sends today for the account. Never launches a browser —
     the browser field only reports the cached page."""
-    account_id = (accountId or "").strip()
+    account_id = _browser_account(accountId)
     today = datetime.now(timezone.utc).date().isoformat()
-    profile = resolve_chrome_profile()
+    profile = profile_dir(account_id)
     return {
         "online": True,
         "profile": str(profile),
         "profileExists": profile.exists(),
-        "headed": _headed_env(),
-        "browser": _browser_state(),
+        "headed": BROWSER.headed(account_id),
+        "browser": BROWSER.browser_state(account_id),
         "watching": chat.is_watching(),
         "watchedThreads": chat.watched_count(),
         "chatStartBusy": _chat_start_busy,
         "lastSessionCheck": _LAST_SESSION_CHECK or None,
-        "sendsToday": chat.count_sent_today(account_id) if account_id else 0,
+        "sendsToday": chat.count_sent_today(account_id),
         "sendsTodayDate": today,
     }
 
 
 @app.post("/agent/session-check")
-def agent_session_check_endpoint():
+async def agent_session_check_endpoint(request: Request):
     """Re-check the Facebook session on the Messenger page — the
-    same check a send runs. A dead browser is relaunched first
-    (_get_page); the result names the state + the structured detail,
-    so the page can say plainly what to do next ("Session OK" or
+    same check a send runs. A dead browser is relaunched first;
+    the result names the state + the structured detail, so the
+    page can say plainly what to do next ("Session OK" or
     "Abhi bhi empty — browser restart karein")."""
-    with _chat_browser_lock:
-        try:
-            page = _get_page()
-        except Exception as exc:  # noqa: BLE001 - launch failure, plain message
-            return JSONResponse(status_code=502,
-                                content={"detail": str(exc)})
+    account = _browser_account(await _read_body_account(request))
+
+    def _check(page):
         worker = FacebookWorker()
-        try:
-            state, record = _check_session(page, worker)
-        except Exception as exc:  # noqa: BLE001 - check failure, not a crash
-            return JSONResponse(
-                status_code=502,
-                content={"detail": f"session check failed: {exc}"})
-        return {"state": state, "at": record["at"],
-                "detail": record["detail"]}
+        state = worker.verify_session(page, {"note": agent_log},
+                                      target_url=_MESSAGES_URL)
+        detail = worker.session_diagnostic(page)
+        record = _record_session_check(state, detail)
+        agent_log(f"session check: {state} "
+                  f"(url={detail['url']}, body_len={detail['body_len']})")
+        return {"state": state, "at": record["at"], "detail": detail}
+
+    try:
+        return await asyncio.to_thread(
+            BROWSER.run_with_page, account, False, _check)
+    except Exception as exc:  # noqa: BLE001 - check failure, not a crash
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"session check failed: {exc}"})
 
 
 @app.post("/agent/browser-relaunch")
-def agent_browser_relaunch_endpoint():
+async def agent_browser_relaunch_endpoint(request: Request):
     """Close the Chromium browser and launch it fresh from the same
     profile (the signed-in session lives in the profile dir). This
     restarts the BROWSER only — the agent process itself keeps
     running; restarting that needs the run-agent.bat window."""
-    with _chat_browser_lock:
-        _close_browser()
-        try:
-            page = _get_page()
-        except Exception as exc:  # noqa: BLE001 - launch failure, plain message
-            return JSONResponse(status_code=502,
-                                content={"detail": str(exc)})
-        alive = _browser_is_alive(page)
-        agent_log(f"browser relaunched (alive: {'yes' if alive else 'no'})")
-        return {"relaunched": True,
-                "browser": "alive" if alive else "dead",
-                "profile": str(resolve_chrome_profile()),
-                "headed": _headed_env()}
+    account = _browser_account(await _read_body_account(request))
+    try:
+        alive = await asyncio.to_thread(BROWSER.relaunch, account)
+    except Exception as exc:  # noqa: BLE001 - launch failure, plain message
+        return JSONResponse(status_code=502,
+                            content={"detail": str(exc)})
+    agent_log(f"browser relaunched (alive: {'yes' if alive else 'no'})")
+    return {"relaunched": True,
+            "browser": "alive" if alive else "dead",
+            "profile": str(profile_dir(account)),
+            "headed": BROWSER.headed(account)}
 
 
 @app.post("/agent/reload")
-def agent_reload_endpoint():
+async def agent_reload_endpoint(request: Request):
     """Load the Messenger page fresh (forced navigation, not the
     cached page) and re-check the session. The fix when the page is
     stale/hung but the browser connection is alive."""
-    with _chat_browser_lock:
-        try:
-            page = _get_page()
-        except Exception as exc:  # noqa: BLE001 - launch failure, plain message
-            return JSONResponse(status_code=502,
-                                content={"detail": str(exc)})
+    account = _browser_account(await _read_body_account(request))
+
+    def _reload(page):
         worker = FacebookWorker()
         loaded = worker._load(page, _MESSAGES_URL, {"note": agent_log},
                               "reload", timeout_ms=45000)
         detail = worker.session_diagnostic(page)
         state = worker.check_session(page, {"note": agent_log})
-        record = _record_session_check(state, detail)
-        agent_log(f"Messenger reloaded (loaded: {'yes' if loaded else 'no'}, "
-                  f"session: {state})")
-        return {"reloaded": loaded, "state": state, "at": record["at"],
-                "detail": detail}
+        return loaded, state, detail
+
+    try:
+        loaded, state, detail = await asyncio.to_thread(
+            BROWSER.run_with_page, account, False, _reload)
+    except Exception as exc:  # noqa: BLE001 - launch failure, plain message
+        return JSONResponse(status_code=502,
+                            content={"detail": str(exc)})
+    record = _record_session_check(state, detail)
+    agent_log(f"Messenger reloaded (loaded: {'yes' if loaded else 'no'}, "
+              f"session: {state})")
+    return {"reloaded": loaded, "state": state, "at": record["at"],
+            "detail": detail}
+
+
+@app.post("/agent/signin")
+async def agent_signin_endpoint(request: Request):
+    """Open a VISIBLE Chrome window for the account so the USER signs
+    in to Facebook himself — exactly like Client Hunting's
+    POST /api/accounts/{id}/signin. No password is ever asked for,
+    stored, or changed by the agent. The window is left open
+    afterwards; the session stays saved in the agent's own profile
+    (agent/profiles/<account>) and later runs are headless. After
+    signing in, press Relaunch browser to go back to silent headless
+    (the sign-in window's context stays headed until relaunched)."""
+    account = _browser_account(await _read_body_account(request))
+    try:
+        await asyncio.to_thread(
+            BROWSER.open_for_signin, account, FACEBOOK_LOGIN_URL)
+    except Exception as exc:  # noqa: BLE001 - launch failure, plain message
+        return JSONResponse(status_code=502,
+                            content={"detail": str(exc)})
+    agent_log(f"sign-in window opened for account {account}")
+    return {"ok": True, "accountId": account,
+            "profile": str(profile_dir(account)),
+            "detail": "Browser opened — sign in to Facebook yourself in "
+                      "that window, then press Relaunch browser."}
 
 
 @app.post("/agent/unwatch")

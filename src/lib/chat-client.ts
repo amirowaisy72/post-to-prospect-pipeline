@@ -219,11 +219,12 @@ export async function agentStatus(
  * while (page loads + retries) — long timeout on purpose. */
 export async function agentSessionCheck(
   agentUrl: string,
+  accountId: string,
 ): Promise<ChatResult<SessionCheckResult>> {
   return call(agentUrl, "/agent/session-check", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ accountId }),
   }, 120000);
 }
 
@@ -231,22 +232,40 @@ export async function agentSessionCheck(
  * profile. Restarts the BROWSER only, never the agent process. */
 export async function agentBrowserRelaunch(
   agentUrl: string,
+  accountId: string,
 ): Promise<ChatResult<{ relaunched: boolean; browser: string; profile: string; headed: boolean }>> {
   return call(agentUrl, "/agent/browser-relaunch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ accountId }),
   }, 120000);
 }
 
 /** Load the Messenger page fresh and re-check the session. */
 export async function agentReloadMessenger(
   agentUrl: string,
+  accountId: string,
 ): Promise<ChatResult<AgentReloadResult>> {
   return call(agentUrl, "/agent/reload", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ accountId }),
+  }, 120000);
+}
+
+/** Open a VISIBLE Chrome window so the USER signs in to Facebook
+ * himself, once — the agent's own profile (agent/profiles/<account>)
+ * saves the session afterwards. The agent never asks for or stores
+ * a password. After signing in, press Relaunch browser to go back
+ * to silent headless. */
+export async function agentSignin(
+  agentUrl: string,
+  accountId: string,
+): Promise<ChatResult<{ ok: boolean; accountId: string; profile: string; detail: string }>> {
+  return call(agentUrl, "/agent/signin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accountId }),
   }, 120000);
 }
 
