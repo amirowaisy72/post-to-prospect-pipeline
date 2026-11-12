@@ -20,7 +20,9 @@ on your computer — nothing is sent anywhere.
 3. Drag a rectangle around the area to capture (or press **Esc** for the
    whole page).
 4. **Scroll** while collecting so more comments load (only ~10 load at
-   first). The extension also clicks "View N replies" for you.
+   first), and click "View N replies" / "View more comments" yourself
+   wherever you want those replies captured — the extension never
+   clicks anything on the page, it only captures what is loaded.
 5. Click the extension icon → **Stop & download**.
 
 You get up to three files. Import the **`raw_data_<stamp>_structured.json`**
@@ -37,8 +39,8 @@ Facebook page. Without the reload you keep running the old version.
 
 - `manifest.json` — extension manifest (Manifest V3).
 - `content.js` — runs in the page: rectangle capture, structured scan,
-  reply expansion, downloads.
+  downloads. It never clicks anything on the page.
 - `structured.js` — the Facebook extractor (dialog / feed / fallback).
-  Every structured post carries `postUrl` (the page URL) so the app can
-  de-duplicate collected posts.
+  Every structured post carries `postUrl` (the post's own permalink)
+  so the app can de-duplicate collected posts.
 - `popup.html` / `popup.js` — the toolbar popup (Start / Stop / Download).

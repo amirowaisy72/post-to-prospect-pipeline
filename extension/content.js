@@ -268,54 +268,27 @@
     });
   }
 
-  // Click "View N replies" / "View more comments" / "View more answers"
-  // toggles so replies (and further comments) enter the DOM before the
-  // structured scan. Replies are collapsed behind these buttons and are
-  // not articles until clicked — without this every reply is missed.
-  // Capped per pass so one pass cannot click hundreds of toggles; the
-  // caller loops passes until a pass clicks nothing.
-  function expandReplies() {
-    let clicked = 0;
-    try {
-      const els = document.querySelectorAll('[role="button"], button');
-      for (const el of els) {
-        if (clicked >= 20) break;
-        const t = (el.innerText || '').trim();
-        if (/^View \d+ repl(?:y|ies)$/i.test(t) || /^View more comments$/i.test(t) || /^View more answers$/i.test(t)) {
-          try { el.click(); clicked++; } catch (e) {}
-        }
-      }
-    } catch (e) {}
-    return clicked;
-  }
-
   function stop() {
     stopObserver();
     running = false;
     dirty = false;
-    // Completeness (hard rule): expanding replies can reveal further
-    // nested "View N replies" buttons, so keep expanding until a full
-    // pass clicks nothing (bounded — at most 10 passes), then take the
-    // final structured pass after they have had a moment to render.
-    let passes = 0;
-    function expandPass() {
-      passes++;
-      const clicked = expandReplies();
-      if (clicked > 0 && passes < 10) {
-        setTimeout(expandPass, 1200);
-        return;
-      }
-      setTimeout(() => {
-        extractStructured();
-        persist();
-        // Structured files first (the AI-ready format); the flat .txt too
-        // when there is flat data but no structured posts (other sites).
-        const hadStructured = downloadStructured();
-        if (!hadStructured) downloadTxt();
-        else if (captured.length) downloadTxt();
-      }, 1500);
-    }
-    expandPass();
+    // No auto-expansion: the extension NEVER clicks anything on the
+    // page. The user scrolls and expands "View N replies" / "View
+    // more comments" manually while collecting; the extension only
+    // captures what is loaded in the DOM. (Auto-clicking used to hit
+    // "View more comments" buttons of OTHER feed posts, which on
+    // Facebook opens that post — the extension suddenly navigated
+    // away from the post being scraped.) Take one final structured
+    // pass after a short delay so the last loaded content is included.
+    setTimeout(() => {
+      extractStructured();
+      persist();
+      // Structured files first (the AI-ready format); the flat .txt too
+      // when there is flat data but no structured posts (other sites).
+      const hadStructured = downloadStructured();
+      if (!hadStructured) downloadTxt();
+      else if (captured.length) downloadTxt();
+    }, 1500);
   }
 
   // -- messages from the popup ---------------------------------------
@@ -364,7 +337,8 @@
 
   // Flush new captures to storage every 2 s; re-scan structured posts
   // every 10 s so newly loaded posts/comments join the collection.
-  // Expand collapsed replies on each pass so they enter the DOM too.
+  // The extension never clicks anything — the user scrolls and expands
+  // collapsed replies manually; only loaded DOM content is captured.
   setInterval(() => { if (dirty) { dirty = false; persist(); } }, 2000);
-  setInterval(() => { if (running) { expandReplies(); extractStructured(); } }, 10000);
+  setInterval(() => { if (running) { extractStructured(); } }, 10000);
 })();
