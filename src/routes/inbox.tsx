@@ -7,6 +7,7 @@ import {
   MessageSquarePlus,
   Send,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -24,10 +25,10 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, PageHeader } from "@/components/page-header";
-import { firstUnsentMessage, messagesForThread, sendStatusCaption, threadsForAccount } from "@/lib/leadhunter-service";
+import { messagesForThread, sendStatusCaption, threadsForAccount } from "@/lib/leadhunter-service";
 import { mockInboxReply } from "@/lib/mock-chat";
 import { useActiveAccountData, useStore } from "@/lib/store";
-import type { ChatScript, InboxSourceType } from "@/lib/types";
+import type { ChatMessage, ChatScript, InboxSourceType } from "@/lib/types";
 
 export const Route = createFileRoute("/inbox")({
   head: () => ({
@@ -71,6 +72,8 @@ function InboxPage() {
     setThreadStatus,
     updateChatScript,
     startChatDelivery,
+    sendOwnMessage,
+    deleteChatThread,
     refreshChatLive,
     sendChatWatch,
     stopAllChatting,
@@ -88,17 +91,32 @@ function InboxPage() {
   const [shortlistNote, setShortlistNote] = useState("");
   const [formError, setFormError] = useState("");
   const [replyText, setReplyText] = useState("");
+  const [ownText, setOwnText] = useState("");
   const [draft, setDraft] = useState<ChatScript>(state.chatScript);
   // Live agent state: null = not checked yet.
   const [agentOnline, setAgentOnline] = useState<boolean | null>(null);
   const [watching, setWatching] = useState(false);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  // Two-click in-page delete confirm (same pattern as Sources):
+  // first click arms, second click deletes. 8 s arm timeout.
+  const [armedOpen, setArmedOpen] = useState(false);
+  const [armedRowId, setArmedRowId] = useState<string | null>(null);
+  const armTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (armTimer.current) window.clearTimeout(armTimer.current);
+    },
+    [],
+  );
 
   // Switching account resets the page.
   useEffect(() => {
     setSelectedId(null);
     setShowForm(false);
+    setArmedOpen(false);
+    setArmedRowId(null);
   }, [accountId]);
   // Keep the script editor in sync when the saved script changes elsewhere.
   useEffect(() => setDraft(state.chatScript), [state.chatScript]);
@@ -134,9 +152,6 @@ function InboxPage() {
   const sortedThreads = threadsForAccount(state, accountId);
   const selected = sortedThreads.find((t) => t.id === selectedId) ?? null;
   const messages = selected ? messagesForThread(state, selected.id) : [];
-  // The first message, when it never reached Messenger (draft, or a
-  // send the agent reported as failed) — the retry target.
-  const firstUnsent = selected ? firstUnsentMessage(state, selected.id) : null;
   // Wall clock for the send-stage age ("· 45s"). Ticks once a second
   // only while the open thread has a send in flight — otherwise the
   // captions are static and no re-render is needed.
@@ -174,26 +189,29 @@ function InboxPage() {
     setSelectedId(created.thread.id);
     // Hand the first message to the chat agent for live delivery.
     // A failed hand-off leaves the message as an in-app draft.
+    // Pass the state the thread was just created in — the store's
+    // ref does not contain it yet in this tick.
     setSending(true);
-    void startChatDelivery(created.thread, created.firstMessageId).finally(() =>
+    void startChatDelivery(created.thread, created.firstMessageId, created.state).finally(() =>
       setSending(false),
     );
   };
 
   /**
-   * Retry the first message when it never reached Messenger: the
-   * thread was created while the agent was down, or the agent
-   * reported the send as failed. Reuses the same hand-off as a fresh
-   * chat (delivery flips to Sending… then Sent/Failed via the poll),
-   * then joins the watcher like a fresh live chat so replies to the
-   * retried thread are answered the moment they arrive. A failed
-   * hand-off leaves the draft in place — the button stays, so the
-   * user can try again once the agent is up.
+   * Retry any own message that never reached Messenger: the first
+   * message of a thread created while the agent was down, a send the
+   * agent reported as failed, or a message typed as yourself when
+   * the agent was down. Reuses the same hand-off as a fresh chat
+   * (delivery flips to Sending… then Sent/Failed via the poll),
+   * then joins the watcher like a fresh live chat so replies are
+   * answered the moment they arrive. A failed hand-off leaves the
+   * draft in place — the button stays, so the user can try again
+   * once the agent is up.
    */
-  const retryFirstMessage = () => {
-    if (!selected || !firstUnsent || sending) return;
+  const retryMessage = (message: ChatMessage) => {
+    if (!selected || sending) return;
     setSending(true);
-    void startChatDelivery(selected, firstUnsent.id)
+    void startChatDelivery(selected, message.id)
       .then((ok) => {
         if (ok) {
           void sendChatWatch().then((joined) => {
@@ -202,6 +220,57 @@ function InboxPage() {
         }
       })
       .finally(() => setSending(false));
+  };
+
+  /** Type a message as yourself: it lands on your side of the
+   * thread (orange, like the first message) and goes to Messenger
+   * through the same live delivery when the agent runs. */
+  const sendOwn = () => {
+    if (!selected || !ownText.trim() || sending) return;
+    setSending(true);
+    void sendOwnMessage(selected.id, ownText).finally(() => {
+      setSending(false);
+      setOwnText("");
+    });
+  };
+
+  /**
+   * Delete the open thread (two-click in-page confirm). Local-only:
+   * the chat leaves LeadHunter and the agent forgets it too — a
+   * message already sent on Facebook stays sent. The profile is
+   * freed, so a New chat with the same person is allowed again.
+   */
+  const deleteOpenThread = () => {
+    if (!selected || deleting) return;
+    if (!armedOpen) {
+      setArmedOpen(true);
+      armTimer.current = window.setTimeout(() => setArmedOpen(false), 8000);
+      return;
+    }
+    if (armTimer.current) window.clearTimeout(armTimer.current);
+    setArmedOpen(false);
+    setDeleting(true);
+    void deleteChatThread(selected.id).finally(() => {
+      setDeleting(false);
+      setSelectedId(null);
+    });
+  };
+
+  /** Per-row delete in the Chats list (same two-click confirm). */
+  const deleteRowThread = (threadId: string) => {
+    if (deleting) return;
+    if (armedRowId !== threadId) {
+      setArmedRowId(threadId);
+      armTimer.current = window.setTimeout(() => setArmedRowId(null), 8000);
+      return;
+    }
+    if (armTimer.current) window.clearTimeout(armTimer.current);
+    setArmedRowId(null);
+    setDeleting(true);
+    void deleteChatThread(threadId).finally(() => {
+      setDeleting(false);
+      if (selectedId === threadId) setSelectedId(null);
+    });
   };
 
   const addReply = () => {
@@ -414,33 +483,54 @@ function InboxPage() {
                   sortedThreads.map((t) => {
                     const last = lastMessage(t.id);
                     const on = t.id === selectedId;
+                    const armed = armedRowId === t.id;
                     return (
-                      <button
-                        key={t.id}
-                        onClick={() => setSelectedId(t.id)}
-                        className={`w-full rounded-lg border p-3 text-left transition-colors ${
-                          on ? "border-primary bg-accent/60" : "hover:bg-muted/50"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate text-sm font-semibold text-foreground">
-                            {t.profileName}
-                          </span>
-                          <Badge variant={t.status === "active" ? "success" : "neutral"}>
-                            {t.status === "active" ? "Active" : "Done"}
-                          </Badge>
-                        </div>
-                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                          {t.sourceType === "comment" ? "From a comment" : "From a post"}
-                          {t.shortlistNote ? ` · ${t.shortlistNote}` : ""}
-                        </p>
-                        {last && (
-                          <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-                            {last.role === "agent" ? "You: " : `${t.profileName.split(" ")[0]}: `}
-                            {last.text}
+                      <div key={t.id} className="flex items-start gap-1.5">
+                        <button
+                          onClick={() => setSelectedId(t.id)}
+                          className={`min-w-0 flex-1 rounded-lg border p-3 text-left transition-colors ${
+                            on ? "border-primary bg-accent/60" : "hover:bg-muted/50"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate text-sm font-semibold text-foreground">
+                              {t.profileName}
+                            </span>
+                            <Badge variant={t.status === "active" ? "success" : "neutral"}>
+                              {t.status === "active" ? "Active" : "Done"}
+                            </Badge>
+                          </div>
+                          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                            {t.sourceType === "comment" ? "From a comment" : "From a post"}
+                            {t.shortlistNote ? ` · ${t.shortlistNote}` : ""}
                           </p>
-                        )}
-                      </button>
+                          {last && (
+                            <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
+                              {last.role === "agent" ? "You: " : `${t.profileName.split(" ")[0]}: `}
+                              {last.text}
+                            </p>
+                          )}
+                        </button>
+                        <Button
+                          variant={armed ? "destructive" : "ghost"}
+                          size="icon"
+                          className="mt-1 size-8 shrink-0"
+                          aria-label={
+                            armed
+                              ? `Confirm delete chat with ${t.profileName}`
+                              : `Delete chat with ${t.profileName}`
+                          }
+                          title={
+                            armed
+                              ? "Click again to confirm — this deletes the chat from LeadHunter only"
+                              : "Delete this chat from LeadHunter only"
+                          }
+                          disabled={deleting}
+                          onClick={() => deleteRowThread(t.id)}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
                     );
                   })
                 )}
@@ -491,16 +581,32 @@ function InboxPage() {
                       )}
                     </CardDescription>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      setThreadStatus(selected.id, selected.status === "active" ? "done" : "active")
-                    }
-                  >
-                    <CheckCircle2 />
-                    {selected.status === "active" ? "Mark done" : "Reopen"}
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setThreadStatus(selected.id, selected.status === "active" ? "done" : "active")
+                      }
+                    >
+                      <CheckCircle2 />
+                      {selected.status === "active" ? "Mark done" : "Reopen"}
+                    </Button>
+                    <Button
+                      variant={armedOpen ? "destructive" : "outline"}
+                      size="sm"
+                      disabled={deleting}
+                      title={
+                        armedOpen
+                          ? "Click again to confirm — this deletes the chat from LeadHunter only; messages already sent on Facebook stay sent"
+                          : "Delete this chat from LeadHunter only — messages already sent on Facebook stay sent"
+                      }
+                      onClick={deleteOpenThread}
+                    >
+                      <Trash2 />
+                      {deleting ? "Deleting…" : armedOpen ? "Confirm delete?" : "Delete"}
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <blockquote className="rounded-lg border-l-2 border-primary bg-muted/40 p-3 text-sm italic text-muted-foreground">
@@ -531,23 +637,48 @@ function InboxPage() {
                             <p className="text-[11px] text-muted-foreground tabular">
                               {sendStatusCaption(m, nowMs)} · {timeOf(m.createdAt)}
                             </p>
-                            {m.id === firstUnsent?.id && (
-                              <div className="pt-1">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={retryFirstMessage}
-                                  disabled={sending}
-                                >
-                                  <Send /> {sending ? "Sending…" : "Send to Messenger now"}
-                                </Button>
-                              </div>
-                            )}
+                            {m.role === "agent" &&
+                              (m.delivery === "in-app" || m.delivery === "failed") && (
+                                <div className="pt-1">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => retryMessage(m)}
+                                    disabled={sending}
+                                  >
+                                    <Send /> {sending ? "Sending…" : "Send to Messenger now"}
+                                  </Button>
+                                </div>
+                              )}
                           </div>
                         </div>
                       ))
                     )}
                   </div>
+
+                  {selected.status === "active" && (
+                    <div className="space-y-3 border-t pt-4">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="own-message">Type a message as yourself</Label>
+                        <Textarea
+                          id="own-message"
+                          value={ownText}
+                          onChange={(e) => setOwnText(e.target.value)}
+                          placeholder="Write your own message — it goes on your side, like the first message…"
+                          rows={2}
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button onClick={sendOwn} disabled={!ownText.trim() || sending}>
+                          <Send /> {sending ? "Sending…" : "Send as yourself"}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Goes to Messenger right away when the agent is running; otherwise it
+                        stays as a draft here with a retry.
+                      </p>
+                    </div>
+                  )}
 
                   {selected.status === "active" && (
                     <div className="space-y-3 border-t pt-4">

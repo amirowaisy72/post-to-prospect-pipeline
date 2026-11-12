@@ -39,6 +39,7 @@ __all__ = [
     "get_chat_thread",
     "list_chat_threads",
     "set_chat_thread",
+    "delete_chat_thread",
     "save_chat_message",
     "list_chat_messages",
     "count_agent_sent_on",
@@ -482,6 +483,17 @@ def set_chat_thread(thread_id, **fields):
             f"UPDATE chat_threads SET {assignments} WHERE id=?",
             (*updates.values(), thread_id),
         )
+
+
+def delete_chat_thread(thread_id):
+    """Delete a chat thread and all its messages (a chat deleted in
+    the app). Returns True when a thread row was removed."""
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM chat_messages WHERE thread_id=?", (thread_id,))
+        cur = conn.execute(
+            "DELETE FROM chat_threads WHERE id=?", (thread_id,))
+        return cur.rowcount > 0
 
 
 def save_chat_message(message_id, thread_id, role, text, delivery,

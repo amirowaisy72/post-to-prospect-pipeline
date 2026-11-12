@@ -2062,3 +2062,58 @@ class TestCheckSessionFirstNotes:
             FacebookWorker(), page, db, "job-1", lambda: False, GROUP_URL)
         assert ok is False
         assert db.updates and db.updates[0][1]["status"] == "failed"
+
+
+class _RaisingPage:
+    """Every read throws — the dead-browser shape (live 2026-11-12:
+    body_len=-1, every selector 'error'). A diagnostic must never
+    raise, or it fails the check it is supposed to explain."""
+
+    @property
+    def url(self):
+        raise RuntimeError("Playwright connection closed")
+
+    def title(self):
+        raise RuntimeError("Playwright connection closed")
+
+    def inner_text(self, selector):
+        raise RuntimeError("Playwright connection closed")
+
+    def query_selector_all(self, selector):
+        raise RuntimeError("Playwright connection closed")
+
+    def locator(self, selector):
+        return _RaisingLocator()
+
+
+class _RaisingLocator:
+    def count(self):
+        raise RuntimeError("Playwright connection closed")
+
+
+class TestSessionDiagnostic:
+    def test_diagnostic_on_a_loaded_page(self):
+        page = _FakePage(anchors_by_url={
+            "https://www.facebook.com/messages": [
+                _FakeAnchor("https://www.facebook.com/messages/t/1"),
+                _FakeAnchor("https://www.facebook.com/messages/t/2"),
+            ]})
+        page.goto("https://www.facebook.com/messages")
+        detail = FacebookWorker().session_diagnostic(page)
+        assert detail["url"] == "https://www.facebook.com/messages"
+        assert detail["title"] == "Facebook"
+        assert detail["body_len"] == len("Facebook feed content")
+        assert detail["links_count"] == 2
+        assert set(detail["selectors"]) == {
+            "Your profile", "Account", "/me/", "Messenger"}
+        # This fake page has no logged-in chrome: counts are 0,
+        # not errors — the reads themselves worked.
+        assert all(v == 0 for v in detail["selectors"].values())
+
+    def test_diagnostic_never_raises_on_a_dead_page(self):
+        detail = FacebookWorker().session_diagnostic(_RaisingPage())
+        assert detail["url"] == "?"
+        assert detail["title"] == "?"
+        assert detail["body_len"] == -1
+        assert detail["links_count"] == -1
+        assert all(v == "error" for v in detail["selectors"].values())

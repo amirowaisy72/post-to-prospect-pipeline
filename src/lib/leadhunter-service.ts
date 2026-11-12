@@ -1203,6 +1203,42 @@ export function setThreadStatus(
   };
 }
 
+/**
+ * Delete a chat thread from LeadHunter: the thread and ALL its
+ * messages go. This is local-only — it never touches Facebook; a
+ * message already sent on Messenger stays sent. Deleting frees the
+ * profile: a New chat with the same person is allowed again (the
+ * one-active-chat-per-profile rule only blocks threads that still
+ * exist). The agent is told separately (POST /chat/forget) so it
+ * drops the thread from its watch list and rows too.
+ */
+export function deleteChatThread(
+  state: AppState,
+  threadId: string,
+  now: string,
+): Result<AppState> {
+  const thread = state.threads.find((t) => t.id === threadId);
+  if (!thread) return { ok: false, error: "Chat not found." };
+  const next: AppState = {
+    ...state,
+    threads: state.threads.filter((t) => t.id !== threadId),
+    chatMessages: state.chatMessages.filter((m) => m.threadId !== threadId),
+  };
+  return {
+    ok: true,
+    value: withActivity(
+      next,
+      activity(
+        "chat-deleted",
+        thread.accountId,
+        `Deleted the chat with ${thread.profileName} — removed it from LeadHunter only`,
+        `act-del-${threadId}-${now}`,
+        now,
+      ),
+    ),
+  };
+}
+
 /** Validate and save the editable chat script. */
 export function updateChatScript(state: AppState, script: ChatScript): Result<AppState> {
   const next: ChatScript = {

@@ -140,7 +140,8 @@ export type ActivityType =
   | "source-scraped"
   | "source-synced"
   | "chat-started"
-  | "chat-reply";
+  | "chat-reply"
+  | "chat-deleted";
 
 export interface Activity {
   id: string;

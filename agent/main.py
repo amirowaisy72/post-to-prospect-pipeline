@@ -31,7 +31,9 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -79,6 +81,30 @@ _stop_flags: dict[str, bool] = {}
 _page = None
 _context = None
 _playwright = None
+
+# Agent Control page state (see the /agent/* endpoints below).
+# _LOG_LINES is a small in-memory ring of the most recent agent log
+# lines (last 50) — the console window is still the full log.
+_LOG_LINES: deque[str] = deque(maxlen=50)
+_LOG_LOCK = threading.Lock()
+# Last session check run from the Agent Control page (or the reload
+# button): {"state", "at", "detail"} — empty until the first check.
+_LAST_SESSION_CHECK: dict = {}
+_MESSAGES_URL = "https://www.facebook.com/messages"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def agent_log(message: str) -> None:
+    """One agent log line: kept in the ring for GET /agent/logs and
+    printed to the console window (same "[leadhunter] ..." format
+    as the plain prints elsewhere)."""
+    line = f"{_now_iso()} {message}"
+    with _LOG_LOCK:
+        _LOG_LINES.append(line)
+    print(f"[leadhunter] {message}", flush=True)
 
 
 # ----------------------------------------------------------------------
@@ -229,19 +255,16 @@ def _get_page():
             return _page
         # Page closed, or its browser process died (connection
         # closed) — drop everything and relaunch below.
-        print("[leadhunter] Browser page is dead — relaunching",
-              flush=True)
+        agent_log("Browser page is dead — relaunching")
         _close_browser()
     from playwright.sync_api import sync_playwright
 
     _playwright = sync_playwright().start()
     profile = resolve_chrome_profile()
     headed = _headed_env()
-    print(f"[leadhunter] Browser: "
-          f"{'headed (visible window)' if headed else 'headless'}",
-          flush=True)
-    print(f"[leadhunter] Chrome profile: {profile} "
-          f"(exists: {'yes' if profile.exists() else 'no'})", flush=True)
+    agent_log(f"Browser: {'headed (visible window)' if headed else 'headless'}")
+    agent_log(f"Chrome profile: {profile} "
+              f"(exists: {'yes' if profile.exists() else 'no'})")
     try:
         _context = _playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile),
@@ -297,8 +320,7 @@ def _fresh_page():
         # The browser connection died after the job's page was
         # made: drop everything and relaunch from the same profile,
         # then take the fresh tab from the new browser.
-        print("[leadhunter] Browser connection died while opening a "
-              "new tab — relaunching", flush=True)
+        agent_log("Browser connection died while opening a new tab — relaunching")
         _close_browser()
         return _get_page()
     try:
@@ -381,7 +403,7 @@ def _run_job_thread(job_id, kind, payload):
         job = db.get_job(job_id) or {}
         job.update(payload)
         should_stop = lambda: _stop_flags.get(job_id, False)  # noqa: E731
-        note = lambda msg: print(f"[leadhunter] {msg}", flush=True)  # noqa: E731
+        note = agent_log
         if kind == "scrape":
             jobs.run_scrape(worker, page, db, job, should_stop, note=note)
         elif kind == "collect":
@@ -443,6 +465,7 @@ def _valid_facebook_url(url) -> bool:
 # ----------------------------------------------------------------------
 _chat_browser_lock = threading.Lock()
 _chat_start_busy = False
+_chat_start_thread_id = ""
 _watch_thread = None
 
 
@@ -459,10 +482,10 @@ def _chat_watch_loop():
             with _chat_browser_lock:
                 page = _get_page()
                 worker = FacebookWorker()
-                note = lambda msg: print(f"[leadhunter] {msg}", flush=True)  # noqa: E731
+                note = agent_log
                 chat.watch_once(worker, page, note=note)
         except Exception as exc:  # noqa: BLE001 - pass failed, loop retries
-            print(f"[leadhunter] chat watch pass failed: {exc}", flush=True)
+            agent_log(f"chat watch pass failed: {exc}")
         for _ in range(chat.WATCH_POLL_SECONDS):
             if not chat.is_watching() or chat.stop_requested():
                 return
@@ -485,7 +508,7 @@ def _run_chat_start(payload):
     "queued" while it waits for the browser lock, "opening browser"
     while the page is (re)launched, then chat.start_chat takes over.
     """
-    global _chat_start_busy
+    global _chat_start_busy, _chat_start_thread_id
     message_id = payload.get("messageId") or ""
     chat.set_send_stage(message_id, "queued")
     try:
@@ -493,7 +516,7 @@ def _run_chat_start(payload):
             chat.set_send_stage(message_id, "opening browser")
             page = _fresh_page()
             worker = FacebookWorker()
-            note = lambda msg: print(f"[leadhunter] {msg}", flush=True)  # noqa: E731
+            note = agent_log
             chat.start_chat(worker, page, payload, note=note)
     except Exception as exc:  # noqa: BLE001 - start failure, not a crash
         chat.set_send_stage(message_id, "failed", str(exc))
@@ -504,6 +527,7 @@ def _run_chat_start(payload):
             pass
     finally:
         _chat_start_busy = False
+        _chat_start_thread_id = ""
 
 
 # ----------------------------------------------------------------------
@@ -712,7 +736,7 @@ async def chat_start_endpoint(request: Request):
     scraping job runs (it owns the page) or another chat start is
     in flight. The daily cap is enforced in chat.start_chat.
     """
-    global _chat_start_busy
+    global _chat_start_busy, _chat_start_thread_id
     body = await request.json() if request.headers.get("content-length") else {}
     if not isinstance(body, dict):
         body = {}
@@ -737,6 +761,7 @@ async def chat_start_endpoint(request: Request):
                 status_code=409,
                 content={"detail": "a chat start is already running"})
         _chat_start_busy = True
+        _chat_start_thread_id = thread_id
     try:
         daily_cap = int(body.get("dailyCap") or 0)
     except (TypeError, ValueError):
@@ -880,6 +905,180 @@ async def chat_stop_endpoint():
     app sends a new watch list."""
     chat.request_stop()
     return {"watching": False}
+
+
+@app.post("/chat/forget")
+async def chat_forget_endpoint(request: Request):
+    """Forget one deleted chat thread: stop its in-flight send, drop
+    it from the watch list, and delete its rows + stage trail, so a
+    fresh chat with the same person starts clean. The app calls this
+    before deleting locally. Never touches Facebook. `forgotten` is
+    False when the agent never knew the thread (already forgotten, or
+    the app created it while the agent was down) — still a success;
+    `sendStopped` is False only when a send for this thread was still
+    running after a 10 s wait, and the app's delete goes ahead anyway.
+    """
+    body = await request.json() if request.headers.get("content-length") else {}
+    if not isinstance(body, dict):
+        body = {}
+    thread_id = (body.get("threadId") or "").strip()
+    if not thread_id:
+        return JSONResponse(
+            status_code=400, content={"detail": "threadId is required"})
+    # Stop first, delete after: mark it forgotten so the send aborts
+    # at its next stop check, then give an in-flight send for THIS
+    # thread a bounded moment to stop before the rows go.
+    chat.mark_thread_forgotten(thread_id)
+    send_stopped = True
+    if _chat_start_busy and _chat_start_thread_id == thread_id:
+        deadline = time.time() + 10
+        while _chat_start_busy and time.time() < deadline:
+            time.sleep(0.2)
+        send_stopped = not _chat_start_busy
+    forgotten = chat.forget_thread(thread_id)
+    return {"forgotten": forgotten, "sendStopped": send_stopped}
+
+
+# ----------------------------------------------------------------------
+# Agent Control page (see src/routes/agent-control.tsx)
+# ----------------------------------------------------------------------
+def _browser_state() -> str:
+    """"alive" | "dead" | "not-started" for the cached browser page."""
+    if _page is None:
+        return "not-started"
+    return "alive" if _browser_is_alive(_page) else "dead"
+
+
+def _record_session_check(state: str, detail: dict) -> dict:
+    """Record the last session check for GET /agent/status."""
+    global _LAST_SESSION_CHECK
+    _LAST_SESSION_CHECK = {"state": state, "at": _now_iso(),
+                           "detail": detail}
+    return _LAST_SESSION_CHECK
+
+
+def _check_session(page, worker) -> tuple[str, dict]:
+    """Run the Messenger session check on a page and record it:
+    verify_session (current page first, then the Messenger page,
+    with the about:blank recovery) + the structured diagnostic.
+    Returns (state, record)."""
+    state = worker.verify_session(page, {"note": agent_log},
+                                  target_url=_MESSAGES_URL)
+    detail = worker.session_diagnostic(page)
+    record = _record_session_check(state, detail)
+    agent_log(f"session check: {state} "
+              f"(url={detail['url']}, body_len={detail['body_len']})")
+    return state, record
+
+
+@app.get("/agent/status")
+def agent_status_endpoint(accountId: str = ""):
+    """Agent Control status: process up, Chrome profile, headless /
+    headed, browser state, watching + watched threads, last session
+    check, sends today for the account. Never launches a browser —
+    the browser field only reports the cached page."""
+    account_id = (accountId or "").strip()
+    today = datetime.now(timezone.utc).date().isoformat()
+    profile = resolve_chrome_profile()
+    return {
+        "online": True,
+        "profile": str(profile),
+        "profileExists": profile.exists(),
+        "headed": _headed_env(),
+        "browser": _browser_state(),
+        "watching": chat.is_watching(),
+        "watchedThreads": chat.watched_count(),
+        "chatStartBusy": _chat_start_busy,
+        "lastSessionCheck": _LAST_SESSION_CHECK or None,
+        "sendsToday": chat.count_sent_today(account_id) if account_id else 0,
+        "sendsTodayDate": today,
+    }
+
+
+@app.post("/agent/session-check")
+def agent_session_check_endpoint():
+    """Re-check the Facebook session on the Messenger page — the
+    same check a send runs. A dead browser is relaunched first
+    (_get_page); the result names the state + the structured detail,
+    so the page can say plainly what to do next ("Session OK" or
+    "Abhi bhi empty — browser restart karein")."""
+    with _chat_browser_lock:
+        try:
+            page = _get_page()
+        except Exception as exc:  # noqa: BLE001 - launch failure, plain message
+            return JSONResponse(status_code=502,
+                                content={"detail": str(exc)})
+        worker = FacebookWorker()
+        try:
+            state, record = _check_session(page, worker)
+        except Exception as exc:  # noqa: BLE001 - check failure, not a crash
+            return JSONResponse(
+                status_code=502,
+                content={"detail": f"session check failed: {exc}"})
+        return {"state": state, "at": record["at"],
+                "detail": record["detail"]}
+
+
+@app.post("/agent/browser-relaunch")
+def agent_browser_relaunch_endpoint():
+    """Close the Chromium browser and launch it fresh from the same
+    profile (the signed-in session lives in the profile dir). This
+    restarts the BROWSER only — the agent process itself keeps
+    running; restarting that needs the run-agent.bat window."""
+    with _chat_browser_lock:
+        _close_browser()
+        try:
+            page = _get_page()
+        except Exception as exc:  # noqa: BLE001 - launch failure, plain message
+            return JSONResponse(status_code=502,
+                                content={"detail": str(exc)})
+        alive = _browser_is_alive(page)
+        agent_log(f"browser relaunched (alive: {'yes' if alive else 'no'})")
+        return {"relaunched": True,
+                "browser": "alive" if alive else "dead",
+                "profile": str(resolve_chrome_profile()),
+                "headed": _headed_env()}
+
+
+@app.post("/agent/reload")
+def agent_reload_endpoint():
+    """Load the Messenger page fresh (forced navigation, not the
+    cached page) and re-check the session. The fix when the page is
+    stale/hung but the browser connection is alive."""
+    with _chat_browser_lock:
+        try:
+            page = _get_page()
+        except Exception as exc:  # noqa: BLE001 - launch failure, plain message
+            return JSONResponse(status_code=502,
+                                content={"detail": str(exc)})
+        worker = FacebookWorker()
+        loaded = worker._load(page, _MESSAGES_URL, {"note": agent_log},
+                              "reload", timeout_ms=45000)
+        detail = worker.session_diagnostic(page)
+        state = worker.check_session(page, {"note": agent_log})
+        record = _record_session_check(state, detail)
+        agent_log(f"Messenger reloaded (loaded: {'yes' if loaded else 'no'}, "
+                  f"session: {state})")
+        return {"reloaded": loaded, "state": state, "at": record["at"],
+                "detail": detail}
+
+
+@app.post("/agent/unwatch")
+def agent_unwatch_endpoint():
+    """Stop watching only: the watcher loop exits after its current
+    check; in-flight sends are NOT stopped (use Stop all chatting
+    for that)."""
+    chat.clear_watch()
+    agent_log("watching stopped from Agent Control")
+    return {"watching": False}
+
+
+@app.get("/agent/logs")
+def agent_logs_endpoint():
+    """Last ~50 agent log lines (newest last)."""
+    with _LOG_LOCK:
+        lines = list(_LOG_LINES)
+    return {"lines": lines}
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccountsRouteImport } from './routes/accounts'
+import { Route as AgentControlRouteImport } from './routes/agent-control'
 import { Route as AnalysisRouteImport } from './routes/analysis'
 import { Route as ConfigurationsRouteImport } from './routes/configurations'
 import { Route as DataSourcingRouteImport } from './routes/data-sourcing'
@@ -29,6 +30,11 @@ const IndexRoute = IndexRouteImport.update({
 const AccountsRoute = AccountsRouteImport.update({
   id: '/accounts',
   path: '/accounts',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AgentControlRoute = AgentControlRouteImport.update({
+  id: '/agent-control',
+  path: '/agent-control',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AnalysisRoute = AnalysisRouteImport.update({
@@ -81,6 +87,7 @@ const DataSourcingSourceIdPostIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
+  '/agent-control': typeof AgentControlRoute
   '/analysis': typeof AnalysisRoute
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
@@ -94,6 +101,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
+  '/agent-control': typeof AgentControlRoute
   '/analysis': typeof AnalysisRoute
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
@@ -108,6 +116,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
+  '/agent-control': typeof AgentControlRoute
   '/analysis': typeof AnalysisRoute
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
@@ -123,6 +132,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/accounts'
+    | '/agent-control'
     | '/analysis'
     | '/configurations'
     | '/data-sourcing'
@@ -136,6 +146,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/accounts'
+    | '/agent-control'
     | '/analysis'
     | '/configurations'
     | '/data-sourcing'
@@ -149,6 +160,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/accounts'
+    | '/agent-control'
     | '/analysis'
     | '/configurations'
     | '/data-sourcing'
@@ -163,6 +175,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AccountsRoute: typeof AccountsRoute
+  AgentControlRoute: typeof AgentControlRoute
   AnalysisRoute: typeof AnalysisRoute
   ConfigurationsRoute: typeof ConfigurationsRoute
   DataSourcingRoute: typeof DataSourcingRouteWithChildren
@@ -186,6 +199,13 @@ declare module '@tanstack/react-router' {
       path: '/accounts'
       fullPath: '/accounts'
       preLoaderRoute: typeof AccountsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/agent-control': {
+      id: '/agent-control'
+      path: '/agent-control'
+      fullPath: '/agent-control'
+      preLoaderRoute: typeof AgentControlRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/analysis': {
@@ -280,6 +300,7 @@ const DataSourcingRouteWithChildren = DataSourcingRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccountsRoute: AccountsRoute,
+  AgentControlRoute: AgentControlRoute,
   AnalysisRoute: AnalysisRoute,
   ConfigurationsRoute: ConfigurationsRoute,
   DataSourcingRoute: DataSourcingRouteWithChildren,

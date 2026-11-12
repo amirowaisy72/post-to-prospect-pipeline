@@ -53,11 +53,13 @@ def temp_db(tmp_path):
     db.init_db(tmp_path / "test_chat.db")
     chat.clear_watch()
     chat._STOP.clear()
+    chat._FORGOTTEN_THREADS.clear()
     chat._SEND_STAGE.clear()
     chat._SEND_STAGE_HISTORY.clear()
     yield
     chat.clear_watch()
     chat._STOP.clear()
+    chat._FORGOTTEN_THREADS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -782,3 +784,279 @@ class TestChatEndpoints:
         assert stopped.status_code == 200
         assert stopped.json() == {"watching": False}
         assert chat.is_watching() is False
+
+
+class TestChatForget:
+    """POST /chat/forget + chat.forget_thread: a deleted chat is
+    forgotten by the agent too — its rows, watch entry and stage
+    trail go, and an in-flight send aborts instead of sending."""
+
+    def _client(self):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from fastapi.testclient import TestClient
+
+        import main
+
+        return TestClient(main.app), main
+
+    def _seed_thread(self):
+        db.upsert_chat_thread("thread-1", ACCOUNT_ID, PROFILE_URL,
+                              "Sana Mirza", "comment", "where do I start?")
+        db.save_chat_message("msg-1", "thread-1", "agent", "Hi Sana!",
+                             "failed", sent_at=None, created_at="2026-11-13T02:19:00Z")
+        chat.set_watch(_watch_config())
+        chat.set_send_stage("msg-1", "failed", "daily limit reached")
+
+    def test_forget_validation(self):
+        client, _main = self._client()
+        assert client.post("/chat/forget", json={}).status_code == 400
+
+    def test_forget_unknown_thread_returns_false(self):
+        client, _main = self._client()
+        r = client.post("/chat/forget", json={"threadId": "thread-nope"})
+        assert r.status_code == 200
+        assert r.json() == {"forgotten": False, "sendStopped": True}
+
+    def test_forget_removes_rows_watch_and_stages(self):
+        client, _main = self._client()
+        self._seed_thread()
+        assert db.get_chat_thread("thread-1") is not None
+        assert len(db.list_chat_messages("thread-1")) == 1
+        assert chat.get_send_stage("msg-1")["stage"] == "failed"
+
+        r = client.post("/chat/forget", json={"threadId": "thread-1"})
+        assert r.status_code == 200
+        assert r.json() == {"forgotten": True, "sendStopped": True}
+
+        # DB rows gone, watch entry gone, stage trail gone.
+        assert db.get_chat_thread("thread-1") is None
+        assert db.list_chat_messages("thread-1") == []
+        assert chat.thread_forgotten("thread-1") is True
+        assert chat.get_send_stage("msg-1") is None
+        assert chat.get_send_stage_history("msg-1") == []
+        # The app's poll no longer lists the thread either.
+        threads = client.get("/chat/threads").json()
+        assert threads["threads"] == []
+
+    def test_forget_is_idempotent(self):
+        client, _main = self._client()
+        self._seed_thread()
+        assert client.post("/chat/forget", json={"threadId": "thread-1"}).json()["forgotten"] is True
+        # Second forget: nothing left to forget, still a success.
+        r = client.post("/chat/forget", json={"threadId": "thread-1"})
+        assert r.status_code == 200
+        assert r.json() == {"forgotten": False, "sendStopped": True}
+
+    def test_start_chat_forgotten_thread_aborts_without_sending(self):
+        # The thread was deleted while its send was in flight (or
+        # before it started): start_chat must abort at the first stop
+        # check and must not resurrect the thread's rows.
+        chat.mark_thread_forgotten("thread-1")
+        page = _FakeChatPage(message_button_url=THREAD_URL)
+        result = chat.start_chat(_worker(), page, _start_payload(),
+                                 note=lambda m: None)
+        assert result["ok"] is False
+        # The abort surfaces where the send was when the flag was
+        # noticed (open_chat_with_profile reports "stopped"); either
+        # way it is a stop, not a send.
+        assert "stopped" in result["detail"]
+        assert page.sent_texts == []
+        # No message row is saved for the aborted send, and the
+        # thread is left failed — never active. (start_chat upserts
+        # the thread row at the start, so it exists; the "must not
+        # resurrect" rule is about the rows of a thread the app
+        # already deleted, which the failure paths skip via the
+        # forgotten flag — see test_forget_removes_rows_watch_and_stages.)
+        assert db.list_chat_messages("thread-1") == []
+        row = db.get_chat_thread("thread-1")
+        assert row is None or row["status"] != "active"
+
+    def test_delete_chat_thread_db(self):
+        db.upsert_chat_thread("thread-1", ACCOUNT_ID, PROFILE_URL,
+                              "Sana Mirza", "comment", "where do I start?")
+        db.save_chat_message("msg-1", "thread-1", "agent", "Hi Sana!",
+                             "sent", sent_at="2026-11-13T02:19:00Z",
+                             created_at="2026-11-13T02:19:00Z")
+        assert db.delete_chat_thread("thread-1") is True
+        assert db.get_chat_thread("thread-1") is None
+        assert db.list_chat_messages("thread-1") == []
+        assert db.delete_chat_thread("thread-1") is False
+
+
+class _DeadLocator:
+    def count(self):
+        raise RuntimeError("Playwright connection closed")
+
+
+class _DeadPage:
+    """Every read throws — the live second-press failure shape:
+    body_len=-1, every selector 'error', session 'empty'."""
+
+    url = "https://www.facebook.com/messages"
+
+    def title(self):
+        raise RuntimeError("Playwright connection closed")
+
+    def inner_text(self, selector):
+        raise RuntimeError("Playwright connection closed")
+
+    def query_selector_all(self, selector):
+        raise RuntimeError("Playwright connection closed")
+
+    def locator(self, selector):
+        return _DeadLocator()
+
+    def goto(self, url, wait_until=None, timeout=None):
+        return None
+
+    def is_closed(self):
+        return False
+
+    def wait_for_timeout(self, ms):
+        return None
+
+
+class _FakeBrowser:
+    def __init__(self, connected=True):
+        self._connected = connected
+
+    def is_connected(self):
+        return self._connected
+
+
+class _FakeContext:
+    def __init__(self, connected=True):
+        self.browser = _FakeBrowser(connected)
+
+
+# ----------------------------------------------------------------------
+# Agent Control endpoints (main.py): status, session check, relaunch,
+# reload, unwatch, logs — the UI the user fixes "session empty" from.
+# ----------------------------------------------------------------------
+class TestAgentControl:
+    def _client(self):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("httpx")
+        from fastapi.testclient import TestClient
+
+        import main
+
+        return TestClient(main.app), main
+
+    def test_status_shape_before_any_check(self):
+        client, _main = self._client()
+        r = client.get("/agent/status")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["online"] is True
+        assert isinstance(body["profile"], str) and body["profile"]
+        assert body["headed"] is False
+        # No browser was ever launched in-process.
+        assert body["browser"] == "not-started"
+        assert body["watching"] is False
+        assert body["watchedThreads"] == 0
+        assert body["chatStartBusy"] is False
+        assert body["lastSessionCheck"] is None
+        assert body["sendsToday"] == 0
+        assert body["sendsTodayDate"] == datetime.now(timezone.utc).date().isoformat()
+
+    def test_status_sends_today_counts_only_sent_today(self):
+        client, _main = self._client()
+        _seed_thread()
+        db.save_chat_message("msg-1", "thread-1", "agent", "Hi Sana!",
+                             "sent",
+                             sent_at=datetime.now(timezone.utc).isoformat(),
+                             created_at="2026-11-13T02:19:00Z")
+        db.save_chat_message("msg-2", "thread-1", "agent", "Failed one",
+                             "failed", sent_at=None,
+                             created_at="2026-11-13T02:20:00Z")
+        r = client.get("/agent/status", params={"accountId": ACCOUNT_ID})
+        assert r.status_code == 200
+        assert r.json()["sendsToday"] == 1
+
+    def test_session_check_ok_and_recorded_on_status(self, monkeypatch):
+        client, main = self._client()
+        monkeypatch.setattr(main, "_get_page",
+                            lambda: _FakeChatPage(session_ok=True))
+        r = client.post("/agent/session-check")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "ok"
+        detail = body["detail"]
+        assert detail["url"].startswith("https://www.facebook.com")
+        assert detail["body_len"] > 0
+        assert detail["links_count"] >= 0
+        assert set(detail["selectors"]) == {
+            "Your profile", "Account", "/me/", "Messenger"}
+        assert all(v == 1 for v in detail["selectors"].values())
+        # The check is recorded, so the status card shows it.
+        status = client.get("/agent/status").json()
+        assert status["lastSessionCheck"]["state"] == "ok"
+        assert status["lastSessionCheck"]["detail"]["body_len"] == detail["body_len"]
+
+    def test_session_check_empty_names_the_dead_page(self, monkeypatch):
+        client, main = self._client()
+        monkeypatch.setattr(main, "_get_page", lambda: _DeadPage())
+        r = client.post("/agent/session-check")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "empty"
+        assert body["detail"]["body_len"] == -1
+        assert body["detail"]["links_count"] == -1
+        assert all(v == "error" for v in body["detail"]["selectors"].values())
+
+    def test_session_check_launch_failure_is_502_not_a_crash(self, monkeypatch):
+        client, main = self._client()
+
+        def _boom():
+            raise RuntimeError("browser launch failed")
+
+        monkeypatch.setattr(main, "_get_page", _boom)
+        r = client.post("/agent/session-check")
+        assert r.status_code == 502
+        assert "browser launch failed" in r.json()["detail"]
+
+    def test_browser_relaunch_returns_alive(self, monkeypatch):
+        client, main = self._client()
+        page = _FakeChatPage(session_ok=True)
+        page.context = _FakeContext(connected=True)
+        monkeypatch.setattr(main, "_close_browser", lambda: None)
+        monkeypatch.setattr(main, "_get_page", lambda: page)
+        r = client.post("/agent/browser-relaunch")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["relaunched"] is True
+        assert body["browser"] == "alive"
+        assert isinstance(body["profile"], str) and body["profile"]
+        assert body["headed"] is False
+
+    def test_reload_rechecks_the_session(self, monkeypatch):
+        client, main = self._client()
+        monkeypatch.setattr(main, "_get_page",
+                            lambda: _FakeChatPage(session_ok=True))
+        r = client.post("/agent/reload")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["reloaded"] is True
+        assert body["state"] == "ok"
+        assert body["detail"]["body_len"] > 0
+
+    def test_unwatch_stops_watching_only(self):
+        client, _main = self._client()
+        chat.set_watch(_watch_config())
+        assert chat.is_watching() is True
+        r = client.post("/agent/unwatch")
+        assert r.status_code == 200
+        assert r.json() == {"watching": False}
+        assert chat.is_watching() is False
+
+    def test_logs_return_recent_lines(self):
+        client, main = self._client()
+        main.agent_log("control-page-test-marker-123")
+        r = client.get("/agent/logs")
+        assert r.status_code == 200
+        lines = r.json()["lines"]
+        assert isinstance(lines, list)
+        assert any("control-page-test-marker-123" in line for line in lines)
+        assert len(lines) <= 50

@@ -1252,6 +1252,38 @@ class FacebookWorker:
         self._note_session_empty(page, ctx, attempts)
         return "empty"
 
+    def session_diagnostic(self, page: Page) -> dict:
+        """Structured detail for a session check: URL, title, body
+        length, link count, and each logged-in selector's count
+        ("error" when the read itself threw, -1 when the body/link
+        read threw). Never raises — a diagnostic must not fail the
+        check it explains. Used by the Agent Control page and by
+        _note_session_empty (same reads, one place)."""
+        try:
+            url = page.url or "?"
+        except Exception:
+            url = "?"
+        try:
+            title = (page.title() or "")[:80]
+        except Exception:
+            title = "?"
+        try:
+            body_len = len(page.inner_text("body") or "")
+        except Exception:
+            body_len = -1
+        try:
+            links_count = len(page.query_selector_all("a[href]") or [])
+        except Exception:
+            links_count = -1
+        selectors: dict[str, int | str] = {}
+        for label, selector in self._LOGGED_IN_SELECTORS:
+            try:
+                selectors[label] = page.locator(selector).count()
+            except Exception:
+                selectors[label] = "error"
+        return {"url": url, "title": title, "body_len": body_len,
+                "links_count": links_count, "selectors": selectors}
+
     def _note_session_empty(self, page: Page, ctx: dict | None,
                             attempts: int) -> None:
         """Note what the page actually looked like when the session
@@ -1262,33 +1294,12 @@ class FacebookWorker:
         fail the job it explains.
         """
         try:
-            try:
-                url = page.url or "?"
-            except Exception:
-                url = "?"
-            try:
-                title = (page.title() or "")[:80]
-            except Exception:
-                title = "?"
-            try:
-                body_len = len(page.inner_text("body") or "")
-            except Exception:
-                body_len = -1
-            try:
-                links_count = len(page.query_selector_all("a[href]") or [])
-            except Exception:
-                links_count = -1
-            parts = []
-            for label, selector in self._LOGGED_IN_SELECTORS:
-                try:
-                    count = page.locator(selector).count()
-                except Exception:
-                    count = "error"
-                parts.append(f"{label}={count}")
+            d = self.session_diagnostic(page)
+            parts = [f"{label}={count}" for label, count in d["selectors"].items()]
             _note(ctx,
                   f"session check empty after {attempts} attempts: "
-                  f"url={url}, title={title!r}, body_len={body_len}, "
-                  f"links_count={links_count}, "
+                  f"url={d['url']}, title={d['title']!r}, body_len={d['body_len']}, "
+                  f"links_count={d['links_count']}, "
                   f"selectors={{{', '.join(parts)}}}")
         except Exception:
             pass

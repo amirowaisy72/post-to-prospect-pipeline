@@ -141,3 +141,129 @@ export async function chatStop(
     body: JSON.stringify({}),
   }, 20000);
 }
+
+/** Forget a deleted chat thread on the agent: stops its in-flight
+ * send, drops it from the watch list, and deletes its rows + stage
+ * trail. The app calls this before deleting locally. Never touches
+ * Facebook. Best-effort: when the agent is down there is nothing to
+ * forget, and the next watch sync already drops the thread. */
+export async function chatForget(
+  agentUrl: string,
+  threadId: string,
+): Promise<ChatResult<{ forgotten: boolean; sendStopped: boolean }>> {
+  return call(agentUrl, "/chat/forget", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId }),
+  }, 20000);
+}
+
+// ----------------------------------------------------------------------
+// Agent Control page (src/routes/agent-control.tsx)
+// ----------------------------------------------------------------------
+
+export type AgentSessionState = "ok" | "logged_out" | "checkpoint" | "blocked" | "empty";
+
+/** Structured detail of one session check: what the page actually
+ * looked like (selectors are per logged-in selector counts, or
+ * "error" when the read itself threw). */
+export interface SessionDiagnostic {
+  url: string;
+  title: string;
+  body_len: number;
+  links_count: number;
+  selectors: Record<string, number | string>;
+}
+
+export interface SessionCheckRecord {
+  state: AgentSessionState;
+  at: string;
+  detail: SessionDiagnostic;
+}
+
+export interface AgentStatus {
+  online: boolean;
+  profile: string;
+  profileExists: boolean;
+  headed: boolean;
+  browser: "alive" | "dead" | "not-started";
+  watching: boolean;
+  watchedThreads: number;
+  chatStartBusy: boolean;
+  lastSessionCheck: SessionCheckRecord | null;
+  sendsToday: number;
+  sendsTodayDate: string;
+}
+
+export interface SessionCheckResult {
+  state: AgentSessionState;
+  at: string;
+  detail: SessionDiagnostic;
+}
+
+export interface AgentReloadResult extends SessionCheckResult {
+  reloaded: boolean;
+}
+
+/** Agent Control status. Never launches a browser — the browser
+ * field only reports the cached page. */
+export async function agentStatus(
+  agentUrl: string,
+  accountId: string,
+): Promise<ChatResult<AgentStatus>> {
+  const q = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+  return call(agentUrl, `/agent/status${q}`, undefined, 8000);
+}
+
+/** Re-check the Facebook session on the Messenger page. Can take a
+ * while (page loads + retries) — long timeout on purpose. */
+export async function agentSessionCheck(
+  agentUrl: string,
+): Promise<ChatResult<SessionCheckResult>> {
+  return call(agentUrl, "/agent/session-check", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }, 120000);
+}
+
+/** Close the Chromium browser and launch it fresh from the same
+ * profile. Restarts the BROWSER only, never the agent process. */
+export async function agentBrowserRelaunch(
+  agentUrl: string,
+): Promise<ChatResult<{ relaunched: boolean; browser: string; profile: string; headed: boolean }>> {
+  return call(agentUrl, "/agent/browser-relaunch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }, 120000);
+}
+
+/** Load the Messenger page fresh and re-check the session. */
+export async function agentReloadMessenger(
+  agentUrl: string,
+): Promise<ChatResult<AgentReloadResult>> {
+  return call(agentUrl, "/agent/reload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }, 120000);
+}
+
+/** Stop watching only — in-flight sends are NOT stopped. */
+export async function agentUnwatch(
+  agentUrl: string,
+): Promise<ChatResult<{ watching: boolean }>> {
+  return call(agentUrl, "/agent/unwatch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  }, 20000);
+}
+
+/** Last ~50 agent log lines (newest last). */
+export async function agentLogs(
+  agentUrl: string,
+): Promise<ChatResult<{ lines: string[] }>> {
+  return call(agentUrl, "/agent/logs", undefined, 8000);
+}

@@ -1,5 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
+  Bot,
   BrainCircuit,
   Crosshair,
   Database,
@@ -32,6 +33,7 @@ const workflow = [
   { title: "Data Sourcing", url: "/data-sourcing", icon: Database },
   { title: "AI Analysis", url: "/analysis", icon: BrainCircuit },
   { title: "Inbox", url: "/inbox", icon: Inbox },
+  { title: "Agent Control", url: "/agent-control", icon: Bot },
   { title: "Leads", url: "/leads", icon: UserSearch },
   { title: "Shortlisted", url: "/shortlisted", icon: Star },
 ] as const;

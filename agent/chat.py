@@ -260,6 +260,12 @@ def is_watching() -> bool:
         return bool(_WATCH.get("active"))
 
 
+def watched_count() -> int:
+    """How many threads the watcher is watching right now."""
+    with _WATCH_LOCK:
+        return len(_WATCH.get("threads") or [])
+
+
 def request_stop() -> None:
     """Halt all chatting: the watcher loop and any in-flight first
     message check this between steps."""
@@ -269,6 +275,60 @@ def request_stop() -> None:
 
 def stop_requested() -> bool:
     return _STOP.is_set()
+
+
+# Threads the app deleted (POST /chat/forget). A forgotten thread's
+# in-flight send aborts at its next stop check and its failure paths
+# save nothing — so deleting a stuck thread can never send a message
+# afterwards, and a later abort cannot resurrect its rows. Unlike the
+# global _STOP flag, this is per-thread and is never cleared by a
+# later set_watch, so a re-synced watcher cannot resume it.
+_FORGOTTEN_THREADS: set[str] = set()
+_FORGOTTEN_LOCK = threading.Lock()
+
+
+def mark_thread_forgotten(thread_id: str) -> None:
+    """Mark a thread forgotten (stops its in-flight send) and drop it
+    from the watch list. The DB rows go in forget_thread, after the
+    send had a moment to stop."""
+    if not thread_id:
+        return
+    with _FORGOTTEN_LOCK:
+        _FORGOTTEN_THREADS.add(thread_id)
+    with _WATCH_LOCK:
+        _WATCH["threads"] = [t for t in (_WATCH.get("threads") or [])
+                             if t.get("threadId") != thread_id]
+
+
+def thread_forgotten(thread_id: str) -> bool:
+    """True when the app deleted this thread (POST /chat/forget)."""
+    with _FORGOTTEN_LOCK:
+        return thread_id in _FORGOTTEN_THREADS
+
+
+def forget_thread(thread_id: str) -> bool:
+    """Forget a deleted thread completely: mark it forgotten (its
+    send aborts, it leaves the watch list), delete its DB rows, and
+    clear its send-stage trail. Returns True when the agent knew the
+    thread at all (a DB row, a watch entry, or a stage trail)."""
+    if not thread_id:
+        return False
+    with _WATCH_LOCK:
+        in_watch = any(t.get("threadId") == thread_id
+                       for t in (_WATCH.get("threads") or []))
+    # Message ids first: the rows are gone after the delete, and the
+    # stage trail is keyed by message id, not thread id.
+    message_ids = [m.get("id") for m in db.list_chat_messages(thread_id)]
+    with _SEND_STAGE_LOCK:
+        had_stage = any(
+            mid in _SEND_STAGE or mid in _SEND_STAGE_HISTORY
+            for mid in message_ids if mid)
+    mark_thread_forgotten(thread_id)
+    deleted = db.delete_chat_thread(thread_id)
+    for mid in message_ids:
+        if mid:
+            clear_send_stage(mid)
+    return bool(deleted or in_watch or had_stage)
 
 
 def _watch_snapshot() -> dict:
@@ -344,6 +404,15 @@ def get_send_stage_history(message_id: str) -> list:
     """Stage trail in order (diagnostics / tests)."""
     with _SEND_STAGE_LOCK:
         return [dict(r) for r in _SEND_STAGE_HISTORY.get(message_id or "", [])]
+
+
+def clear_send_stage(message_id: str) -> None:
+    """Drop a message's stage + trail (its thread was deleted)."""
+    if not message_id:
+        return
+    with _SEND_STAGE_LOCK:
+        _SEND_STAGE.pop(message_id, None)
+        _SEND_STAGE_HISTORY.pop(message_id, None)
 
 
 # ----------------------------------------------------------------------
@@ -526,8 +595,10 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
         """Save the first message as failed under the app's message
         id, so the app learns the failure (otherwise its message
         stays "pending" forever with no stage and no reason).
-        INSERT OR IGNORE: a retry never duplicates it."""
-        if message_id:
+        INSERT OR IGNORE: a retry never duplicates it. Skipped when
+        the thread was deleted meanwhile — a late failure must not
+        resurrect its rows."""
+        if message_id and not thread_forgotten(thread_id):
             db.save_chat_message(message_id, thread_id, "agent",
                                  first_message, "failed", sent_at=None,
                                  created_at=_now_iso())
@@ -540,8 +611,12 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
         db.set_chat_thread(thread_id, status="failed",
                            last_error=result["detail"])
         return result
+    # A deleted thread's send aborts here too: the global stop flag
+    # is cleared by a later set_watch, but the per-thread forgotten
+    # flag is never cleared — a re-synced watcher cannot resume it.
+    stopped = lambda: stop_requested() or thread_forgotten(thread_id)  # noqa: E731
     ctx = {
-        "should_stop": lambda: stop_requested(),
+        "should_stop": stopped,
         "pace": lambda: time.sleep(2.5),
         "note": note,
         # Stage callback for the browser steps the send runs through
@@ -578,7 +653,7 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
         return result
     result["threadUrl"] = thread_url
     db.set_chat_thread(thread_id, messenger_thread_url=thread_url)
-    if stop_requested():
+    if stopped():
         result["detail"] = "stopped before sending"
         set_send_stage(message_id, "failed", result["detail"])
         _record_failed_first_message()
@@ -589,7 +664,7 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
     last_error = ""
     parts = split_messages(first_message)
     for index, part in enumerate(parts):
-        if stop_requested():
+        if stopped():
             result["detail"] = "stopped before sending"
             set_send_stage(message_id, "failed", result["detail"])
             _record_failed_first_message()
@@ -610,10 +685,14 @@ def start_chat(worker, page, payload: dict, note=None) -> dict:
             f"part {index + 1} of {len(parts)}" if len(parts) > 1 else "")
         ok, detail = worker.send_thread_message(page, thread_url, part, ctx)
         part_id = message_id if (index == 0 and message_id) else _new_id("msg")
-        db.save_chat_message(
-            part_id, thread_id, "agent", part,
-            "sent" if ok else "failed",
-            sent_at=_now_iso() if ok else None, created_at=_now_iso())
+        # A thread deleted mid-send must not be resurrected: skip the
+        # row when it was forgotten (the part may still have gone out
+        # — the app deleted the thread, so nothing shows it).
+        if not thread_forgotten(thread_id):
+            db.save_chat_message(
+                part_id, thread_id, "agent", part,
+                "sent" if ok else "failed",
+                sent_at=_now_iso() if ok else None, created_at=_now_iso())
         if not ok:
             last_error = detail
             break
