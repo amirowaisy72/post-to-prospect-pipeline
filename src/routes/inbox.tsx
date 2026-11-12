@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, PageHeader } from "@/components/page-header";
-import { messagesForThread, threadsForAccount } from "@/lib/leadhunter-service";
+import { firstUnsentMessage, messagesForThread, threadsForAccount } from "@/lib/leadhunter-service";
 import { mockInboxReply } from "@/lib/mock-chat";
 import { useActiveAccountData, useStore } from "@/lib/store";
 import type { ChatScript, InboxSourceType } from "@/lib/types";
@@ -147,6 +147,9 @@ function InboxPage() {
   const sortedThreads = threadsForAccount(state, accountId);
   const selected = sortedThreads.find((t) => t.id === selectedId) ?? null;
   const messages = selected ? messagesForThread(state, selected.id) : [];
+  // The first message, when it never reached Messenger (draft, or a
+  // send the agent reported as failed) — the retry target.
+  const firstUnsent = selected ? firstUnsentMessage(state, selected.id) : null;
   const lastMessage = (threadId: string) => messagesForThread(state, threadId).at(-1);
 
   const startChat = () => {
@@ -178,6 +181,30 @@ function InboxPage() {
     void startChatDelivery(created.thread, created.firstMessageId).finally(() =>
       setSending(false),
     );
+  };
+
+  /**
+   * Retry the first message when it never reached Messenger: the
+   * thread was created while the agent was down, or the agent
+   * reported the send as failed. Reuses the same hand-off as a fresh
+   * chat (delivery flips to Sending… then Sent/Failed via the poll),
+   * then joins the watcher like a fresh live chat so replies to the
+   * retried thread are answered the moment they arrive. A failed
+   * hand-off leaves the draft in place — the button stays, so the
+   * user can try again once the agent is up.
+   */
+  const retryFirstMessage = () => {
+    if (!selected || !firstUnsent || sending) return;
+    setSending(true);
+    void startChatDelivery(selected, firstUnsent.id)
+      .then((ok) => {
+        if (ok) {
+          void sendChatWatch().then((joined) => {
+            if (joined) setWatching(true);
+          });
+        }
+      })
+      .finally(() => setSending(false));
   };
 
   const addReply = () => {
@@ -507,6 +534,18 @@ function InboxPage() {
                             <p className="text-[11px] text-muted-foreground tabular">
                               {deliveryLabel(m)} · {timeOf(m.createdAt)}
                             </p>
+                            {m.id === firstUnsent?.id && (
+                              <div className="pt-1">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={retryFirstMessage}
+                                  disabled={sending}
+                                >
+                                  <Send /> {sending ? "Sending…" : "Send to Messenger now"}
+                                </Button>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))

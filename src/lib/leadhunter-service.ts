@@ -1239,6 +1239,18 @@ export function messagesForThread(state: AppState, threadId: string): ChatMessag
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/**
+ * The thread's first message, when it is still unsent — an in-app
+ * draft the agent never received, or a send the agent reported as
+ * failed. The retry action re-sends exactly this message: never a
+ * later message, and never one already sent or in flight.
+ */
+export function firstUnsentMessage(state: AppState, threadId: string): ChatMessage | null {
+  const first = messagesForThread(state, threadId)[0];
+  if (!first || first.role !== "agent") return null;
+  return first.delivery === "in-app" || first.delivery === "failed" ? first : null;
+}
+
 /** Threads for one account, newest first. */
 export function threadsForAccount(state: AppState, accountId: string): ChatThread[] {
   return state.threads

@@ -11,8 +11,10 @@ import {
   createAccount,
   createChatThread,
   dailyChatLimit,
+  firstUnsentMessage,
   markMessageDelivery,
   mergeLiveThreads,
+  setThreadStatus,
   validateSettings,
 } from "@/lib/leadhunter-service";
 import { createDefaultSettings, createSeedState, DEFAULT_AGENT_URL } from "@/lib/seed";
@@ -293,5 +295,77 @@ describe("chat-client", () => {
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe("Gemini key is required");
+  });
+});
+
+describe("createChatThread duplicate block", () => {
+  it("rejects a second active chat for the same profile", () => {
+    const r = createChatThread(withThread(), { ...INPUT, id: "thread-2" }, "acc-1", "msg-2", NOW);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("already an active chat");
+  });
+
+  it("allows a different profile, and a new chat once the first is done", () => {
+    const state = withThread();
+    const other = createChatThread(
+      state,
+      { ...INPUT, id: "thread-2", profileUrl: "https://www.facebook.com/ayesha.khan", profileName: "Ayesha Khan" },
+      "acc-1",
+      "msg-2",
+      NOW,
+    );
+    expect(other.ok).toBe(true);
+    const done = setThreadStatus(state, "thread-1", "done");
+    const again = createChatThread(done, { ...INPUT, id: "thread-3" }, "acc-1", "msg-3", NOW);
+    expect(again.ok).toBe(true);
+  });
+});
+
+describe("firstUnsentMessage", () => {
+  it("returns the draft first message", () => {
+    expect(firstUnsentMessage(withThread(), "thread-1")?.id).toBe("msg-1");
+  });
+
+  it("returns null once the first message is sent or in flight", () => {
+    const sent = markMessageDelivery(withThread(), "msg-1", "sent");
+    expect(sent.ok && firstUnsentMessage(sent.value, "thread-1")).toBeNull();
+    const pending = markMessageDelivery(withThread(), "msg-1", "pending-messenger");
+    expect(pending.ok && firstUnsentMessage(pending.value, "thread-1")).toBeNull();
+  });
+
+  it("returns the first message again after the agent reports it failed", () => {
+    const failed = markMessageDelivery(withThread(), "msg-1", "failed");
+    expect(failed.ok && firstUnsentMessage(failed.value, "thread-1")?.id).toBe("msg-1");
+  });
+
+  it("returns null for an unknown thread", () => {
+    expect(firstUnsentMessage(withThread(), "nope")).toBeNull();
+  });
+});
+
+describe("mergeLiveThreads first-message delivery", () => {
+  const live = (delivery: "sent" | "failed") => ({
+    threadId: "thread-1",
+    status: "active",
+    messengerThreadUrl: "https://www.facebook.com/messages/t/123",
+    messages: [
+      { id: "msg-1", role: "agent" as const, text: "Hi Sana!", delivery, sentAt: NOW },
+    ],
+  });
+
+  it("flips a pending first message to sent when the agent reports sent", () => {
+    const pending = markMessageDelivery(withThread(), "msg-1", "pending-messenger");
+    if (!pending.ok) throw new Error("fixture failed");
+    const merged = mergeLiveThreads(pending.value, [live("sent")]);
+    expect(merged.chatMessages.find((m) => m.id === "msg-1")?.delivery).toBe("sent");
+  });
+
+  it("flips a pending first message to failed — never to sent — when the agent reports failed", () => {
+    const pending = markMessageDelivery(withThread(), "msg-1", "pending-messenger");
+    if (!pending.ok) throw new Error("fixture failed");
+    const merged = mergeLiveThreads(pending.value, [live("failed")]);
+    const delivery = merged.chatMessages.find((m) => m.id === "msg-1")?.delivery;
+    expect(delivery).toBe("failed");
+    expect(delivery).not.toBe("sent");
   });
 });
