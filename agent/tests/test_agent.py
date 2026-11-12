@@ -1425,6 +1425,118 @@ class TestHeadlessBrowser:
 
 
 # ---------------------------------------------------------------------------
+# (m-c) Dead browser connection: relaunch instead of reusing a corpse
+# ---------------------------------------------------------------------------
+# Live 2026-11-12: after the 1st Scrap the headless Chromium process
+# died — the 2nd press's diagnostic read body_len=-1 with every
+# selector "error", and goto failed with "Playwright connection
+# closed". page.is_closed() cannot spot this (it is local state),
+# so the agent kept reusing the dead page. The fix probes
+# browser.is_connected() and relaunches from the same profile.
+
+
+class TestDeadBrowserRelaunch:
+    @pytest.fixture(autouse=True)
+    def _reset_browser_state(self):
+        _reset_main_browser()
+        yield
+        _reset_main_browser()
+
+    def test_dead_connection_error_markers(self):
+        pytest.importorskip("fastapi")
+        import main
+
+        assert main._is_dead_connection_error(
+            Exception("Playwright connection closed"))
+        assert main._is_dead_connection_error(Exception("Target closed"))
+        assert main._is_dead_connection_error(
+            Exception("Browser has been closed"))
+        assert not main._is_dead_connection_error(
+            Exception("Timeout 30000ms exceeded"))
+        assert not main._is_dead_connection_error(
+            Exception("net::ERR_FAILED"))
+
+    def test_get_page_relaunches_dead_connection(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        import main
+
+        chromium, _handle = _install_fake_playwright(monkeypatch)
+        context1 = chromium.launch_persistent_context.return_value
+        page1 = context1.pages[0]
+        page1.is_closed.return_value = False
+        page1.context.browser.is_connected.return_value = True
+        assert main._get_page() is page1
+        # The browser process died after the 1st job, although the
+        # page itself was never closed — the next call must close
+        # the old browser and relaunch instead of reusing it.
+        page1.context.browser.is_connected.return_value = False
+        context2 = mock.MagicMock(name="context2")
+        page2 = mock.MagicMock(name="page2")
+        page2.is_closed.return_value = False
+        page2.context.browser.is_connected.return_value = True
+        context2.pages = [page2]
+        chromium.launch_persistent_context.side_effect = [context2]
+        assert main._get_page() is page2
+        assert chromium.launch_persistent_context.call_count == 2
+        context1.close.assert_called_once()
+        assert main._context is context2
+
+    def test_get_page_reuses_live_connection(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        import main
+
+        chromium, _handle = _install_fake_playwright(monkeypatch)
+        page = chromium.launch_persistent_context.return_value.pages[0]
+        page.is_closed.return_value = False
+        page.context.browser.is_connected.return_value = True
+        first = main._get_page()
+        second = main._get_page()
+        assert first is second is page
+        chromium.launch_persistent_context.assert_called_once()
+
+    def test_fresh_page_relaunches_on_closed_connection(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        import main
+
+        chromium, _handle = _install_fake_playwright(monkeypatch)
+        context1 = chromium.launch_persistent_context.return_value
+        page1 = context1.pages[0]
+        page1.is_closed.return_value = False
+        page1.context.browser.is_connected.return_value = True
+        assert main._get_page() is page1
+        # The browser dies between _get_page() and new_page().
+        context1.new_page.side_effect = Exception(
+            "Playwright connection closed")
+        context2 = mock.MagicMock(name="context2")
+        page2 = mock.MagicMock(name="page2")
+        page2.is_closed.return_value = False
+        page2.context.browser.is_connected.return_value = True
+        context2.pages = [page2]
+        chromium.launch_persistent_context.side_effect = [context2]
+        fresh = main._fresh_page()
+        assert fresh is page2
+        assert fresh is not page1
+        assert chromium.launch_persistent_context.call_count == 2
+        assert main._context is context2
+
+    def test_fresh_page_keeps_old_fallback_for_other_errors(self, monkeypatch):
+        pytest.importorskip("fastapi")
+        import main
+
+        chromium, _handle = _install_fake_playwright(monkeypatch)
+        context1 = chromium.launch_persistent_context.return_value
+        page1 = context1.pages[0]
+        page1.is_closed.return_value = False
+        page1.context.browser.is_connected.return_value = True
+        assert main._get_page() is page1
+        # A non-connection failure opening a tab keeps the old
+        # behaviour: fall back to the existing page, no relaunch.
+        context1.new_page.side_effect = Exception("Timeout 30000ms exceeded")
+        assert main._fresh_page() is page1
+        chromium.launch_persistent_context.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # (i) Feed selectors: literal <article> tags + comment-button opening
 # ---------------------------------------------------------------------------
 

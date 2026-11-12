@@ -125,6 +125,52 @@ def _headed_env() -> bool:
         "1", "true", "yes")
 
 
+_DEAD_CONNECTION_MARKERS = (
+    "closed",
+    "connection closed",
+    "browser closed",
+    "target closed",
+)
+
+
+def _is_dead_connection_error(exc: BaseException) -> bool:
+    """True when an exception means the browser connection is dead.
+
+    Playwright reports a dead browser as "Playwright connection
+    closed" (and variants: browser closed, target closed). Any such
+    error means the cached page/context is a corpse: it must be
+    relaunched, never reused.
+    """
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _DEAD_CONNECTION_MARKERS)
+
+
+def _browser_is_alive(page) -> bool:
+    """True when the cached page's browser connection is still live.
+
+    ``page.is_closed()`` alone cannot tell: it is local state, so
+    a page whose Chromium process died still reports "not closed"
+    — and every real call then throws "Playwright connection
+    closed" (the live second-press failure: body_len=-1, every
+    selector read "error"). ``browser.is_connected()`` is a local
+    check of the connection itself, so it spots a dead browser
+    instantly with no roundtrip. Any failure of the probe counts
+    as dead — a page we cannot even probe is not worth reusing;
+    relaunching from the profile dir is safe (the session lives
+    there) and cheap compared with reusing a corpse.
+    """
+    try:
+        if page.is_closed():
+            return False
+    except Exception:
+        return False
+    try:
+        browser = page.context.browser
+        return browser is not None and bool(browser.is_connected())
+    except Exception:
+        return False
+
+
 def _close_browser():
     """Close the Playwright browser/context cleanly, if launched.
 
@@ -158,19 +204,24 @@ def _get_page():
     forces a visible window for a fresh sign-in). The session
     persists in the profile dir (see :func:`resolve_chrome_profile`).
     The same page is reused across jobs; a page that died (browser
-    crashed or closed) is rebuilt on the next call. When the profile
-    is locked by another browser the launch raises
-    :class:`ProfileInUseError` with a plain message instead of
-    crashing — the agent stays up and a later job retries the launch.
+    crashed or closed) is rebuilt on the next call. A dead browser
+    connection is detected first — ``page.is_closed()`` cannot tell,
+    so the cached page is probed with ``browser.is_connected()``;
+    when the connection is dead the browser is relaunched from the
+    same profile (the signed-in session lives in the profile dir),
+    never silently reused. When the profile is locked by another
+    browser the launch raises :class:`ProfileInUseError` with a
+    plain message instead of crashing — the agent stays up and a
+    later job retries the launch.
     """
     global _page, _context, _playwright
     if _page is not None:
-        try:
-            if not _page.is_closed():
-                return _page
-        except Exception:
-            pass
-        # Page died — drop the browser and relaunch below.
+        if _browser_is_alive(_page):
+            return _page
+        # Page closed, or its browser process died (connection
+        # closed) — drop everything and relaunch below.
+        print("[leadhunter] Browser page is dead — relaunching",
+              flush=True)
         _close_browser()
     from playwright.sync_api import sync_playwright
 
@@ -215,7 +266,14 @@ def _fresh_page():
     not load (state: empty)". Every job therefore starts on a clean
     tab (the same state as the very first job after start). The
     session/cookies live in the profile, so nothing is lost.
-    Never raises - falls back to the existing page.
+
+    If opening the new tab fails because the browser connection
+    died ("Playwright connection closed"), the browser is
+    relaunched from the same profile and the fresh tab comes from
+    the new browser — the dead page is NEVER silently returned.
+    Any other new-tab failure still falls back to the existing
+    page. A relaunch failure surfaces (ProfileInUseError / launch
+    error) instead of a silent dead page.
     """
     global _page
     page = _get_page()
@@ -224,8 +282,16 @@ def _fresh_page():
         return page
     try:
         new_page = context.new_page()
-    except Exception:
-        return page
+    except Exception as exc:
+        if not _is_dead_connection_error(exc):
+            return page
+        # The browser connection died after the job's page was
+        # made: drop everything and relaunch from the same profile,
+        # then take the fresh tab from the new browser.
+        print("[leadhunter] Browser connection died while opening a "
+              "new tab — relaunching", flush=True)
+        _close_browser()
+        return _get_page()
     try:
         page.close()
     except Exception:

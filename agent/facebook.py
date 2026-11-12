@@ -202,6 +202,26 @@ _FEED_POSTS_JS = r"""() => {
    }
    out.push({post_url: url, author_name: name, comment_count: cc, has_comment_button: !!btn, key: key});
  }
+ /* document-wide fallback: the live group feed does not always wrap a
+    post in its own article, so also take every post permalink on the
+    page that is NOT a comment link (no comment_id) - keeps the
+    /groups/<id>/ prefix so the URL opens the right post. */
+ const doneIds = new Set();
+ for (const o of out) {
+   const mm = (o.post_url || '').match(/(\d+)\/?$/);
+   if (mm) doneIds.add(mm[1]);
+ }
+ for (const a of document.querySelectorAll('a[href]')) {
+   const h = a.getAttribute('href') || '';
+   if (/[?&](reply_)?comment_id=/.test(h)) continue;
+   const m = h.match(/\/(permalink|posts)\/(\d+)/);
+   if (!m || doneIds.has(m[2])) continue;
+   doneIds.add(m[2]);
+   const g = h.match(/\/groups\/([^\/?#]+)\/(permalink|posts)\/(\d+)/);
+   const url = g ? 'https://www.facebook.com/groups/' + g[1] + '/' + g[2] + '/' + g[3] + '/'
+                 : 'https://www.facebook.com/' + m[1] + '/' + m[2] + '/';
+   out.push({post_url: url, author_name: '', comment_count: null, has_comment_button: false, key: url});
+ }
  return out;
 }"""
 
@@ -310,7 +330,22 @@ _FEED_DIAG_JS = r"""() => {
      }
    }
  }
- return {total: els.length, article_tags: articleTags, role_articles: roleArticles, top_level: topLevel, nested: nested, non_comment_top: nonCommentTop, with_heading: withHeading, with_permalink: withPermalink, with_bare_permalink: withBarePermalink, with_comment_button: withCommentButton, with_comment_label: withCommentLabel, samples: samples};
+ let docPostLinks = 0, docCommentIdLinks = 0; const docLinkSamples = [];
+ for (const a of document.querySelectorAll('a[href]')) {
+   const h = a.getAttribute('href') || '';
+   if (!/\/(permalink|posts)\/\d+/.test(h)) continue;
+   if (/[?&](reply_)?comment_id=/.test(h)) { docCommentIdLinks++; continue; }
+   docPostLinks++;
+   if (docLinkSamples.length < 3) docLinkSamples.push(h.slice(0, 120));
+ }
+ let docCommentLabels = 0; const docLabelSamples = [];
+ for (const el of document.querySelectorAll('[aria-label]')) {
+   const l = el.getAttribute('aria-label') || '';
+   if (!/comment/i.test(l) || /^\s*(Comment|Reply) by /i.test(l)) continue;
+   docCommentLabels++;
+   if (docLabelSamples.length < 5) docLabelSamples.push(((el.tagName || '') + '|' + (el.getAttribute('role') || '') + '|' + l).slice(0, 120));
+ }
+ return {doc_post_links: docPostLinks, doc_comment_id_links: docCommentIdLinks, doc_link_samples: docLinkSamples, doc_comment_labels: docCommentLabels, doc_label_samples: docLabelSamples, total: els.length, article_tags: articleTags, role_articles: roleArticles, top_level: topLevel, nested: nested, non_comment_top: nonCommentTop, with_heading: withHeading, with_permalink: withPermalink, with_bare_permalink: withBarePermalink, with_comment_button: withCommentButton, with_comment_label: withCommentLabel, samples: samples};
 }"""
 
 # JS: open one feed post by clicking its comment button — the path
@@ -1395,6 +1430,17 @@ class FacebookWorker:
                           timeout=timeout_ms)
                 return True
             except Exception as exc:  # noqa: BLE001 - retry once, then give up
+                # A heavy Facebook page often hits the domcontentloaded
+                # timeout although the navigation already happened and
+                # the page is usable. Treat that as loaded - the
+                # readiness / session checks decide if it is really OK.
+                try:
+                    if _same_url(page.url, url):
+                        _note(ctx, f"goto {label} timed out but the page "
+                                   f"is already on the target - continuing")
+                        return True
+                except Exception:
+                    pass
                 if attempt == 1:
                     _note(ctx, f"goto {label} failed, retrying once: {exc}")
                     try:
@@ -1516,7 +1562,12 @@ class FacebookWorker:
             f"{diag.get('with_permalink') or 0} with permalink, "
             f"{diag.get('with_bare_permalink') or 0} with bare permalink, "
             f"{diag.get('with_comment_button') or 0} with comment button, "
-            f"{diag.get('with_comment_label') or 0} with comment label"
+            f"{diag.get('with_comment_label') or 0} with comment label; "
+            f"document-wide: {diag.get('doc_post_links') or 0} post links, "
+            f"{diag.get('doc_comment_id_links') or 0} comment links, "
+            f"{diag.get('doc_comment_labels') or 0} comment labels "
+            f"{diag.get('doc_label_samples') or []} "
+            f"{diag.get('doc_link_samples') or []}"
             + (f"; samples: {'; '.join(samples)}" if samples else ""))
         _note(ctx, text)
         return text
@@ -1636,6 +1687,28 @@ class FacebookWorker:
             except Exception:
                 time.sleep(2)
         diag = None
+        if not found:
+            # Facebook empties posts that are scrolled far out of view.
+            # Go back to the top, let them re-render, and look once more.
+            try:
+                page.evaluate("window.scrollTo(0, 0)")
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(4000)
+            except Exception:
+                time.sleep(4)
+            try:
+                rows = page.evaluate(_FEED_POSTS_JS) or []
+            except Exception:
+                rows = []
+            for row in rows or []:
+                url = (row or {}).get("post_url")
+                if url and url not in seen and url not in known:
+                    seen.add(url)
+                    found.append(row)
+                    if len(found) >= limit:
+                        break
         if not found:
             diag = self._feed_diagnostic(page, ctx)
         return found, diag
