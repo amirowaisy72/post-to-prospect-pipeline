@@ -265,7 +265,14 @@ def _check_session_first(worker, page, db, job_id, should_stop,
         _fail(db, job_id, exc)
         return False
     if state != "ok":
-        _fail(db, job_id, _session_error(state))
+        # The session-failure path is part of the stored error:
+        # the agent console is not visible to the user, so the app
+        # must show the exact step that broke, not just the state.
+        error = _session_error(state)
+        detail = getattr(worker, "last_session_path", None)
+        if detail:
+            error = f"{error} ({detail})"
+        _fail(db, job_id, error)
         return False
     return True
 

@@ -8,16 +8,27 @@ supplied by the caller plus a ``ctx`` dict:
     ctx["pace"]()        -> None   sleep a safe gap between page loads
     ctx["note"](msg)               free-form note for logs
 
-Proven Facebook shapes (verified live 2026-11-12, Stocks To Watch
-group, signed in as Amir Owaisy, read-only):
-- Group-feed posts ARE <article> elements headed "<Name>'s post"
-  (e.g. "Courtney Hanson's post", "Anonymous participant's post"),
-  with author link, timestamp link, post text, and Like/Comment/Share
-  buttons naming the post author. "Loading..." placeholder articles
-  must be skipped, and nested articles headed "Comment by ..." /
-  "Reply by ..." are comments, not posts.
-- The Comment button's accessible name is the gate count:
-  "Comment on Courtney Hanson's post, 66 comments".
+Proven Facebook shapes — CORRECTED 2026-11-12 ~04:50 PKT by the
+agent's own feed diagnostic on the live Stock Market Traders.
+group (earlier "proven" claims were WRONG and caused three rounds
+of 0-post scrapes; do not reintroduce them):
+- Feed items ARE div[role="article"] (0 literal <article> tags in
+  the live feed). Posts and comments are FLAT SIBLINGS, not nested.
+- There is NO "<Name>'s post" heading anywhere in the feed — a
+  heading gate rejects every real post. A post's author is its
+  first innerText line (Facebook repeats the name: "Jj Mathosi
+  Jj Mathosi") or a plain-name aria-label.
+- Comments are identifiable ONLY by aria-label starting
+  "Comment by " / "Reply by " (time appended, e.g. "Comment by
+  David Vaughn 25 weeks ago").
+- A post is identified by its OWN timestamp link: a
+  /permalink/<id>/ or /posts/<id>/ link WITHOUT a comment_id
+  parameter. A comment's timestamp link points at the same post
+  but carries ?comment_id=... — that is what tells them apart.
+- The strict Comment-button pattern ("Comment on X's post, N
+  comments") matches NOTHING in the live feed. Comment counts
+  are optional: any descendant whose aria-label contains
+  "comment" with a number near it.
 - The feed shows only ~2 comments per post at first, nested <article>
   elements inside the post article, headed "Comment by Trevor Munson
   19 hours ago". Replies hide behind "View N replies" buttons.
@@ -76,20 +87,25 @@ BLOCK_MARKERS = [
     "log in to continue",
 ]
 
-# JS: collect the feed's posts. Posts are top-level <article>
-# elements headed "<Name>'s post" — in the live feed these are
-# literal <article> tags (implicit article role, no role attribute),
-# while the post dialog's comments ARE div[role="article"], so the
-# selector must cover BOTH forms. Nested "Comment by"/"Reply by"
-# articles and "Loading..." placeholders are skipped. The post URL
-# is the /permalink/<id>/ or /posts/<id>/ link inside the article;
-# the comment count comes from the Comment button's aria-label
-# ("Comment on X's post, N comments") inside the same article.
-# A post with no permalink link (e.g. a photo post) is still kept
-# when it has a comment button — it is opened via that button
-# later, keyed by author + comment count + text head so it can be
-# found again. Test doubles return their canned data when they see
-# "feed-posts".
+# JS: collect the feed's posts. CORRECTED from the live diagnostic
+# (2026-11-12 ~04:50 PKT, Stock Market Traders. group): feed items
+# ARE div[role="article"] (literal <article> tags do not occur, but
+# the selector covers both forms anyway); posts and comments are
+# FLAT SIBLINGS. There is NO "<Name>'s post" heading — a heading
+# gate rejected every real post, so it is GONE: a post is a
+# top-level article whose aria-label does NOT start with
+# "Comment by " / "Reply by ", and which contains a /permalink/ or
+# /posts/ link WITHOUT a comment_id parameter (a comment's
+# timestamp link carries ?comment_id=... — that is what tells a
+# post from a comment). The author is the first innerText line
+# (doubled names collapsed) or a plain-name aria-label, and is
+# NEVER a gate — an empty name is still collected. The comment
+# count is OPTIONAL (null when not found): any descendant whose
+# aria-label contains "comment" with a number near it. A post with
+# no permalink link (e.g. a photo post) is still kept when it has
+# a comment button — it is opened via that button later, keyed by
+# author + comment count + text head so it can be found again.
+# Test doubles return their canned data when they see "feed-posts".
 _FEED_POSTS_JS = r"""() => {
  /* feed-posts */
  function toNum(s) {
@@ -98,23 +114,56 @@ _FEED_POSTS_JS = r"""() => {
    if (m[2]) return Math.round(parseFloat(m[1].replace(/,/g, '')) * (m[2].toUpperCase() === 'K' ? 1e3 : 1e6));
    return parseInt(m[1].replace(/[.,]/g, ''), 10);
  }
- function postLink(el) {
+ function barePostLink(el) {
    const links = el.querySelectorAll('a[href]');
    for (const a of links) {
      const h = a.getAttribute('href') || '';
      const m = h.match(/\/(permalink|posts)\/(\d+)/);
-     if (m) return 'https://www.facebook.com/' + m[1] + '/' + m[2] + '/';
+     if (m && !/[?&]comment_id=/.test(h)) return 'https://www.facebook.com/' + m[1] + '/' + m[2] + '/';
    }
    return null;
  }
- function headingName(art) {
-   const lab = art.getAttribute('aria-label') || '';
-   let m = lab.match(/^\s*(.+?)'s post\b/i);
-   if (m) return m[1].trim();
-   const t = (art.innerText || '');
-   m = t.match(/^\s*(.+?)'s post\b/m);
-   if (m) return m[1].trim();
+ function collapseDoubled(name) {
+   const n = (name || '').trim();
+   const m = n.match(/^(.+?)\s+\1$/);
+   return m ? m[1].trim() : n;
+ }
+ function authorName(art) {
+   const lab = (art.getAttribute('aria-label') || '').trim();
+   if (lab && !/^\s*(Comment|Reply) by /i.test(lab)) return collapseDoubled(lab);
+   const lines = (art.innerText || '').split('\n');
+   for (const line of lines) {
+     const t = line.trim();
+     if (t) return collapseDoubled(t);
+   }
+   return '';
+ }
+ function commentCount(art) {
+   for (const el of art.querySelectorAll('[aria-label]')) {
+     const l = el.getAttribute('aria-label') || '';
+     if (!/comment/i.test(l)) continue;
+     let m = l.match(/(\d[\d.,]*\s*[KM]?)\s*comments?/i);
+     if (m) return toNum(m[1]);
+     const t = (el.innerText || '').trim();
+     if (t.length <= 12) {
+       m = t.match(/^(\d[\d.,]*\s*[KM]?)$/);
+       if (m) return toNum(m[1]);
+     }
+   }
    return null;
+ }
+ function commentButton(art) {
+   let fallback = null;
+   for (const el of art.querySelectorAll('[aria-label]')) {
+     const l = el.getAttribute('aria-label') || '';
+     if (!/comment/i.test(l)) continue;
+     const tag = (el.tagName || '').toUpperCase();
+     const role = (el.getAttribute('role') || '').toLowerCase();
+     if (tag === 'INPUT' || tag === 'TEXTAREA' || role === 'textbox') continue;
+     if (!fallback) fallback = el;
+     if (tag === 'BUTTON' || role === 'button' || /^comment$/i.test(l.trim())) return el;
+   }
+   return fallback;
  }
  function entryKey(name, cc, text) {
    const head = (text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -138,17 +187,11 @@ _FEED_POSTS_JS = r"""() => {
    if (/^\s*(Comment|Reply) by /i.test(lab)) continue;
    const text = (art.innerText || '');
    if (/^\s*Loading\.\.\./.test(text)) continue;
-   const name = headingName(art);
-   if (!name) continue;
-   const url = postLink(art);
-   let cc = null;
-   let btn = null;
-   for (const el of art.querySelectorAll('[aria-label]')) {
-     const l2 = el.getAttribute('aria-label') || '';
-     const cm = l2.match(/Comment on (.+?)'s post,\s*(\d[\d.,]*\s*[KM]?)\s+comments?/i);
-     if (cm) { btn = el; cc = toNum(cm[2]); break; }
-   }
+   const url = barePostLink(art);
+   const cc = commentCount(art);
+   const btn = url ? null : commentButton(art);
    if (!url && !btn) continue;
+   const name = authorName(art);
    const key = entryKey(name, cc, text);
    if (url) {
      if (seen.has(url)) continue;
@@ -165,12 +208,23 @@ _FEED_POSTS_JS = r"""() => {
 # JS: one diagnostic pass over the feed when a scrape finds 0 new
 # posts — how many article-ish elements exist, in which form, how
 # many are top-level / headed / linkable / openable, plus the first
-# 3 top-level samples (aria-label + text head + which opening path
-# each has). Test doubles return their canned data when they see
+# 3 top-level NON-COMMENT articles in full detail (aria-label,
+# 300-char text head, first 5 hrefs, all descendant aria-labels
+# containing "comment") so the next 0-found run names exactly what
+# the page contained and whether the new post identification fits
+# it. Test doubles return their canned data when they see
 # "feed-diag".
 _FEED_DIAG_JS = r"""() => {
  /* feed-diag */
- function postLink(el) {
+ function hasBarePermalink(el) {
+   const links = el.querySelectorAll('a[href]');
+   for (const a of links) {
+     const h = a.getAttribute('href') || '';
+     if (/\/(permalink|posts)\/\d+/.test(h) && !/[?&]comment_id=/.test(h)) return true;
+   }
+   return false;
+ }
+ function hasAnyPermalink(el) {
    const links = el.querySelectorAll('a[href]');
    for (const a of links) {
      const h = a.getAttribute('href') || '';
@@ -189,6 +243,23 @@ _FEED_DIAG_JS = r"""() => {
    }
    return false;
  }
+ function commentLabels(art) {
+   const out = [];
+   for (const el of art.querySelectorAll('[aria-label]')) {
+     const l = el.getAttribute('aria-label') || '';
+     if (/comment/i.test(l)) out.push(l.slice(0, 120));
+   }
+   return out.slice(0, 5);
+ }
+ function firstHrefs(el) {
+   const out = [];
+   const links = el.querySelectorAll('a[href]');
+   for (const a of links) {
+     out.push((a.getAttribute('href') || '').slice(0, 120));
+     if (out.length >= 5) break;
+   }
+   return out;
+ }
  function isNested(art) {
    let anc = art.parentElement;
    while (anc) {
@@ -198,9 +269,13 @@ _FEED_DIAG_JS = r"""() => {
    }
    return false;
  }
+ function isComment(art) {
+   return /^\s*(Comment|Reply) by /i.test(art.getAttribute('aria-label') || '');
+ }
  const els = document.querySelectorAll('article, div[role="article"]');
  let articleTags = 0, roleArticles = 0, topLevel = 0, nested = 0;
  let withHeading = 0, withPermalink = 0, withCommentButton = 0;
+ let nonCommentTop = 0, withBarePermalink = 0, withCommentLabel = 0;
  const samples = [];
  for (const art of els) {
    if (art.tagName === 'ARTICLE') articleTags++;
@@ -208,21 +283,34 @@ _FEED_DIAG_JS = r"""() => {
    const nest = isNested(art);
    if (nest) nested++; else topLevel++;
    const h = hasHeading(art);
-   const p = postLink(art);
+   const p = hasAnyPermalink(art);
    const c = hasCommentButton(art);
    if (h) withHeading++;
    if (p) withPermalink++;
    if (c) withCommentButton++;
-   if (!nest && samples.length < 3) {
-     samples.push({
-       aria_label: (art.getAttribute('aria-label') || '').slice(0, 120),
-       text_head: (art.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
-       has_permalink: p,
-       has_comment_button: c,
-     });
+   // "Loading..." placeholders are top-level non-comment elements
+   // but not candidate posts — they must not inflate the count
+   // or take a sample slot.
+   const loading = /^\s*Loading\.\.\./.test(art.innerText || '');
+   if (!nest && !isComment(art) && !loading) {
+     nonCommentTop++;
+     if (hasBarePermalink(art)) withBarePermalink++;
+     const cls = commentLabels(art);
+     if (cls.length) withCommentLabel++;
+     if (samples.length < 3) {
+       samples.push({
+         aria_label: (art.getAttribute('aria-label') || '').slice(0, 120),
+         text_head: (art.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+         hrefs: firstHrefs(art),
+         comment_labels: cls,
+         has_bare_permalink: hasBarePermalink(art),
+         has_permalink: p,
+         has_comment_button: c,
+       });
+     }
    }
  }
- return {total: els.length, article_tags: articleTags, role_articles: roleArticles, top_level: topLevel, nested: nested, with_heading: withHeading, with_permalink: withPermalink, with_comment_button: withCommentButton, samples: samples};
+ return {total: els.length, article_tags: articleTags, role_articles: roleArticles, top_level: topLevel, nested: nested, non_comment_top: nonCommentTop, with_heading: withHeading, with_permalink: withPermalink, with_bare_permalink: withBarePermalink, with_comment_button: withCommentButton, with_comment_label: withCommentLabel, samples: samples};
 }"""
 
 # JS: open one feed post by clicking its comment button — the path
@@ -230,8 +318,12 @@ _FEED_DIAG_JS = r"""() => {
 # Takes the entry key from _FEED_POSTS_JS (author + comment count +
 # text head); finds the matching top-level article, scrolls it into
 # view and clicks its Comment button, which opens the post as a
-# dialog. Returns true when a button was clicked. Test doubles
-# return their canned result when they see "open-feed-post".
+# dialog. The button is found the same broad way as in
+# _FEED_POSTS_JS (any descendant whose aria-label contains
+# "comment", preferring a real button; the "Comment as ..." composer
+# is never a button). Returns true when a button was clicked.
+# Test doubles return their canned result when they see
+# "open-feed-post".
 _OPEN_FEED_POST_JS = r"""(key) => {
  /* open-feed-post */
  function toNum(s) {
@@ -240,14 +332,47 @@ _OPEN_FEED_POST_JS = r"""(key) => {
    if (m[2]) return Math.round(parseFloat(m[1].replace(/,/g, '')) * (m[2].toUpperCase() === 'K' ? 1e3 : 1e6));
    return parseInt(m[1].replace(/[.,]/g, ''), 10);
  }
- function headingName(art) {
-   const lab = art.getAttribute('aria-label') || '';
-   let m = lab.match(/^\s*(.+?)'s post\b/i);
-   if (m) return m[1].trim();
-   const t = (art.innerText || '');
-   m = t.match(/^\s*(.+?)'s post\b/m);
-   if (m) return m[1].trim();
+ function collapseDoubled(name) {
+   const n = (name || '').trim();
+   const m = n.match(/^(.+?)\s+\1$/);
+   return m ? m[1].trim() : n;
+ }
+ function authorName(art) {
+   const lab = (art.getAttribute('aria-label') || '').trim();
+   if (lab && !/^\s*(Comment|Reply) by /i.test(lab)) return collapseDoubled(lab);
+   const lines = (art.innerText || '').split('\n');
+   for (const line of lines) {
+     const t = line.trim();
+     if (t) return collapseDoubled(t);
+   }
+   return '';
+ }
+ function commentCount(art) {
+   for (const el of art.querySelectorAll('[aria-label]')) {
+     const l = el.getAttribute('aria-label') || '';
+     if (!/comment/i.test(l)) continue;
+     let m = l.match(/(\d[\d.,]*\s*[KM]?)\s*comments?/i);
+     if (m) return toNum(m[1]);
+     const t = (el.innerText || '').trim();
+     if (t.length <= 12) {
+       m = t.match(/^(\d[\d.,]*\s*[KM]?)$/);
+       if (m) return toNum(m[1]);
+     }
+   }
    return null;
+ }
+ function commentButton(art) {
+   let fallback = null;
+   for (const el of art.querySelectorAll('[aria-label]')) {
+     const l = el.getAttribute('aria-label') || '';
+     if (!/comment/i.test(l)) continue;
+     const tag = (el.tagName || '').toUpperCase();
+     const role = (el.getAttribute('role') || '').toLowerCase();
+     if (tag === 'INPUT' || tag === 'TEXTAREA' || role === 'textbox') continue;
+     if (!fallback) fallback = el;
+     if (tag === 'BUTTON' || role === 'button' || /^comment$/i.test(l.trim())) return el;
+   }
+   return fallback;
  }
  function entryKey(name, cc, text) {
    const head = (text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -268,14 +393,9 @@ _OPEN_FEED_POST_JS = r"""(key) => {
    if (/^\s*(Comment|Reply) by /i.test(lab)) continue;
    const text = (art.innerText || '');
    if (/^\s*Loading\.\.\./.test(text)) continue;
-   const name = headingName(art);
-   if (!name) continue;
-   let cc = null, btn = null;
-   for (const el of art.querySelectorAll('[aria-label]')) {
-     const l2 = el.getAttribute('aria-label') || '';
-     const cm = l2.match(/Comment on (.+?)'s post,\s*(\d[\d.,]*\s*[KM]?)\s+comments?/i);
-     if (cm) { btn = el; cc = toNum(cm[2]); break; }
-   }
+   const name = authorName(art);
+   const cc = commentCount(art);
+   const btn = commentButton(art);
    if (!btn) continue;
    if (entryKey(name, cc, text) !== key) continue;
    try { art.scrollIntoView({block: 'center'}); } catch (e) {}
@@ -1078,13 +1198,18 @@ class FacebookWorker:
         (3) otherwise the actual detected state (logged_out /
             checkpoint / blocked / empty) — an unloaded page is
             reported as "empty", never as "not signed in". On
-            failure the note records the path taken (current URL +
-            state, whether the target navigation was skipped or
-            attempted and failed) so the next failure names the
-            exact step that broke.
+            failure the path taken is noted AND stored on the
+            worker as last_session_path (current URL + state,
+            whether the target navigation was skipped or attempted
+            and failed) so the job error in the app names the exact
+            step that broke — the agent console alone is not
+            visible to the user.
         """
         target = (target_url or "").strip()
         target_nav = "no target"
+        # The failure path of THIS check only — cleared first so a
+        # previous job's failure can never leak into the next one.
+        self.last_session_path = None
         try:
             self._wait_ready(page, ctx)
         except Exception:
@@ -1129,6 +1254,14 @@ class FacebookWorker:
                     state = "empty"
                     target_nav = "attempted, raised"
         if state != "ok":
+            # The path is stored on the worker as well as noted: the
+            # agent console is not visible to the user, so jobs.py
+            # appends last_session_path to the job's stored error
+            # and the app UI shows the exact step that broke.
+            self.last_session_path = (
+                f"session check: state={state}, "
+                f"current_url={current_url or '?'}, "
+                f"target_nav={target_nav}")
             _note(ctx,
                   f"session check failed: state={state} "
                   f"current_url={current_url or '?'} "
@@ -1252,20 +1385,31 @@ class FacebookWorker:
         samples = []
         for s in (diag.get("samples") or [])[:3]:
             s = s or {}
-            samples.append(
-                f"\"{s.get('aria_label') or ''}\" "
-                f"\"{s.get('text_head') or ''}\" "
-                f"(permalink: {'yes' if s.get('has_permalink') else 'no'}, "
+            hrefs = s.get("hrefs") or []
+            labels = s.get("comment_labels") or []
+            parts = [
+                f"\"{s.get('aria_label') or ''}\" ",
+                f"\"{s.get('text_head') or ''}\" ",
+                f"(bare permalink: "
+                f"{'yes' if s.get('has_bare_permalink') else 'no'}, "
                 f"comment button: "
-                f"{'yes' if s.get('has_comment_button') else 'no'})")
+                f"{'yes' if s.get('has_comment_button') else 'no'})"]
+            if hrefs:
+                parts.append(f" hrefs: [{', '.join(hrefs)}]")
+            if labels:
+                parts.append(f" comment labels: [{', '.join(labels)}]")
+            samples.append("".join(parts))
         text = (
             f"feed diagnostic: {diag.get('total') or 0} article-ish elements "
             f"({diag.get('article_tags') or 0} <article>, "
             f"{diag.get('role_articles') or 0} div[role=\"article\"]), "
             f"{diag.get('top_level') or 0} top-level, "
+            f"{diag.get('non_comment_top') or 0} non-comment top-level, "
             f"{diag.get('with_heading') or 0} with \"<Name>'s post\" heading, "
             f"{diag.get('with_permalink') or 0} with permalink, "
-            f"{diag.get('with_comment_button') or 0} with comment button"
+            f"{diag.get('with_bare_permalink') or 0} with bare permalink, "
+            f"{diag.get('with_comment_button') or 0} with comment button, "
+            f"{diag.get('with_comment_label') or 0} with comment label"
             + (f"; samples: {'; '.join(samples)}" if samples else ""))
         _note(ctx, text)
         return text

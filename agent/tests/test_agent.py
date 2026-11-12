@@ -162,16 +162,25 @@ class _FakePage:
         # calls (a mid-render page) and links stay hidden until
         # then — 0 keeps the old behaviour (content at once).
         self._feed_diag = feed_diag if feed_diag is not None else {
-            "total": 3, "article_tags": 3, "role_articles": 0,
-            "top_level": 3, "nested": 0, "with_heading": 3,
-            "with_permalink": 2, "with_comment_button": 3,
+            "total": 7, "article_tags": 0, "role_articles": 7,
+            "top_level": 7, "nested": 0, "non_comment_top": 2,
+            "with_heading": 0, "with_permalink": 5,
+            "with_bare_permalink": 2, "with_comment_button": 0,
+            "with_comment_label": 2,
             "samples": [
-                {"aria_label": "Amit's post",
-                 "text_head": "Amit's post Market opens strong today",
-                 "has_permalink": True, "has_comment_button": True},
-                {"aria_label": "Barbara's post",
-                 "text_head": "Barbara's post Check this chart",
-                 "has_permalink": False, "has_comment_button": True},
+                {"aria_label": "",
+                 "text_head": "Jj Mathosi Jj Mathosi 18 May Lost 2k with "
+                              "amd call and made 4,5k with spy calls",
+                 "hrefs": ["https://www.facebook.com/groups/"
+                           "572426944223825/permalink/1697550221711486/"],
+                 "comment_labels": ["Comment"],
+                 "has_bare_permalink": True, "has_permalink": True,
+                 "has_comment_button": False},
+                {"aria_label": "Barbara",
+                 "text_head": "Barbara Check this chart",
+                 "hrefs": [], "comment_labels": ["Comment"],
+                 "has_bare_permalink": False, "has_permalink": False,
+                 "has_comment_button": False},
             ]}
         self._open_post_result = open_post_result
         self._open_post_url = (open_post_url or
@@ -1299,12 +1308,153 @@ class TestFeedDiagnostic:
         assert row["error"] is None
         assert row["new_posts"] == 0
         assert any("feed diagnostic:" in n for n in notes)
-        assert any("3 article-ish elements (3 <article>" in n
+        assert any("7 article-ish elements (0 <article>, 7 div[role=\"article\"])" in n
                    for n in notes)
+        assert any("2 non-comment top-level" in n for n in notes)
+        assert any("2 with bare permalink" in n for n in notes)
         assert any("comment button" in n for n in notes)
+        assert any("permalink/1697550221711486" in n for n in notes)
         assert row["message"] and "feed diagnostic:" in row["message"]
         src = db.get_source_by_id("src1")
         assert src is not None and src["last_scraped_at"]
+
+
+# ---------------------------------------------------------------------------
+# (i-b) Feed posts, real shapes (live diagnostic 2026-11-12 ~04:50 PKT):
+# no "<Name>'s post" heading anywhere, comments carry comment_id
+# links, the comment-button pattern matches nothing. The heading
+# gate is gone: a post is a top-level non-comment article with a
+# bare permalink (no comment_id); the author comes from the first
+# innerText line and never blocks collection; the count is optional.
+# ---------------------------------------------------------------------------
+
+class TestFeedPostsRealShapes:
+    def test_heading_gate_is_gone(self):
+        # The diagnostic proved 0 of 7 live elements have a
+        # "<Name>'s post" heading — the gate rejected every real
+        # post. It must not appear in the collection path at all.
+        assert "headingName" not in _FEED_POSTS_JS
+        assert "headingName" not in _OPEN_FEED_POST_JS
+        assert "barePostLink" in _FEED_POSTS_JS
+        assert "comment_id" in _FEED_POSTS_JS
+        assert "authorName" in _FEED_POSTS_JS
+        assert "collapseDoubled" in _FEED_POSTS_JS
+        assert "collapseDoubled" in _OPEN_FEED_POST_JS
+
+    def test_comment_count_is_optional_and_broad(self):
+        # The strict "Comment on X's post, N comments" pattern
+        # matched 0 live elements. The count comes from any
+        # descendant whose aria-label contains "comment" with a
+        # number near it — and collection never depends on it.
+        assert "commentCount" in _FEED_POSTS_JS
+        assert "/comment/i" in _FEED_POSTS_JS
+        assert "commentButton" in _FEED_POSTS_JS
+        assert "commentButton" in _OPEN_FEED_POST_JS
+
+    def test_diag_captures_non_comment_details(self):
+        assert "non_comment_top" in _FEED_DIAG_JS
+        assert "hrefs" in _FEED_DIAG_JS
+        assert "comment_labels" in _FEED_DIAG_JS
+        assert "has_bare_permalink" in _FEED_DIAG_JS
+        assert "with_bare_permalink" in _FEED_DIAG_JS
+
+
+class TestFeedAuthorNeverBlocks:
+    def test_empty_author_name_still_collected(self):
+        # The author is never a gate: a post with a bare permalink
+        # and an empty name is still collected and saved.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            feed_posts=[{"post_url": POST_URLS[0], "author_name": "",
+                         "comment_count": None,
+                         "has_comment_button": False,
+                         "key": "||Jj Mathosi Jj Mathosi 18 May"}],
+            extract_payload=_extract_payload([_comment("Amit", "nice")]))
+        job = _scrape_job()
+        _run_scrape(page, job)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 1
+        assert len(db.get_posts_for_source("src1")) == 1
+
+    def test_comment_button_entry_with_null_count_opens(self):
+        # Photo post: no permalink, null count, comment button —
+        # kept and opened via the button (the key carries the
+        # empty count).
+        entry = {"post_url": None, "author_name": "Barbara",
+                 "comment_count": None,
+                 "key": "Barbara||Check this chart",
+                 "has_comment_button": True}
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            feed_posts=[entry],
+            extract_payload=_extract_payload([_comment("Amit", "nice")]))
+        job = _scrape_job()
+        _run_scrape(page, job)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 1
+        assert page.open_calls == ["Barbara||Check this chart"]
+
+
+class TestFeedDiagnosticDetails:
+    def test_diagnostic_captures_non_comment_article_details(self):
+        # The 0-found diagnostic must name the non-comment articles
+        # in full — aria-label, text head, hrefs, comment labels —
+        # so the next 0-found run confirms whether the new post
+        # identification fits the real page.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            feed_posts=[],
+            feed_diag={
+                "total": 7, "article_tags": 0, "role_articles": 7,
+                "top_level": 7, "nested": 0, "non_comment_top": 2,
+                "with_heading": 0, "with_permalink": 5,
+                "with_bare_permalink": 2, "with_comment_button": 0,
+                "with_comment_label": 2,
+                "samples": [
+                    {"aria_label": "",
+                     "text_head": "Jj Mathosi Jj Mathosi 18 May Lost 2k "
+                                  "with amd call",
+                     "hrefs": ["https://www.facebook.com/groups/"
+                               "572426944223825/permalink/1697550221711486/"],
+                     "comment_labels": ["Comment"],
+                     "has_bare_permalink": True, "has_permalink": True,
+                     "has_comment_button": False},
+                ]})
+        job = _scrape_job()
+        notes = []
+        jobs.run_scrape(FacebookWorker(), page, db, job,
+                        lambda: False, note=notes.append)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert any("2 non-comment top-level" in n for n in notes)
+        assert any("2 with bare permalink" in n for n in notes)
+        assert any("permalink/1697550221711486" in n for n in notes)
+        assert any("comment labels: [Comment]" in n for n in notes)
+        assert row["message"] and "non-comment top-level" in row["message"]
+
+
+class TestSessionErrorVisibleInApp:
+    def test_failed_job_error_names_session_path(self):
+        # The second-press "empty" failure must be visible in the
+        # app, not only in the agent console: the stored job error
+        # carries the session path (state, current URL, target nav).
+        page = _FakePage(blank=True, goto_raises_for={GROUP_URL})
+        job = _scrape_job()
+        jobs.run_scrape(FacebookWorker(), page, db, job, lambda: False)
+        row = db.get_job(job["id"])
+        assert row["status"] == "failed"
+        assert row["error"] is not None
+        assert "Facebook page did not load (state: empty)" in row["error"]
+        assert "session check: state=empty" in row["error"]
+        assert "target_nav=attempted, goto failed" in row["error"]
 
 
 class TestCommentButtonOpen:
