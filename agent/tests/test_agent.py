@@ -121,7 +121,8 @@ class _FakePage:
                  leave_flow=None, gate_sequence_by_url=None,
                  feed_loading_by_url=None, goto_raises_for=None,
                  blank=False, feed_diag=None, open_post_result=True,
-                 open_post_url=None, ready_after=0):
+                 open_post_url=None, ready_after=0,
+                 transient_empty_calls=None):
         self._pages = dict(pages or {})
         self._feed_posts = list(feed_posts or [])
         self._extract_payload = extract_payload
@@ -161,6 +162,15 @@ class _FakePage:
         # ready_after: inner_text("body") stays "" for the first N
         # calls (a mid-render page) and links stay hidden until
         # then — 0 keeps the old behaviour (content at once).
+        # transient_empty_calls: 1-based inner_text("body") call
+        # numbers during which the page reads as torn down — a
+        # transient SPA re-hydration AFTER the page was ready
+        # (Gemini's second-press diagnosis): inner_text returns
+        # "", links stay hidden and every locator counts 0, even
+        # though the calls before and after return real content.
+        self._ready_after = ready_after
+        self._ready_calls = 0
+        self._transient_empty = set(transient_empty_calls or [])
         self._feed_diag = feed_diag if feed_diag is not None else {
             "total": 7, "article_tags": 0, "role_articles": 7,
             "top_level": 7, "nested": 0, "non_comment_top": 2,
@@ -187,8 +197,6 @@ class _FakePage:
             "https://www.facebook.com/groups/572426944223825/permalink/999/")
         self.open_calls = []
         self.close_calls = 0
-        self._ready_after = ready_after
-        self._ready_calls = 0
         self.url = ""
         # blank=True: a fresh tab that never rendered (empty body) —
         # the session check must prove the session at the job's
@@ -221,6 +229,8 @@ class _FakePage:
             self._ready_calls += 1
             if self._ready_calls <= self._ready_after:
                 return ""
+            if self._ready_calls in self._transient_empty:
+                return ""
             return self._body
         return ""
 
@@ -228,6 +238,8 @@ class _FakePage:
         if "a[href]" in selector:
             if self._ready_after > 0 and \
                     self._ready_calls <= self._ready_after:
+                return []
+            if self._ready_calls in self._transient_empty:
                 return []
             return list(self._anchors_by_url.get(self.url, []))
         return []
@@ -251,6 +263,10 @@ class _FakePage:
         return None
 
     def locator(self, selector):
+        if self._ready_calls in self._transient_empty:
+            # Transient SPA teardown: every read momentarily
+            # returns nothing — the session check must retry.
+            return _FakeLocator(0)
         if self._logged_out and 'input[type="password"]' in selector:
             return _FakeLocator(1)
         if self._leave is not None:
@@ -1563,3 +1579,94 @@ class TestVerifySessionNoReload:
         assert state == "empty"
         assert any("current_url=" in n and
                    "target_nav=attempted, goto failed" in n for n in notes)
+
+
+# ---------------------------------------------------------------------------
+# (h) check_session_with_retry: transient "empty" retries, real states don't
+# ---------------------------------------------------------------------------
+
+class TestCheckSessionWithRetry:
+    def test_transient_empty_then_ok(self):
+        # (a) First read sees a torn-down page, second sees content:
+        # the retry returns "ok" after exactly 2 attempts.
+        page = _FakePage(ready_after=1)
+        state = FacebookWorker().check_session_with_retry(
+            page, jobs._ctx(lambda: False))
+        assert state == "ok"
+        assert page._ready_calls == 2
+
+    def test_persistently_empty_returns_empty_after_three_attempts(self):
+        # (b) A page that never renders: exactly 3 attempts, then
+        # "empty" — plus one diagnostic note naming the reads.
+        page = _FakePage(blank=True)
+        notes = []
+        state = FacebookWorker().check_session_with_retry(
+            page, jobs._ctx(lambda: False, notes.append))
+        assert state == "empty"
+        # 3 attempts + the diagnostic's own body re-read.
+        assert page._ready_calls == 4
+        assert any("session check empty after 3 attempts" in n
+                   for n in notes)
+        assert any("body_len=0" in n and "links_count=0" in n
+                   and "Your profile=0" in n and "Messenger=0" in n
+                   for n in notes)
+
+    def test_non_empty_states_return_at_once(self):
+        # (c) logged_out / checkpoint / blocked are real answers:
+        # no extra attempts.
+        logged_out = _FakePage(logged_out=True)
+        assert FacebookWorker().check_session_with_retry(
+            logged_out, jobs._ctx(lambda: False)) == "logged_out"
+        assert logged_out._ready_calls == 1
+
+        checkpoint = _FakePage(pages={GROUP_URL: {
+            "body_text": "Verify your identity to continue",
+            "title": "Checkpoint"}})
+        checkpoint.goto(GROUP_URL)
+        assert FacebookWorker().check_session_with_retry(
+            checkpoint, jobs._ctx(lambda: False)) == "checkpoint"
+        assert checkpoint._ready_calls == 1
+
+        blocked = _FakePage(pages={GROUP_URL: {
+            "body_text": "captcha warning",
+            "title": "Stock Market Traders."}})
+        blocked.goto(GROUP_URL)
+        assert FacebookWorker().check_session_with_retry(
+            blocked, jobs._ctx(lambda: False)) == "blocked"
+        assert blocked._ready_calls == 1
+
+    def test_second_press_transient_empty_then_ok(self):
+        # (d) The live second-press scenario: the browser is already
+        # on the target URL, the first check reads a torn-down page,
+        # the retry reads the live session — no navigation at all.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            transient_empty_calls={2})
+        page.goto(GROUP_URL)
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False), GROUP_URL)
+        assert state == "ok"
+        assert page.goto_calls == [GROUP_URL]
+        # Call 1 was the readiness wait; calls 2-3 were the two
+        # check attempts.
+        assert page._ready_calls == 3
+
+    def test_transient_past_first_check_recovers_at_target_recheck(self):
+        # The teardown outlasts the first check point's retries,
+        # but the already-on-target re-check (which retries too)
+        # sees the recovered page — still no navigation.
+        page = _FakePage(
+            pages={GROUP_URL: {
+                "body_text": "Stock Market Traders. group feed",
+                "title": "Stock Market Traders."}},
+            transient_empty_calls={2, 3, 4})
+        page.goto(GROUP_URL)
+        notes = []
+        state = FacebookWorker().verify_session(
+            page, jobs._ctx(lambda: False, notes.append), GROUP_URL)
+        assert state == "ok"
+        assert page.goto_calls == [GROUP_URL]
+        assert any("session check empty after 3 attempts" in n
+                   for n in notes)

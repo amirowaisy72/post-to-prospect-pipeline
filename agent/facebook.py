@@ -1067,6 +1067,17 @@ class FacebookWorker:
     login_url = "https://www.facebook.com/login"
     home_url = "https://www.facebook.com"
 
+    # Selectors that prove a signed-in top bar. One list for both
+    # check_session and the retry diagnostic below, so the
+    # diagnostic can never report different selectors than the
+    # check itself uses. (label, selector) pairs.
+    _LOGGED_IN_SELECTORS = (
+        ("Your profile", 'a[aria-label="Your profile"]'),
+        ("Account", 'a[aria-label="Account"]'),
+        ("/me/", 'a[href="/me/"]'),
+        ("Messenger", '[aria-label="Messenger"]'),
+    )
+
     # ------------------------------------------------------------------
     # Login / block detection
     # ------------------------------------------------------------------
@@ -1111,12 +1122,7 @@ class FacebookWorker:
             if marker in low:
                 return "blocked"
         # Logged-in chrome present -> ok even if the body is thin.
-        for selector in (
-            'a[aria-label="Your profile"]',
-            'a[aria-label="Account"]',
-            'a[href="/me/"]',
-            '[aria-label="Messenger"]',
-        ):
+        for _label, selector in self._LOGGED_IN_SELECTORS:
             try:
                 if page.locator(selector).count() > 0:
                     return "ok"
@@ -1130,6 +1136,81 @@ class FacebookWorker:
             if not links:
                 return "empty"
         return "ok"
+
+    def check_session_with_retry(self, page: Page,
+                                 ctx: dict | None = None,
+                                 retries: int = 3,
+                                 delay: float = 0.5) -> str:
+        """Re-check the session, retrying ONLY a transient "empty".
+
+        Gemini's diagnosis of the live second-press failure: on the
+        second Scrap the check runs immediately on the already-open
+        page, and if Facebook's SPA is mid re-hydration / feed
+        update at that instant, every read momentarily returns
+        empty or throws — a false-positive "empty". A non-empty
+        state (ok / logged_out / checkpoint / blocked) is a real
+        answer and returns at once, with no extra attempts. When
+        the page stays "empty" after all retries, one diagnostic
+        note names what the page actually looked like. Never
+        raises.
+        """
+        attempts = max(1, retries)
+        state = "empty"
+        for attempt in range(attempts):
+            try:
+                state = self.check_session(page, ctx)
+            except Exception:
+                state = "empty"
+            if state != "empty":
+                return state
+            if attempt < attempts - 1:
+                try:
+                    time.sleep(delay)
+                except Exception:
+                    pass
+        self._note_session_empty(page, ctx, attempts)
+        return "empty"
+
+    def _note_session_empty(self, page: Page, ctx: dict | None,
+                            attempts: int) -> None:
+        """Note what the page actually looked like when the session
+        check stayed "empty" after all retries: URL, title, body
+        length, link count, and each logged-in selector's count
+        ("error" when the read itself threw, -1 when the body /
+        link read threw). Never raises — a diagnostic must not
+        fail the job it explains.
+        """
+        try:
+            try:
+                url = page.url or "?"
+            except Exception:
+                url = "?"
+            try:
+                title = (page.title() or "")[:80]
+            except Exception:
+                title = "?"
+            try:
+                body_len = len(page.inner_text("body") or "")
+            except Exception:
+                body_len = -1
+            try:
+                links_count = len(page.query_selector_all("a[href]") or [])
+            except Exception:
+                links_count = -1
+            parts = []
+            for label, selector in self._LOGGED_IN_SELECTORS:
+                try:
+                    count = page.locator(selector).count()
+                except Exception:
+                    count = "error"
+                parts.append(f"{label}={count}")
+            _note(ctx,
+                  f"session check empty after {attempts} attempts: "
+                  f"url={url}, title={title!r}, body_len={body_len}, "
+                  f"links_count={links_count}, "
+                  f"selectors={{{', '.join(parts)}}}")
+        except Exception:
+            pass
 
     def session_state(self, page: Page, ctx: dict | None = None) -> dict:
         """Full session snapshot for logs / health."""
@@ -1185,7 +1266,9 @@ class FacebookWorker:
             is not misread as "empty";
         (1) the page the browser is already on — a loaded,
             signed-in group/feed page proves the session with no
-            navigation at all;
+            navigation at all. The check retries briefly when it
+            reads "empty", so a transient SPA teardown (the live
+            second-press failure) does not fail the job;
         (2) the job's own target page (the source's group/page URL
             for scrape/sync, the search URL for collect) — if it
             loads with a live session the job is already where it
@@ -1194,7 +1277,8 @@ class FacebookWorker:
             target URL the reload is skipped entirely: a same-URL
             reload of a heavy Facebook feed is slow (domcontentloaded
             can exceed the 20s timeout even with the retry) and is
-            pure cost when the page is already there;
+            pure cost when the page is already there. The re-check
+            on the already-open target retries "empty" the same way;
         (3) otherwise the actual detected state (logged_out /
             checkpoint / blocked / empty) — an unloaded page is
             reported as "empty", never as "not signed in". On
@@ -1219,7 +1303,7 @@ class FacebookWorker:
         except Exception:
             current_url = ""
         try:
-            state = self.check_session(page, ctx)
+            state = self.check_session_with_retry(page, ctx)
         except Exception:
             state = "empty"
         if state == "ok":
@@ -1234,7 +1318,7 @@ class FacebookWorker:
                 except Exception:
                     pass
                 try:
-                    state = self.check_session(page, ctx)
+                    state = self.check_session_with_retry(page, ctx)
                 except Exception:
                     state = "empty"
             else:
