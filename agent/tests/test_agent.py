@@ -999,6 +999,91 @@ class TestCollectSources:
         assert row["status"] == "failed"
         assert "keyword" in (row["error"] or "")
 
+    def test_message_names_the_breakdown(self):
+        # The old "every candidate failed the gate" hid whether the
+        # search found 0 candidates or 20 gated ones. The message
+        # must name the counts.
+        db.upsert_source("src-old", "Already In", "group", ALREADY_GROUP,
+                         8000, "joined", "acc9")
+        anchors = [
+            _FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members"),
+            _FakeAnchor(DEAD_GROUP, "Dead Group", "5K members"),
+            _FakeAnchor(SMALL_GROUP, "Tiny Group", "50 members"),
+            _FakeAnchor(UNKNOWN_GROUP, "Mystery Group", None),
+            _FakeAnchor(ALREADY_GROUP, "Already In", "8K members"),
+        ]
+        gate = {
+            GOOD_GROUP: {"posts": 5, "comments": 40},
+            DEAD_GROUP: {"posts": 3, "comments": 1},
+            SMALL_GROUP: {"posts": 4, "comments": 30},
+            UNKNOWN_GROUP: {"posts": 2, "comments": 25},
+            ALREADY_GROUP: {"posts": 9, "comments": 99},
+        }
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors},
+            gate_by_url=gate,
+            join_urls={GOOD_GROUP, UNKNOWN_GROUP})
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["message"] == (
+            "Joined 2 new sources for 'stocks' "
+            "(5 candidate(s): 1 already joined, 1 too few members, "
+            "1 no comments, 0 join failed)")
+        assert (row.get("result") or {}).get("counts") == {
+            "candidates": 5, "already_joined": 1, "too_few_members": 1,
+            "no_comments": 1, "join_failed": 0}
+
+    def test_zero_candidates_message(self):
+        # A search that returns nothing must say so — not blame
+        # the gates.
+        page = _FakePage()
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 0
+        assert row["message"] == (
+            "No new sources for 'stocks' — 0 candidate(s): "
+            "0 already joined, 0 too few members, 0 no comments, "
+            "0 join failed")
+
+    def test_gate_notes_when_feed_never_renders(self):
+        # A group whose feed never renders articles must be skipped
+        # with a note naming the cause — not a silent zero count.
+        anchors = [_FakeAnchor(GOOD_GROUP, "Stocks To Watch", "12K members")]
+        notes: list[str] = []
+        page = _FakePage(
+            anchors_by_url={SEARCH_GROUPS_URL: anchors},
+            article_count=0)
+        job = self._collect_job()
+        jobs.run_collect_sources(FacebookWorker(), page, db, job,
+                                 lambda: False, note=notes.append)
+        row = db.get_job(job["id"])
+        assert row["status"] == "done"
+        assert row["new_posts"] == 0
+        assert db.get_source_by_url(GOOD_GROUP) is None
+        assert any("never rendered articles" in n and GOOD_GROUP in n
+                   for n in notes)
+
+
+class TestSearchFallback:
+    def test_fallback_loads_search_url_not_home(self):
+        # Live fact: the Facebook home page hangs in this Chromium
+        # (see verify_session), so the search-box fallback must
+        # never load it — it loads the search results page, which
+        # carries the same search box. Home raising here proves
+        # the fallback does not touch it.
+        page = _FakePage(
+            goto_raises_for={"https://www.facebook.com"})
+        out = FacebookWorker()._search_via_ui(
+            page, "stocks", "Groups", None, kind="groups")
+        assert out == []
+        assert page.goto_calls == [SEARCH_GROUPS_URL]
+        assert "https://www.facebook.com" not in page.goto_calls
+
 
 # ---------------------------------------------------------------------------
 # (k) Delete source: leave-then-remove; leave failure keeps the row

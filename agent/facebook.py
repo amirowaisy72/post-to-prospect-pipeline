@@ -2294,15 +2294,24 @@ class FacebookWorker:
                        ctx: dict | None, kind: str = "profiles") -> list[dict]:
         """Search using Facebook's own search box, then collect results.
 
-        home -> search box -> type keyword -> Enter -> click the tab
-        (People/Posts/Pages/Groups) -> collect from the results page.
-        Used when a direct search URL yields 0 links.
+        Search page -> search box -> type keyword -> Enter -> click
+        the tab (People/Posts/Pages/Groups) -> collect from the
+        results page. Used when a direct search URL yields 0 links.
         """
         if _should_stop(ctx):
             return []
         label = f"ui_search:{tab}:{keyword}"
         try:
-            if not self._load(page, self.home_url, ctx, "home"):
+            # Never load the home page here: home hangs in this
+            # Chromium (see verify_session), so a home load can
+            # stall the whole fallback. The search results page
+            # itself carries the same search box — load it and
+            # type the keyword there instead. (Only groups/pages
+            # call this fallback; anything else loads the groups
+            # search — the box + tab click still do the real work.)
+            kind_url = kind if kind in ("groups", "pages") else "groups"
+            if not self._load(page, self.search_url(keyword, kind_url),
+                              ctx, "ui_search"):
                 return []
             box = None
             for selector in (
@@ -2751,6 +2760,8 @@ class FacebookWorker:
             return result
         articles = self._wait_for_articles(page, ctx, timeout_s=20.0)
         if articles == 0:
+            _note(ctx, f"feed never rendered articles for {url} — "
+                       f"gate skipped (0 comments)")
             return result
 
         def _count_once() -> tuple[int, int, dict]:

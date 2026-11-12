@@ -458,6 +458,13 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
         seen_urls = set()
         joined = []
         checked = 0
+        # Outcome counts, so the job message can say exactly what
+        # happened — "every candidate failed the gate" hides whether
+        # the search found 0 candidates or 20 gated ones.
+        already = 0
+        member_skipped = 0
+        comment_skipped = 0
+        join_failed = 0
         stopped = False
         for candidate in candidates:
             if len(joined) >= max_new:
@@ -475,6 +482,7 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
             existing = db.get_source_by_url(url)
             if existing is not None:
                 note(f"Already joined: {url} — skipped")
+                already += 1
                 continue
             # Member gate: known count below the minimum is dead;
             # unknown count is read once from the source's own page;
@@ -490,6 +498,7 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
                     and member_count < min_members):
                 note(f"Skipped {kind} (too few members): {url} — "
                      f"{member_count} members (need {min_members})")
+                member_skipped += 1
                 continue
             # Comments gate: our data comes purely from comments.
             # The gate scrolls the feed patiently before deciding,
@@ -503,6 +512,7 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
                      f"{activity.get('posts', 0)} post(s), "
                      f"{activity.get('comments', 0)} comment(s) "
                      f"(need {min_comments})")
+                comment_skipped += 1
                 continue
             source_id = _new_id_source()
             if kind == "group":
@@ -513,6 +523,7 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
                 if not joined_ok:
                     note(f"Could not join group: {url} — not saved, "
                          f"try Add Source again")
+                    join_failed += 1
                     continue
                 note(f"Joined group: {url}")
             else:
@@ -530,21 +541,29 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
             db.update_job(job_id, posts_processed=checked,
                           new_posts=len(joined),
                           result={"sources": joined})
+        breakdown = (f"{checked} candidate(s): {already} already joined, "
+                     f"{member_skipped} too few members, "
+                     f"{comment_skipped} no comments, "
+                     f"{join_failed} join failed")
         if joined:
             message = (f"Joined {len(joined)} new "
                        f"{'source' if len(joined) == 1 else 'sources'} "
-                       f"for '{keyword}'")
+                       f"for '{keyword}' ({breakdown})")
         else:
-            message = (f"No new sources for '{keyword}' — every "
-                       f"candidate failed the comments/member gate "
-                       f"or was already joined")
+            message = (f"No new sources for '{keyword}' — {breakdown}")
         db.update_job(job_id,
                       status="stopped" if stopped else "done",
                       finished_at=_now_iso(),
                       posts_processed=checked,
                       new_posts=len(joined),
                       message=message,
-                      result={"sources": joined})
+                      result={"sources": joined,
+                              "counts": {
+                                  "candidates": checked,
+                                  "already_joined": already,
+                                  "too_few_members": member_skipped,
+                                  "no_comments": comment_skipped,
+                                  "join_failed": join_failed}})
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
 
