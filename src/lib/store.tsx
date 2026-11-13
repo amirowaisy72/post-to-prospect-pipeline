@@ -149,42 +149,86 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const firstTemplates = useRef<Record<string, string>>({});
 
   // Load saved data after hydration (browser storage is not available during SSR).
+  //
+  // INSTALLER SEED (first-run only): the setup copies the owner's
+  // exported data to public/seed.json, served at /seed.json. When this
+  // browser has no saved data yet, the seed loads once and is then
+  // saved to localStorage like any other state. It NEVER overwrites
+  // existing data: a browser that already has leadhunter:v2 never
+  // reads the seed file. A missing seed file (an install built without
+  // one) is normal — the app starts empty, as before.
+  //
+  // The seed is the owner's data as exported, including the Gemini API
+  // key he chose to share with his partner — the seed loads it as-is
+  // so Configurations comes pre-filled. The partner can replace the
+  // key with their own in Configurations at any time.
   useEffect(() => {
-    try {
-      // The old key held the demo data — drop it so the app starts empty.
-      window.localStorage.removeItem(LEGACY_STORAGE_KEY);
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as AppState;
-        if (saved && typeof saved === "object") {
-          const seed = createSeedState();
-          const arrays = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
-          const accounts = arrays<AppState["accounts"][number]>(saved.accounts);
-          const pick = (id: unknown) =>
-            typeof id === "string" && accounts.some((a) => a.id === id) ? id : "";
-          setState({
-            ...seed,
-            ...saved,
-            accounts,
-            sources: arrays(saved.sources),
-            posts: arrays(saved.posts),
-            leads: arrays(saved.leads),
-            activity: arrays(saved.activity),
-            threads: arrays(saved.threads),
-            chatMessages: arrays(saved.chatMessages),
-            chatScript: svc.mergeChatScript(saved.chatScript),
-            // Never sit on an account id that no longer exists.
-            activeAccountId:
-              pick(saved.activeAccountId) || pick(saved.defaultAccountId) || accounts[0]?.id || "",
-            defaultAccountId: pick(saved.defaultAccountId) || accounts[0]?.id || "",
-            settings: svc.mergeSettings(createDefaultSettings(), saved.settings),
-          });
-        }
+    let cancelled = false;
+    // Shared merge: a saved AppState (from localStorage or the bundled
+    // seed file) is merged over the empty seed state. Arrays are only
+    // taken when they really are arrays; settings and the chat script
+    // are merged through the service so unknown fields stay safe.
+    const loadSaved = (saved: unknown): boolean => {
+      if (!saved || typeof saved !== "object") return false;
+      const s = saved as AppState;
+      const seed = createSeedState();
+      const arrays = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+      const accounts = arrays<AppState["accounts"][number]>(s.accounts);
+      const pick = (id: unknown) =>
+        typeof id === "string" && accounts.some((a) => a.id === id) ? id : "";
+      setState({
+        ...seed,
+        ...s,
+        accounts,
+        sources: arrays(s.sources),
+        posts: arrays(s.posts),
+        leads: arrays(s.leads),
+        activity: arrays(s.activity),
+        threads: arrays(s.threads),
+        chatMessages: arrays(s.chatMessages),
+        chatScript: svc.mergeChatScript(s.chatScript),
+        // Never sit on an account id that no longer exists.
+        activeAccountId:
+          pick(s.activeAccountId) || pick(s.defaultAccountId) || accounts[0]?.id || "",
+        defaultAccountId: pick(s.defaultAccountId) || accounts[0]?.id || "",
+        settings: svc.mergeSettings(createDefaultSettings(), s.settings),
+      });
+      return true;
+    };
+    // First-run data seed (installer): public/seed.json, served at
+    // /seed.json. Loads ONLY when this browser has no saved data yet.
+    const loadSeed = async (): Promise<void> => {
+      try {
+        const res = await fetch("/seed.json", { cache: "no-store" });
+        if (!res.ok) return;
+        const parsed = (await res.json()) as AppState;
+        if (!cancelled) loadSaved(parsed);
+      } catch {
+        /* no seed file — start empty, as before */
       }
-    } catch {
-      /* corrupted storage — fall back to the empty state */
-    }
-    setHydrated(true);
+    };
+    const hydrate = async (): Promise<void> => {
+      try {
+        // The old key held the demo data — drop it so the app starts empty.
+        window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          loadSaved(JSON.parse(raw));
+        } else {
+          await loadSeed();
+        }
+      } catch {
+        /* corrupted storage — fall back to the empty state */
+      }
+      // Hydrated is set only after the seed (if any) has loaded, so
+      // the persist effect below can never write the empty state over
+      // a seed that is still on its way in.
+      if (!cancelled) setHydrated(true);
+    };
+    void hydrate();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
