@@ -23,10 +23,14 @@ cd /d "%~dp0"
 echo [leadhunter] Starting LeadHunter...
 
 REM Find bun: prefer it on PATH, else the per-user install location.
+REM Verified by running it, not by checking a bare name exists.
 set "BUN=bun"
-where bun >nul 2>nul
-if errorlevel 1 set "BUN=%USERPROFILE%\.bun\bin\bun.exe"
-if not exist "%BUN%" goto no_bun
+bun --version >nul 2>nul
+if not errorlevel 1 goto bun_ok
+set "BUN=%USERPROFILE%\.bun\bin\bun.exe"
+"%BUN%" --version >nul 2>nul
+if errorlevel 1 goto no_bun
+:bun_ok
 
 REM First run only: install the frontend dependencies.
 if not exist "%~dp0node_modules" "%BUN%" install
