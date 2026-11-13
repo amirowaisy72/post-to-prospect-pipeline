@@ -81,6 +81,11 @@ jobs:
       - name: Resolve component versions + download installers
         id: components
         shell: pwsh
+        env:
+          # Without this, `gh api` prints "set the GH_TOKEN environment
+          # variable" and returns nothing — the aria2c lookup below then
+          # throws (run #1 failed exactly this way after 28s).
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
           $dl = Join-Path $env:GITHUB_WORKSPACE "build-downloads"
@@ -109,9 +114,14 @@ jobs:
           $pyVersion = "${{ inputs.python_version }}"
           $pyUrl = "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-amd64.exe"
 
-          # aria2c: latest release asset (win-64bit build).
-          $ariaAsset = gh api repos/aria2/aria2/releases/latest --jq '.assets[] | select(.name | test("win-64bit-build.*\\.zip$")) | .browser_download_url' | Select-Object -First 1
-          if (-not $ariaAsset) { throw "Could not find an aria2c Windows asset in the latest release." }
+          # aria2c: latest release asset (win-64bit build). Fallback:
+          # 1.37.0, verified to exist at this URL (run #1 died here
+          # because the gh lookup returned nothing without GH_TOKEN).
+          $ariaAsset = "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip"
+          try {
+            $latest = gh api repos/aria2/aria2/releases/latest --jq '.assets[] | select(.name | test("win-64bit-build.*\\.zip$")) | .browser_download_url' | Select-Object -First 1
+            if ($latest) { $ariaAsset = $latest }
+          } catch { Write-Host "aria2c latest lookup failed, using $ariaAsset" }
 
           foreach ($item in @(
             @{ name = "bun"; url = $bunUrl; file = "bun-windows-x64.zip" },
