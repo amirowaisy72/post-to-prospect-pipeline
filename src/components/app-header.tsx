@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { Star } from "lucide-react";
 
 import { AccountStatusBadge } from "@/components/badges";
+import { AgentStatusBadge } from "@/components/agent-status-badge";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -40,6 +41,7 @@ export function AppHeader() {
           </span>
         )}
       </div>
+      <AgentStatusBadge />
       <Link to="/accounts" className="hidden text-xs font-semibold text-primary hover:underline md:inline">
         Manage accounts
       </Link>

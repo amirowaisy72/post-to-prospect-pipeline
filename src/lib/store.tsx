@@ -146,6 +146,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const firstTemplates = useRef<Record<string, string>>({});
 
   // Load saved data after hydration (browser storage is not available during SSR).
   useEffect(() => {
@@ -223,6 +224,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         .messagesForThread(s, thread.id)
         .find((m) => m.id === messageId);
       if (!message) return false;
+      const aiFirstNow =
+        message.role === "agent" &&
+        svc.messagesForThread(s, thread.id).filter((m) => m.role === "agent").length <= 1;
+      if (aiFirstNow) {
+        firstTemplates.current[messageId] = firstTemplates.current[messageId] ?? message.text;
+        setState((prev) => ({
+          ...prev,
+          chatMessages: prev.chatMessages.map((m) =>
+            m.id === messageId ? { ...m, text: "AI pehla message likh raha hai…" } : m,
+          ),
+        }));
+      }
       const r = await chatStart(s.settings.agentUrl, {
         accountId: thread.accountId,
         threadId: thread.id,
@@ -231,11 +244,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         profileName: thread.profileName,
         sourceType: thread.sourceType,
         sourceText: thread.sourceText,
-        firstMessage: message.text,
+        firstMessage: firstTemplates.current[messageId] ?? message.text,
+        aiFirst: svc.messagesForThread(s, thread.id).filter((m) => m.role === "agent").length <= 1,
+        script: s.chatScript,
+        geminiKey: s.settings.geminiApiKey.trim(),
+        model: s.settings.model,
+        provider: s.settings.provider,
+        ollamaUrl: s.settings.ollamaUrl,
         dailyCap: svc.dailyChatLimit(account, nowIso()),
       });
       if (!r.ok) {
         toast.error(`Messenger send failed: ${r.error}`);
+        const original = firstTemplates.current[messageId];
+        if (original) {
+          setState((prev) => ({
+            ...prev,
+            chatMessages: prev.chatMessages.map((m) =>
+              m.id === messageId ? { ...m, text: original } : m,
+            ),
+          }));
+        }
         return false;
       }
       const marked = svc.markMessageDelivery(
@@ -244,6 +272,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         "pending-messenger",
       );
       if (marked.ok) setState(marked.value);
+      const isAiFirst =
+        message.role === "agent" &&
+        svc.messagesForThread(s, thread.id).filter((m) => m.role === "agent").length <= 1;
+      if (Boolean(isAiFirst) && Boolean(0)) {
+        firstTemplates.current[messageId] = firstTemplates.current[messageId] ?? message.text;
+        setState((prev) => ({
+          ...prev,
+          chatMessages: prev.chatMessages.map((m) =>
+            m.id === messageId ? { ...m, text: "AI pehla message likh raha hai…" } : m,
+          ),
+        }));
+      }
       return true;
     };
     return {
@@ -424,7 +464,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           .threadsForAccount(s, accountId)
           .filter((t) => t.status === "active");
         if (active.length === 0) return true; // nothing to watch
-        if (!s.settings.geminiApiKey.trim()) {
+        if (s.settings.provider === "gemini" && !s.settings.geminiApiKey.trim()) {
           toast.error("Add your Gemini API key in Configurations first — the agent cannot draft replies without it.");
           return false;
         }
@@ -439,7 +479,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           })),
           script: s.chatScript,
           geminiKey: s.settings.geminiApiKey.trim(),
-          model: s.settings.model,
+          model: s.settings.model, provider: s.settings.provider, ollamaUrl: s.settings.ollamaUrl,
           dailyCap: svc.dailyChatLimit(account, nowIso()),
         });
         if (!r.ok) {
@@ -487,6 +527,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       refreshAgentLogs: () => agentLogs(stateRef.current.settings.agentUrl),
     };
   }, [state, hydrated, apply]);
+
+  const activeKey = state.threads
+    .filter((t) => t.status === "active")
+    .map((t) => t.id)
+    .join(",");
+  useEffect(() => {
+    if (hydrated && activeKey) void value.sendChatWatch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey, hydrated]);
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }

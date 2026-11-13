@@ -171,8 +171,8 @@ def init_db(path=None) -> Path:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
         if "verification" not in cols:
             conn.execute(
-                "ALTER TABLE jobs ADD COLUMN verification TEXT "
-                "NOT NULL DEFAULT '[]'")
+                "ALTER TABLE jobs ADD COLUMN verification TEXT " "NOT NULL DEFAULT '[]'"
+            )
         if "message" not in cols:
             conn.execute("ALTER TABLE jobs ADD COLUMN message TEXT")
         if "result" not in cols:
@@ -210,8 +210,15 @@ def _new_id() -> str:
 # ----------------------------------------------------------------------
 # Sources
 # ----------------------------------------------------------------------
-def upsert_source(source_id, name, type_, url, member_count=None,
-                  status="joined", joined_by_account_id=None):
+def upsert_source(
+    source_id,
+    name,
+    type_,
+    url,
+    member_count=None,
+    status="joined",
+    joined_by_account_id=None,
+):
     """Insert or update a source row. Returns the source id."""
     with _connect() as conn:
         conn.execute(
@@ -222,8 +229,15 @@ def upsert_source(source_id, name, type_, url, member_count=None,
             "name=excluded.name, type=excluded.type, url=excluded.url, "
             "member_count=excluded.member_count, status=excluded.status, "
             "joined_by_account_id=excluded.joined_by_account_id",
-            (source_id, name or "", type_ or "group", url or "",
-             member_count, status, joined_by_account_id),
+            (
+                source_id,
+                name or "",
+                type_ or "group",
+                url or "",
+                member_count,
+                status,
+                joined_by_account_id,
+            ),
         )
     return source_id
 
@@ -243,7 +257,8 @@ def get_source_by_id(source_id):
     """One source row as a dict, or None."""
     with _connect() as conn:
         row = conn.execute(
-            "SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+            "SELECT * FROM sources WHERE id = ?", (source_id,)
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -252,8 +267,7 @@ def get_source_by_url(url):
     collect-sources job to skip a group/page this account (or any
     account) already joined."""
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM sources WHERE url = ?", (url,)).fetchone()
+        row = conn.execute("SELECT * FROM sources WHERE url = ?", (url,)).fetchone()
     return dict(row) if row else None
 
 
@@ -264,21 +278,20 @@ def delete_source(source_id):
     removed, False when the id did not exist."""
     with _connect() as conn:
         post_rows = conn.execute(
-            "SELECT id FROM posts WHERE source_id = ?",
-            (source_id,)).fetchall()
+            "SELECT id FROM posts WHERE source_id = ?", (source_id,)
+        ).fetchall()
         post_ids = [r["id"] for r in post_rows]
         for post_id in post_ids:
             comment_rows = conn.execute(
-                "SELECT id FROM comments WHERE post_id = ?",
-                (post_id,)).fetchall()
+                "SELECT id FROM comments WHERE post_id = ?", (post_id,)
+            ).fetchall()
             for comment_row in comment_rows:
-                conn.execute("DELETE FROM replies WHERE comment_id = ?",
-                             (comment_row["id"],))
-            conn.execute("DELETE FROM comments WHERE post_id = ?",
-                         (post_id,))
+                conn.execute(
+                    "DELETE FROM replies WHERE comment_id = ?", (comment_row["id"],)
+                )
+            conn.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
         conn.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
-        cur = conn.execute("DELETE FROM sources WHERE id = ?",
-                           (source_id,))
+        cur = conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
         return cur.rowcount > 0
 
 
@@ -288,8 +301,7 @@ def delete_source(source_id):
 def known_post_url(url) -> bool:
     """True when a post with this URL is already stored."""
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM posts WHERE post_url = ?", (url,)).fetchone()
+        row = conn.execute("SELECT 1 FROM posts WHERE post_url = ?", (url,)).fetchone()
     return row is not None
 
 
@@ -307,8 +319,8 @@ def save_post(post_dict, last_synced_at=None):
     post_url = post_dict["post_url"]
     with _connect() as conn:
         existing = conn.execute(
-            "SELECT id, collected_at FROM posts WHERE post_url = ?",
-            (post_url,)).fetchone()
+            "SELECT id, collected_at FROM posts WHERE post_url = ?", (post_url,)
+        ).fetchone()
         if existing:
             post_id = existing["id"]
             collected_at = post_dict.get("collected_at") or existing["collected_at"]
@@ -316,12 +328,22 @@ def save_post(post_dict, last_synced_at=None):
                 "UPDATE posts SET source_id=?, account_id=?, author_name=?, "
                 "author_url=?, text=?, collected_at=?, "
                 "last_synced_at=COALESCE(?, last_synced_at) WHERE id=?",
-                (post_dict.get("source_id"), post_dict.get("account_id", ""),
-                 post_dict.get("author_name", ""), post_dict.get("author_url", ""),
-                 post_dict.get("text", ""), collected_at, last_synced_at, post_id),
+                (
+                    post_dict.get("source_id"),
+                    post_dict.get("account_id", ""),
+                    post_dict.get("author_name", ""),
+                    post_dict.get("author_url", ""),
+                    post_dict.get("text", ""),
+                    collected_at,
+                    last_synced_at,
+                    post_id,
+                ),
             )
-            conn.execute("DELETE FROM replies WHERE comment_id IN "
-                         "(SELECT id FROM comments WHERE post_id=?)", (post_id,))
+            conn.execute(
+                "DELETE FROM replies WHERE comment_id IN "
+                "(SELECT id FROM comments WHERE post_id=?)",
+                (post_id,),
+            )
             conn.execute("DELETE FROM comments WHERE post_id=?", (post_id,))
         else:
             post_id = post_dict.get("id") or _new_id()
@@ -330,10 +352,17 @@ def save_post(post_dict, last_synced_at=None):
                 "INSERT INTO posts (id, source_id, account_id, post_url, "
                 "author_name, author_url, text, collected_at, last_synced_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (post_id, post_dict.get("source_id"),
-                 post_dict.get("account_id", ""), post_url,
-                 post_dict.get("author_name", ""), post_dict.get("author_url", ""),
-                 post_dict.get("text", ""), collected_at, last_synced_at),
+                (
+                    post_id,
+                    post_dict.get("source_id"),
+                    post_dict.get("account_id", ""),
+                    post_url,
+                    post_dict.get("author_name", ""),
+                    post_dict.get("author_url", ""),
+                    post_dict.get("text", ""),
+                    collected_at,
+                    last_synced_at,
+                ),
             )
         for c_pos, comment in enumerate(post_dict.get("comments") or []):
             comment_id = _new_id()
@@ -341,20 +370,32 @@ def save_post(post_dict, last_synced_at=None):
                 "INSERT INTO comments (id, post_id, author_name, author_url, "
                 "text, posted_at, posted_at_label, position) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (comment_id, post_id, comment.get("author_name", ""),
-                 comment.get("author_url", ""), comment.get("text", ""),
-                 comment.get("posted_at"), comment.get("posted_at_label", ""),
-                 c_pos),
+                (
+                    comment_id,
+                    post_id,
+                    comment.get("author_name", ""),
+                    comment.get("author_url", ""),
+                    comment.get("text", ""),
+                    comment.get("posted_at"),
+                    comment.get("posted_at_label", ""),
+                    c_pos,
+                ),
             )
             for r_pos, reply in enumerate(comment.get("replies") or []):
                 conn.execute(
                     "INSERT INTO replies (id, comment_id, author_name, "
                     "author_url, text, posted_at, posted_at_label, position) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (_new_id(), comment_id, reply.get("author_name", ""),
-                     reply.get("author_url", ""), reply.get("text", ""),
-                     reply.get("posted_at"), reply.get("posted_at_label", ""),
-                     r_pos),
+                    (
+                        _new_id(),
+                        comment_id,
+                        reply.get("author_name", ""),
+                        reply.get("author_url", ""),
+                        reply.get("text", ""),
+                        reply.get("posted_at"),
+                        reply.get("posted_at_label", ""),
+                        r_pos,
+                    ),
                 )
     return post_id
 
@@ -362,14 +403,15 @@ def save_post(post_dict, last_synced_at=None):
 def _post_with_children(conn, post_row):
     post = dict(post_row)
     comments = conn.execute(
-        "SELECT * FROM comments WHERE post_id=? ORDER BY position",
-        (post["id"],)).fetchall()
+        "SELECT * FROM comments WHERE post_id=? ORDER BY position", (post["id"],)
+    ).fetchall()
     out_comments = []
     for c in comments:
         comment = dict(c)
         replies = conn.execute(
             "SELECT * FROM replies WHERE comment_id=? ORDER BY position",
-            (comment["id"],)).fetchall()
+            (comment["id"],),
+        ).fetchall()
         comment["replies"] = [dict(r) for r in replies]
         out_comments.append(comment)
     post["comments"] = out_comments
@@ -379,8 +421,7 @@ def _post_with_children(conn, post_row):
 def get_post_by_url(url):
     """One post (with nested comments/replies) as a dict, or None."""
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM posts WHERE post_url = ?", (url,)).fetchone()
+        row = conn.execute("SELECT * FROM posts WHERE post_url = ?", (url,)).fetchone()
         if not row:
             return None
         return _post_with_children(conn, row)
@@ -389,8 +430,7 @@ def get_post_by_url(url):
 def get_post_by_id(post_id):
     """One post (with nested comments/replies) as a dict, or None."""
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
         if not row:
             return None
         return _post_with_children(conn, row)
@@ -400,18 +440,26 @@ def get_posts_for_source(source_id):
     """All posts of a source (with nested comments/replies), oldest first."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM posts WHERE source_id=? ORDER BY collected_at",
-            (source_id,)).fetchall()
+            "SELECT * FROM posts WHERE source_id=? ORDER BY collected_at", (source_id,)
+        ).fetchall()
         return [_post_with_children(conn, r) for r in rows]
 
 
 # ----------------------------------------------------------------------
 # Inbox live chat
 # ----------------------------------------------------------------------
-def upsert_chat_thread(thread_id, account_id, profile_url, profile_name,
-                       source_type, source_text, status="starting",
-                       messenger_thread_url=None, last_seen_text=None,
-                       last_error=None):
+def upsert_chat_thread(
+    thread_id,
+    account_id,
+    profile_url,
+    profile_name,
+    source_type,
+    source_text,
+    status="starting",
+    messenger_thread_url=None,
+    last_seen_text=None,
+    last_error=None,
+):
     """Insert or update a chat thread row. Returns the thread id."""
     from datetime import datetime, timezone
 
@@ -434,10 +482,20 @@ def upsert_chat_thread(thread_id, account_id, profile_url, profile_name,
             "last_seen_text=COALESCE(excluded.last_seen_text, "
             "chat_threads.last_seen_text), "
             "last_error=excluded.last_error, updated_at=excluded.updated_at",
-            (thread_id, account_id or "", profile_url or "",
-             profile_name or "", source_type or "comment",
-             source_text or "", status, messenger_thread_url,
-             last_seen_text, last_error, now, now),
+            (
+                thread_id,
+                account_id or "",
+                profile_url or "",
+                profile_name or "",
+                source_type or "comment",
+                source_text or "",
+                status,
+                messenger_thread_url,
+                last_seen_text,
+                last_error,
+                now,
+                now,
+            ),
         )
     return thread_id
 
@@ -446,8 +504,8 @@ def get_chat_thread(thread_id):
     """One chat thread row as a dict, or None."""
     with _connect() as conn:
         row = conn.execute(
-            "SELECT * FROM chat_threads WHERE id = ?",
-            (thread_id,)).fetchone()
+            "SELECT * FROM chat_threads WHERE id = ?", (thread_id,)
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -456,12 +514,13 @@ def list_chat_threads(account_id=None):
     with _connect() as conn:
         if account_id:
             rows = conn.execute(
-                "SELECT * FROM chat_threads WHERE account_id=? "
-                "ORDER BY created_at",
-                (account_id,)).fetchall()
+                "SELECT * FROM chat_threads WHERE account_id=? " "ORDER BY created_at",
+                (account_id,),
+            ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM chat_threads ORDER BY created_at").fetchall()
+                "SELECT * FROM chat_threads ORDER BY created_at"
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -471,8 +530,7 @@ def set_chat_thread(thread_id, **fields):
     are ignored. Always refreshes updated_at."""
     from datetime import datetime, timezone
 
-    allowed = {"status", "messenger_thread_url", "last_seen_text",
-               "last_error"}
+    allowed = {"status", "messenger_thread_url", "last_seen_text", "last_error"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
@@ -489,15 +547,14 @@ def delete_chat_thread(thread_id):
     """Delete a chat thread and all its messages (a chat deleted in
     the app). Returns True when a thread row was removed."""
     with _connect() as conn:
-        conn.execute(
-            "DELETE FROM chat_messages WHERE thread_id=?", (thread_id,))
-        cur = conn.execute(
-            "DELETE FROM chat_threads WHERE id=?", (thread_id,))
+        conn.execute("DELETE FROM chat_messages WHERE thread_id=?", (thread_id,))
+        cur = conn.execute("DELETE FROM chat_threads WHERE id=?", (thread_id,))
         return cur.rowcount > 0
 
 
-def save_chat_message(message_id, thread_id, role, text, delivery,
-                      sent_at=None, created_at=None):
+def save_chat_message(
+    message_id, thread_id, role, text, delivery, sent_at=None, created_at=None
+):
     """Append a chat message. INSERT OR IGNORE on the id, so a
     retried send never duplicates a message the app already has.
     Returns the message id."""
@@ -507,11 +564,13 @@ def save_chat_message(message_id, thread_id, role, text, delivery,
         created_at = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO chat_messages "
+            "INSERT INTO chat_messages "
             "(id, thread_id, role, text, delivery, sent_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (message_id, thread_id, role, text or "", delivery,
-             sent_at, created_at),
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET text=excluded.text, delivery=excluded.delivery, "
+            "sent_at=COALESCE(excluded.sent_at, chat_messages.sent_at) "
+            "WHERE chat_messages.delivery != 'sent'",
+            (message_id, thread_id, role, text or "", delivery, sent_at, created_at),
         )
     return message_id
 
@@ -520,9 +579,9 @@ def list_chat_messages(thread_id):
     """Messages of one thread, oldest first."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM chat_messages WHERE thread_id=? "
-            "ORDER BY created_at",
-            (thread_id,)).fetchall()
+            "SELECT * FROM chat_messages WHERE thread_id=? " "ORDER BY created_at",
+            (thread_id,),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -536,15 +595,15 @@ def count_agent_sent_on(account_id, date_iso):
             "JOIN chat_threads t ON t.id = m.thread_id "
             "WHERE t.account_id=? AND m.role='agent' "
             "AND m.delivery='sent' AND substr(m.sent_at, 1, 10)=?",
-            (account_id or "", date_iso)).fetchone()
+            (account_id or "", date_iso),
+        ).fetchone()
     return int(row["n"]) if row else 0
 
 
 # ----------------------------------------------------------------------
 # Jobs
 # ----------------------------------------------------------------------
-def create_job(kind, source_id=None, post_id=None, account_id="",
-               started_at=None):
+def create_job(kind, source_id=None, post_id=None, account_id="", started_at=None):
     """Create a job row in 'running' state and return its id."""
     if started_at is None:
         from datetime import datetime, timezone
@@ -567,8 +626,16 @@ def update_job(job_id, **fields):
     Unknown keys are ignored. ``verification`` may be passed as a list
     (stored as JSON) or as a JSON string; ``result`` the same (dict or
     list, stored as JSON)."""
-    allowed = {"status", "posts_processed", "new_posts", "finished_at",
-               "error", "verification", "message", "result"}
+    allowed = {
+        "status",
+        "posts_processed",
+        "new_posts",
+        "finished_at",
+        "error",
+        "verification",
+        "message",
+        "result",
+    }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return
@@ -587,8 +654,7 @@ def update_job(job_id, **fields):
 def get_job(job_id):
     """One job row as a dict (verification decoded to a list), or None."""
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     return _decode_verification(dict(row)) if row else None
 
 
@@ -596,6 +662,6 @@ def list_jobs(limit=50):
     """Job rows, newest first (verification decoded to a list)."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM jobs ORDER BY started_at DESC LIMIT ?",
-            (limit,)).fetchall()
+            "SELECT * FROM jobs ORDER BY started_at DESC LIMIT ?", (limit,)
+        ).fetchall()
     return [_decode_verification(dict(r)) for r in rows]

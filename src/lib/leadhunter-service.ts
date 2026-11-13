@@ -1207,15 +1207,15 @@ export function addChatMessage(
     value:
       input.role === "candidate"
         ? withActivity(
-            next,
-            activity(
-              "chat-reply",
-              thread.accountId,
-              `${thread.profileName} replied`,
-              `act-${input.id}`,
-              input.now,
-            ),
-          )
+          next,
+          activity(
+            "chat-reply",
+            thread.accountId,
+            `${thread.profileName} replied`,
+            `act-${input.id}`,
+            input.now,
+          ),
+        )
         : next,
   };
 }
@@ -1442,6 +1442,8 @@ export function sendStatusCaption(m: ChatMessage, nowMs: number): string {
  * re-render.
  */
 export function mergeLiveThreads(state: AppState, live: LiveChatThread[]): AppState {
+  const JUNK = /^(messenger|all chats loaded\.?|notifications|see previous notifications|unread message:.*|messages and calls are secured.*)$/i;
+  if (state.chatMessages.some((m) => m.role === "candidate" && JUNK.test(m.text.trim()))) state = { ...state, chatMessages: state.chatMessages.filter((m) => !(m.role === "candidate" && JUNK.test(m.text.trim()))) };
   const byId = new Map(state.chatMessages.map((m) => [m.id, m]));
   let changed = false;
   const next = new Map<string, ChatMessage>();
@@ -1466,12 +1468,14 @@ export function mergeLiveThreads(state: AppState, live: LiveChatThread[]): AppSt
           (existing.sendStageDetail ?? null) !== (lm.sendStageDetail ?? null);
         if (
           existing.delivery !== lm.delivery ||
+          (lm.role === "agent" && !!lm.text && existing.text !== lm.text) ||
           stageChanged ||
           sinceChanged ||
           detailChanged
         ) {
           next.set(lm.id, {
             ...existing,
+            text: lm.role === "agent" && lm.text ? lm.text : existing.text,
             delivery: lm.delivery,
             sendStage: lm.sendStage ?? null,
             sendStageSince: lm.sendStageSince ?? null,
@@ -1481,7 +1485,7 @@ export function mergeLiveThreads(state: AppState, live: LiveChatThread[]): AppSt
         }
         continue;
       }
-      if (!lm.text.trim()) continue;
+      if (!lm.text.trim() || JUNK.test(lm.text.trim())) continue;
       next.set(lm.id, {
         id: lm.id,
         threadId: thread.threadId,

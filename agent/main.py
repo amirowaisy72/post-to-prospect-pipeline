@@ -46,11 +46,15 @@ from urllib.parse import urlparse
 
 import chat
 import db
+import ai_models
+import questions
+import followups
+import help_requests
 import jobs
 from browser import BROWSER, profile_dir
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from facebook import FacebookWorker
 
 __all__ = ["app"]
@@ -184,13 +188,15 @@ def _post_view(post: dict) -> dict:
             }
             for r in (c.get("replies") or [])
         ]
-        comments.append({
-            "author": _person_view(c.get("author_name"), c.get("author_url")),
-            "text": c.get("text") or "",
-            "postedAt": c.get("posted_at"),
-            "postedAtLabel": c.get("posted_at_label") or "",
-            "replies": replies,
-        })
+        comments.append(
+            {
+                "author": _person_view(c.get("author_name"), c.get("author_url")),
+                "text": c.get("text") or "",
+                "postedAt": c.get("posted_at"),
+                "postedAtLabel": c.get("posted_at_label") or "",
+                "replies": replies,
+            }
+        )
     return {
         "id": post["id"],
         "sourceId": post.get("source_id"),
@@ -222,23 +228,25 @@ def _run_job_thread(job_id, kind, payload):
             should_stop = lambda: _stop_flags.get(job_id, False)  # noqa: E731
             note = agent_log
             if kind == "scrape":
-                jobs.run_scrape(worker, page, db, job_row, should_stop,
-                                note=note)
+                jobs.run_scrape(worker, page, db, job_row, should_stop, note=note)
             elif kind == "collect":
-                jobs.run_collect_sources(worker, page, db, job_row,
-                                         should_stop, note=note)
+                jobs.run_collect_sources(
+                    worker, page, db, job_row, should_stop, note=note
+                )
             else:
-                jobs.run_sync(worker, page, db, job_row, should_stop,
-                              note=note)
+                jobs.run_sync(worker, page, db, job_row, should_stop, note=note)
 
         BROWSER.run_with_page(account_id, False, _run, fresh=True)
     except Exception as exc:  # noqa: BLE001 - job failure, not a crash
         try:
             from datetime import datetime, timezone
 
-            db.update_job(job_id, status="failed",
-                          finished_at=datetime.now(timezone.utc).isoformat(),
-                          error=str(exc))
+            db.update_job(
+                job_id,
+                status="failed",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                error=str(exc),
+            )
         except Exception:
             pass
     finally:
@@ -266,7 +274,8 @@ def _start_job(kind, payload, job_row):
         _running_job_id = job_id
         _stop_flags[job_id] = False
     thread = threading.Thread(
-        target=_run_job_thread, args=(job_id, kind, payload), daemon=True)
+        target=_run_job_thread, args=(job_id, kind, payload), daemon=True
+    )
     thread.start()
     return job_id, False
 
@@ -278,7 +287,9 @@ def _valid_facebook_url(url) -> bool:
         parsed = urlparse(url.strip())
     except Exception:
         return False
-    return parsed.scheme in ("http", "https") and "facebook.com" in parsed.netloc.lower()
+    return (
+        parsed.scheme in ("http", "https") and "facebook.com" in parsed.netloc.lower()
+    )
 
 
 # ----------------------------------------------------------------------
@@ -336,6 +347,14 @@ def _run_chat_start(payload):
     """
     global _chat_start_busy, _chat_start_thread_id
     message_id = payload.get("messageId") or ""
+    if message_id:
+        db.save_chat_message(
+            message_id,
+            payload.get("threadId") or "",
+            "agent",
+            payload.get("firstMessage") or "",
+            "pending-messenger",
+        )
     chat.set_send_stage(message_id, "queued")
     try:
         chat.set_send_stage(message_id, "opening browser")
@@ -343,14 +362,19 @@ def _run_chat_start(payload):
 
         def _start(page):
             worker = FacebookWorker()
-            chat.start_chat(worker, page, payload, note=agent_log)
+            help_requests.set_current_payload(payload)
+            try:
+                chat.start_chat(worker, page, payload, note=agent_log)
+            finally:
+                help_requests.set_current_payload(None)
 
         BROWSER.run_with_page(account, False, _start, fresh=True)
     except Exception as exc:  # noqa: BLE001 - start failure, not a crash
         chat.set_send_stage(message_id, "failed", str(exc))
         try:
-            db.set_chat_thread(payload.get("threadId"), status="failed",
-                               last_error=str(exc))
+            db.set_chat_thread(
+                payload.get("threadId"), status="failed", last_error=str(exc)
+            )
         except Exception:
             pass
     finally:
@@ -363,10 +387,16 @@ def _run_chat_start(payload):
 # ----------------------------------------------------------------------
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "leadhunter-agent",
-            "version": VERSION, "facebook": "unknown",
-            "chat": {"watching": chat.is_watching(),
-                     "threads": len(db.list_chat_threads())}}
+    return {
+        "ok": True,
+        "service": "leadhunter-agent",
+        "version": VERSION,
+        "facebook": "unknown",
+        "chat": {
+            "watching": chat.is_watching(),
+            "threads": len(db.list_chat_threads()),
+        },
+    }
 
 
 @app.post("/scrape")
@@ -378,7 +408,8 @@ async def scrape(request: Request):
     if not _valid_facebook_url(source_url):
         return JSONResponse(
             status_code=400,
-            content={"detail": "sourceUrl is missing or not a valid Facebook URL"})
+            content={"detail": "sourceUrl is missing or not a valid Facebook URL"},
+        )
     job_id, busy = _start_job(
         "scrape",
         {
@@ -394,8 +425,8 @@ async def scrape(request: Request):
     )
     if busy:
         return JSONResponse(
-            status_code=409,
-            content={"detail": "another job is already running"})
+            status_code=409, content={"detail": "another job is already running"}
+        )
     return JSONResponse(status_code=202, content={"jobId": job_id})
 
 
@@ -416,14 +447,12 @@ async def collect_sources(request: Request):
         body = {}
     keyword = (body.get("keyword") or "").strip()
     if not keyword:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": "keyword is required"})
+        return JSONResponse(status_code=400, content={"detail": "keyword is required"})
     type_ = (body.get("type") or "group").strip().lower()
     if type_ not in ("group", "page", "both"):
         return JSONResponse(
-            status_code=400,
-            content={"detail": "type must be group, page or both"})
+            status_code=400, content={"detail": "type must be group, page or both"}
+        )
     try:
         max_new = int(body.get("maxNew") or 10)
     except (TypeError, ValueError):
@@ -452,8 +481,8 @@ async def collect_sources(request: Request):
     )
     if busy:
         return JSONResponse(
-            status_code=409,
-            content={"detail": "another job is already running"})
+            status_code=409, content={"detail": "another job is already running"}
+        )
     return JSONResponse(status_code=202, content={"jobId": job_id})
 
 
@@ -472,8 +501,8 @@ async def delete_source_endpoint(source_id: str):
     with _lock:
         if _running_job_id is not None:
             return JSONResponse(
-                status_code=409,
-                content={"detail": "another job is already running"})
+                status_code=409, content={"detail": "another job is already running"}
+            )
     try:
         account = _browser_account(source.get("account_id") or "")
 
@@ -483,8 +512,7 @@ async def delete_source_endpoint(source_id: str):
 
         # Async endpoint: the browser work runs off the event loop
         # (asyncio.to_thread) on the single browser thread.
-        result = await asyncio.to_thread(
-            BROWSER.run_with_page, account, False, _delete)
+        result = await asyncio.to_thread(BROWSER.run_with_page, account, False, _delete)
     except Exception as exc:  # noqa: BLE001 - report, do not crash
         return JSONResponse(status_code=500, content={"detail": str(exc)})
     if not result.get("ok"):
@@ -502,7 +530,8 @@ async def sync(request: Request):
     if has_source == has_post:  # exactly one of sourceId/postId is required
         return JSONResponse(
             status_code=400,
-            content={"detail": "exactly one of sourceId or postId is required"})
+            content={"detail": "exactly one of sourceId or postId is required"},
+        )
     job_id, busy = _start_job(
         "sync",
         {
@@ -517,8 +546,8 @@ async def sync(request: Request):
     )
     if busy:
         return JSONResponse(
-            status_code=409,
-            content={"detail": "another job is already running"})
+            status_code=409, content={"detail": "another job is already running"}
+        )
     return JSONResponse(status_code=202, content={"jobId": job_id})
 
 
@@ -581,20 +610,22 @@ async def chat_start_endpoint(request: Request):
     if not thread_id or not first_message or not profile_url:
         return JSONResponse(
             status_code=400,
-            content={"detail": "threadId, profileUrl and firstMessage are required"})
+            content={"detail": "threadId, profileUrl and firstMessage are required"},
+        )
     if not _valid_facebook_url(profile_url):
         return JSONResponse(
             status_code=400,
-            content={"detail": "profileUrl is not a valid Facebook URL"})
+            content={"detail": "profileUrl is not a valid Facebook URL"},
+        )
     with _lock:
         if _running_job_id is not None:
             return JSONResponse(
-                status_code=409,
-                content={"detail": "another job is already running"})
+                status_code=409, content={"detail": "another job is already running"}
+            )
         if _chat_start_busy:
             return JSONResponse(
-                status_code=409,
-                content={"detail": "a chat start is already running"})
+                status_code=409, content={"detail": "a chat start is already running"}
+            )
         _chat_start_busy = True
         _chat_start_thread_id = thread_id
     try:
@@ -610,13 +641,19 @@ async def chat_start_endpoint(request: Request):
         "sourceType": body.get("sourceType") or "comment",
         "sourceText": body.get("sourceText") or "",
         "firstMessage": first_message,
+        "aiFirst": bool(body.get("aiFirst")),
+        "script": body.get("script") if isinstance(body.get("script"), dict) else {},
+        "geminiKey": (body.get("geminiKey") or "").strip(),
+        "model": (body.get("model") or "").strip(),
+        "provider": (body.get("provider") or "gemini").strip(),
+        "ollamaUrl": (body.get("ollamaUrl") or "").strip(),
         "dailyCap": daily_cap,
     }
-    thread = threading.Thread(target=_run_chat_start, args=(payload,),
-                              daemon=True)
+    thread = threading.Thread(target=_run_chat_start, args=(payload,), daemon=True)
     thread.start()
-    return JSONResponse(status_code=202,
-                        content={"threadId": thread_id, "status": "starting"})
+    return JSONResponse(
+        status_code=202, content={"threadId": thread_id, "status": "starting"}
+    )
 
 
 @app.post("/chat/watch")
@@ -636,20 +673,24 @@ async def chat_watch_endpoint(request: Request):
     account_id = (body.get("accountId") or "").strip()
     if not account_id:
         return JSONResponse(
-            status_code=400, content={"detail": "accountId is required"})
+            status_code=400, content={"detail": "accountId is required"}
+        )
     threads = body.get("threads") or []
     if not isinstance(threads, list):
         return JSONResponse(
-            status_code=400, content={"detail": "threads must be a list"})
+            status_code=400, content={"detail": "threads must be a list"}
+        )
     gemini_key = (body.get("geminiKey") or "").strip()
-    if not gemini_key:
+    if not gemini_key and (body.get("provider") or "gemini") == "gemini":
         return JSONResponse(
             status_code=400,
-            content={"detail": "geminiKey is required to draft replies"})
+            content={"detail": "geminiKey is required to draft replies"},
+        )
     script = body.get("script") or {}
     if not isinstance(script, dict):
         return JSONResponse(
-            status_code=400, content={"detail": "script must be an object"})
+            status_code=400, content={"detail": "script must be an object"}
+        )
     try:
         daily_cap = int(body.get("dailyCap") or 0)
     except (TypeError, ValueError):
@@ -658,34 +699,45 @@ async def chat_watch_endpoint(request: Request):
     for t in threads:
         if not isinstance(t, dict) or not (t.get("threadId") or "").strip():
             continue
-        clean_threads.append({
-            "threadId": t["threadId"].strip(),
-            "profileUrl": (t.get("profileUrl") or "").strip(),
-            "profileName": (t.get("profileName") or "").strip(),
-            "sourceType": (t.get("sourceType") or "comment").strip(),
-            "sourceText": (t.get("sourceText") or "").strip(),
-        })
+        clean_threads.append(
+            {
+                "threadId": t["threadId"].strip(),
+                "profileUrl": (t.get("profileUrl") or "").strip(),
+                "profileName": (t.get("profileName") or "").strip(),
+                "sourceType": (t.get("sourceType") or "comment").strip(),
+                "sourceText": (t.get("sourceText") or "").strip(),
+            }
+        )
     # Rows for new threads (never reset an existing row's status).
     for t in clean_threads:
         if db.get_chat_thread(t["threadId"]) is None:
             db.upsert_chat_thread(
-                t["threadId"], account_id, t["profileUrl"], t["profileName"],
-                t["sourceType"], t["sourceText"], status="starting")
+                t["threadId"],
+                account_id,
+                t["profileUrl"],
+                t["profileName"],
+                t["sourceType"],
+                t["sourceText"],
+                status="starting",
+            )
     # Threads of THIS account that dropped out of the watch list
     # (marked done in the app) stop being watched.
     watched_ids = {t["threadId"] for t in clean_threads}
     for row in db.list_chat_threads(account_id):
-        if (row["id"] not in watched_ids
-                and row.get("status") in ("active", "starting")):
+        if row["id"] not in watched_ids and row.get("status") in ("active", "starting"):
             db.set_chat_thread(row["id"], status="done")
-    chat.set_watch({
-        "accountId": account_id,
-        "threads": clean_threads,
-        "script": script,
-        "geminiKey": gemini_key,
-        "model": (body.get("model") or chat.DEFAULT_MODEL).strip(),
-        "dailyCap": daily_cap,
-    })
+    chat.set_watch(
+        {
+            "accountId": account_id,
+            "threads": clean_threads,
+            "script": script,
+            "geminiKey": gemini_key,
+            "model": (body.get("model") or chat.DEFAULT_MODEL).strip(),
+            "provider": (body.get("provider") or "gemini").strip(),
+            "ollamaUrl": (body.get("ollamaUrl") or "").strip(),
+            "dailyCap": daily_cap,
+        }
+    )
     _ensure_watch_thread()
     return {"watching": True, "threads": len(clean_threads)}
 
@@ -694,11 +746,12 @@ def _message_stage_fields(message_id: str) -> dict:
     """Send-stage fields for one message id (GET /chat/threads)."""
     stage = chat.get_send_stage(message_id)
     if not stage:
-        return {"sendStage": None, "sendStageSince": None,
-                "sendStageDetail": None}
-    return {"sendStage": stage.get("stage"),
-            "sendStageSince": stage.get("since"),
-            "sendStageDetail": stage.get("detail") or None}
+        return {"sendStage": None, "sendStageSince": None, "sendStageDetail": None}
+    return {
+        "sendStage": stage.get("stage"),
+        "sendStageSince": stage.get("since"),
+        "sendStageDetail": stage.get("detail") or None,
+    }
 
 
 @app.get("/chat/threads")
@@ -709,26 +762,31 @@ def chat_threads_endpoint():
     out = []
     for row in db.list_chat_threads():
         messages = db.list_chat_messages(row["id"])
-        out.append({
-            "threadId": row["id"],
-            "accountId": row.get("account_id") or "",
-            "profileUrl": row.get("profile_url") or "",
-            "profileName": row.get("profile_name") or "",
-            "status": row.get("status") or "starting",
-            "messengerThreadUrl": row.get("messenger_thread_url"),
-            "lastError": row.get("last_error"),
-            "messages": [{
-                "id": m["id"],
-                "role": m.get("role"),
-                "text": m.get("text") or "",
-                "delivery": m.get("delivery"),
-                "sentAt": m.get("sent_at"),
-                # Send-stage trail for this message (first-message send
-                # only): current stage + when it entered it + the plain
-                # failure reason. Null until the send starts.
-                **_message_stage_fields(m["id"]),
-            } for m in messages],
-        })
+        out.append(
+            {
+                "threadId": row["id"],
+                "accountId": row.get("account_id") or "",
+                "profileUrl": row.get("profile_url") or "",
+                "profileName": row.get("profile_name") or "",
+                "status": row.get("status") or "starting",
+                "messengerThreadUrl": row.get("messenger_thread_url"),
+                "lastError": row.get("last_error"),
+                "messages": [
+                    {
+                        "id": m["id"],
+                        "role": m.get("role"),
+                        "text": m.get("text") or "",
+                        "delivery": m.get("delivery"),
+                        "sentAt": m.get("sent_at"),
+                        # Send-stage trail for this message (first-message send
+                        # only): current stage + when it entered it + the plain
+                        # failure reason. Null until the send starts.
+                        **_message_stage_fields(m["id"]),
+                    }
+                    for m in messages
+                ],
+            }
+        )
     return {"threads": out, "watching": chat.is_watching()}
 
 
@@ -758,8 +816,7 @@ async def chat_forget_endpoint(request: Request):
         body = {}
     thread_id = (body.get("threadId") or "").strip()
     if not thread_id:
-        return JSONResponse(
-            status_code=400, content={"detail": "threadId is required"})
+        return JSONResponse(status_code=400, content={"detail": "threadId is required"})
     # Stop first, delete after: mark it forgotten so the send aborts
     # at its next stop check, then give an in-flight send for THIS
     # thread a bounded moment to stop before the rows go.
@@ -784,8 +841,7 @@ async def chat_forget_endpoint(request: Request):
 def _record_session_check(state: str, detail: dict) -> dict:
     """Record the last session check for GET /agent/status."""
     global _LAST_SESSION_CHECK
-    _LAST_SESSION_CHECK = {"state": state, "at": _now_iso(),
-                           "detail": detail}
+    _LAST_SESSION_CHECK = {"state": state, "at": _now_iso(), "detail": detail}
     return _LAST_SESSION_CHECK
 
 
@@ -835,21 +891,23 @@ async def agent_session_check_endpoint(request: Request):
 
     def _check(page):
         worker = FacebookWorker()
-        state = worker.verify_session(page, {"note": agent_log},
-                                      target_url=_MESSAGES_URL)
+        state = worker.verify_session(
+            page, {"note": agent_log}, target_url=_MESSAGES_URL
+        )
         detail = worker.session_diagnostic(page)
         record = _record_session_check(state, detail)
-        agent_log(f"session check: {state} "
-                  f"(url={detail['url']}, body_len={detail['body_len']})")
+        agent_log(
+            f"session check: {state} "
+            f"(url={detail['url']}, body_len={detail['body_len']})"
+        )
         return {"state": state, "at": record["at"], "detail": detail}
 
     try:
-        return await asyncio.to_thread(
-            BROWSER.run_with_page, account, False, _check)
+        return await asyncio.to_thread(BROWSER.run_with_page, account, False, _check)
     except Exception as exc:  # noqa: BLE001 - check failure, not a crash
         return JSONResponse(
-            status_code=502,
-            content={"detail": f"session check failed: {exc}"})
+            status_code=502, content={"detail": f"session check failed: {exc}"}
+        )
 
 
 @app.post("/agent/browser-relaunch")
@@ -862,13 +920,14 @@ async def agent_browser_relaunch_endpoint(request: Request):
     try:
         alive = await asyncio.to_thread(BROWSER.relaunch, account)
     except Exception as exc:  # noqa: BLE001 - launch failure, plain message
-        return JSONResponse(status_code=502,
-                            content={"detail": str(exc)})
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
     agent_log(f"browser relaunched (alive: {'yes' if alive else 'no'})")
-    return {"relaunched": True,
-            "browser": "alive" if alive else "dead",
-            "profile": str(profile_dir(account)),
-            "headed": BROWSER.headed(account)}
+    return {
+        "relaunched": True,
+        "browser": "alive" if alive else "dead",
+        "profile": str(profile_dir(account)),
+        "headed": BROWSER.headed(account),
+    }
 
 
 @app.post("/agent/reload")
@@ -880,23 +939,25 @@ async def agent_reload_endpoint(request: Request):
 
     def _reload(page):
         worker = FacebookWorker()
-        loaded = worker._load(page, _MESSAGES_URL, {"note": agent_log},
-                              "reload", timeout_ms=45000)
+        loaded = worker._load(
+            page, _MESSAGES_URL, {"note": agent_log}, "reload", timeout_ms=45000
+        )
         detail = worker.session_diagnostic(page)
         state = worker.check_session(page, {"note": agent_log})
         return loaded, state, detail
 
     try:
         loaded, state, detail = await asyncio.to_thread(
-            BROWSER.run_with_page, account, False, _reload)
+            BROWSER.run_with_page, account, False, _reload
+        )
     except Exception as exc:  # noqa: BLE001 - launch failure, plain message
-        return JSONResponse(status_code=502,
-                            content={"detail": str(exc)})
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
     record = _record_session_check(state, detail)
-    agent_log(f"Messenger reloaded (loaded: {'yes' if loaded else 'no'}, "
-              f"session: {state})")
-    return {"reloaded": loaded, "state": state, "at": record["at"],
-            "detail": detail}
+    agent_log(
+        f"Messenger reloaded (loaded: {'yes' if loaded else 'no'}, "
+        f"session: {state})"
+    )
+    return {"reloaded": loaded, "state": state, "at": record["at"], "detail": detail}
 
 
 @app.post("/agent/signin")
@@ -911,16 +972,151 @@ async def agent_signin_endpoint(request: Request):
     (the sign-in window's context stays headed until relaunched)."""
     account = _browser_account(await _read_body_account(request))
     try:
-        await asyncio.to_thread(
-            BROWSER.open_for_signin, account, FACEBOOK_LOGIN_URL)
+        await asyncio.to_thread(BROWSER.open_for_signin, account, FACEBOOK_LOGIN_URL)
     except Exception as exc:  # noqa: BLE001 - launch failure, plain message
-        return JSONResponse(status_code=502,
-                            content={"detail": str(exc)})
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
     agent_log(f"sign-in window opened for account {account}")
-    return {"ok": True, "accountId": account,
-            "profile": str(profile_dir(account)),
-            "detail": "Browser opened — sign in to Facebook yourself in "
-                      "that window, then press Relaunch browser."}
+    return {
+        "ok": True,
+        "accountId": account,
+        "profile": str(profile_dir(account)),
+        "detail": "Browser opened — sign in to Facebook yourself in "
+        "that window, then press Relaunch browser.",
+    }
+
+
+def _resume_after_help() -> str:
+    """The user helped: carry on with the message that was waiting."""
+    global _chat_start_busy, _chat_start_thread_id
+    payload = help_requests.resolve()
+    if not payload:
+        return "Theek hai — agent agle check par kaam jaari rakhega."
+    with _lock:
+        if _chat_start_busy or _running_job_id is not None:
+            return (
+                "Agent abhi masroof hai — thodi der baad Inbox mein "
+                "'Send to Messenger now' dabayein."
+            )
+        _chat_start_busy = True
+        _chat_start_thread_id = payload.get("threadId") or ""
+    threading.Thread(target=_run_chat_start, args=(payload,), daemon=True).start()
+    return "Shukriya — agent ne wahi message dobara bhejna shuru kar diya."
+
+
+@app.get("/agent/help")
+def agent_help_endpoint():
+    return {"help": help_requests.get_help()}
+
+
+@app.get("/agent/help/screenshot")
+def agent_help_screenshot_endpoint():
+    path = _AGENT_DIR / "last_problem.png"
+    if not path.exists():
+        return JSONResponse(status_code=404, content={"detail": "no screenshot"})
+    return FileResponse(str(path), media_type="image/png")
+
+
+@app.post("/agent/help/pin")
+async def agent_help_pin_endpoint(request: Request):
+    try:
+        body = await request.json() if request.headers.get("content-length") else {}
+    except Exception:
+        body = {}
+    pin = str((body or {}).get("pin") or "").strip() if isinstance(body, dict) else ""
+    if not (pin.isdigit() and 4 <= len(pin) <= 8):
+        return JSONResponse(
+            status_code=400, content={"detail": "PIN sirf 4 se 8 digits ka hota hai."}
+        )
+    help_requests.set_pin(pin)
+    agent_log("Messenger PIN received from the app (value not logged)")
+    return {"ok": True, "detail": _resume_after_help()}
+
+
+@app.post("/agent/help/open-window")
+async def agent_help_open_window_endpoint(request: Request):
+    account = _browser_account(await _read_body_account(request))
+    try:
+        await asyncio.to_thread(BROWSER.open_for_signin, account, _MESSAGES_URL)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+    agent_log("help window opened on Messenger")
+    return {
+        "ok": True,
+        "detail": "Chrome window khul gayi. Masla khud theek karein "
+        "(PIN daalein / popup band karein), phir "
+        "'Maine theek kar diya' dabayein.",
+    }
+
+
+@app.post("/agent/help/resolved")
+async def agent_help_resolved_endpoint(request: Request):
+    account = _browser_account(await _read_body_account(request))
+    try:
+        await asyncio.to_thread(BROWSER.relaunch, account)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+    agent_log("help resolved by the user - browser back to headless")
+    return {"ok": True, "detail": _resume_after_help()}
+
+
+async def _ai_body(request: Request) -> dict:
+    body = await request.json() if request.headers.get("content-length") else {}
+    return body if isinstance(body, dict) else {}
+
+
+@app.post("/ai/models")
+async def ai_models_endpoint(request: Request):
+    b = await _ai_body(request)
+    models, err = await asyncio.to_thread(
+        ai_models.list_models,
+        str(b.get("provider") or "gemini"),
+        str(b.get("geminiKey") or ""),
+        str(b.get("ollamaUrl") or ""),
+    )
+    if err:
+        return JSONResponse(status_code=502, content={"detail": err})
+    return {"models": models}
+
+
+@app.post("/ai/test")
+async def ai_test_endpoint(request: Request):
+    b = await _ai_body(request)
+    res = await asyncio.to_thread(
+        ai_models.test_model,
+        str(b.get("provider") or "gemini"),
+        str(b.get("model") or ""),
+        str(b.get("geminiKey") or ""),
+        str(b.get("ollamaUrl") or ""),
+    )
+    if res.get("error"):
+        return JSONResponse(status_code=502, content={"detail": res["error"]})
+    return res
+
+
+@app.get("/agent/activity")
+def agent_activity_endpoint():
+    import chat as _c
+
+    a = _c.get_activity()
+    return {"state": a["state"], "detail": a["detail"], "watching": _c.is_watching()}
+
+
+@app.get("/agent/schedules")
+def agent_schedules_endpoint():
+    return {"schedules": followups.pending()}
+
+
+@app.get("/agent/questions")
+def agent_questions_endpoint():
+    return {"questions": questions.pending()}
+
+
+@app.post("/agent/questions/answer")
+async def agent_questions_answer_endpoint(request: Request):
+    b = await _ai_body(request)
+    if not questions.answer(str(b.get("threadId") or ""), str(b.get("answer") or "")):
+        return JSONResponse(status_code=404, content={"detail": "sawal nahi mila"})
+    return {"ok": True}
 
 
 @app.post("/agent/unwatch")

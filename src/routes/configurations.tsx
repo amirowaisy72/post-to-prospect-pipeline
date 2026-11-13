@@ -3,6 +3,7 @@ import { Bot, BrainCircuit, Database, Eye, EyeOff, Filter, RotateCcw, Save, Shie
 import { useEffect, useState, type ReactNode } from "react";
 
 import { PageHeader } from "@/components/page-header";
+import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -149,7 +150,8 @@ function ConfigurationsPage() {
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="cfg-model">Model name</Label>
+            <ModelPicker provider={form.provider} model={form.model} geminiKey={form.geminiApiKey} ollamaUrl={form.ollamaUrl} agentUrl={form.agentUrl} onChange={(m) => set("model", m)} />
+            <Label htmlFor="cfg-model">Ya model ka naam khud likhein</Label>
             <Input
               id="cfg-model"
               value={form.model}

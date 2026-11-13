@@ -25,6 +25,9 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, PageHeader } from "@/components/page-header";
+import { AgentHelpCard } from "@/components/agent-help-card";
+import { AgentQuestionsCard } from "@/components/agent-questions-card";
+import { AgentSchedulesCard } from "@/components/agent-schedules-card";
 import { messagesForThread, sendStatusCaption, threadsForAccount } from "@/lib/leadhunter-service";
 import { mockInboxReply } from "@/lib/mock-chat";
 import { useActiveAccountData, useStore } from "@/lib/store";
@@ -82,6 +85,8 @@ function InboxPage() {
   const account = state.accounts.find((a) => a.id === accountId);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const boxRef = useRef<HTMLDivElement>(null);
   const [showForm, setShowForm] = useState(false);
   const [profileUrl, setProfileUrl] = useState("");
   const [profileName, setProfileName] = useState("");
@@ -149,13 +154,34 @@ function InboxPage() {
     };
   }, [accountId]);
 
-  const sortedThreads = threadsForAccount(state, accountId);
+  const allThreads = threadsForAccount(state, accountId);
+  // Priority: client replied and waiting (0), failed send (1), other active (2), done (3).
+  const rank = (t: (typeof allThreads)[number]) => {
+    if (t.status !== "active") return 3;
+    const last = messagesForThread(state, t.id).at(-1);
+    if (!last) return 2;
+    if (last.role === "candidate") return 0;
+    if (last.delivery === "failed") return 1;
+    return 2;
+  };
+  const lastAt = (id: string) => messagesForThread(state, id).at(-1)?.createdAt ?? "";
+  const sortedThreads = [...allThreads].sort(
+    (a, b) => rank(a) - rank(b) || lastAt(b.id).localeCompare(lastAt(a.id)),
+  );
+  const PAGE_SIZE = 10;
+  const pageCount = Math.max(1, Math.ceil(sortedThreads.length / PAGE_SIZE));
+  const curPage = Math.min(page, pageCount);
+  const pagedThreads = sortedThreads.slice((curPage - 1) * PAGE_SIZE, curPage * PAGE_SIZE);
   const selected = sortedThreads.find((t) => t.id === selectedId) ?? null;
   const messages = selected ? messagesForThread(state, selected.id) : [];
   // Wall clock for the send-stage age ("· 45s"). Ticks once a second
   // only while the open thread has a send in flight — otherwise the
   // captions are static and no re-render is needed.
   const hasPendingSend = messages.some((m) => m.delivery === "pending-messenger");
+  useEffect(() => {
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, selectedId]);
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (!hasPendingSend) return;
@@ -296,6 +322,9 @@ function InboxPage() {
 
   return (
     <>
+      <AgentHelpCard />
+      <AgentQuestionsCard />
+      <AgentSchedulesCard />
       <PageHeader
         title="Inbox"
         description="Chat with shortlisted candidates. Start a chat, and the agent opens by referencing their comment or post, introduces itself, then follows your script — the goal is to convince the client and push them to a call."
@@ -307,11 +336,10 @@ function InboxPage() {
       />
 
       <div
-        className={`mb-6 flex items-start gap-3 rounded-lg border p-4 ${
-          agentOnline
-            ? "border-success/40 bg-success/10"
-            : "border-dashed border-primary/40 bg-accent/60"
-        }`}
+        className={`mb-6 flex items-start gap-3 rounded-lg border p-4 ${agentOnline
+          ? "border-success/40 bg-success/10"
+          : "border-dashed border-primary/40 bg-accent/60"
+          }`}
       >
         <InboxIcon className="mt-0.5 size-5 shrink-0 text-primary" />
         <div className="min-w-0 flex-1">
@@ -475,12 +503,35 @@ function InboxPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-2">
+                {pageCount > 1 && (
+                  <div className="flex items-center justify-between pb-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={curPage <= 1}
+                      onClick={() => setPage(curPage - 1)}
+                    >
+                      Prev
+                    </Button>
+                    <span className="text-xs text-muted-foreground tabular">
+                      Page {curPage} / {pageCount}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={curPage >= pageCount}
+                      onClick={() => setPage(curPage + 1)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                )}
                 {sortedThreads.length === 0 ? (
                   <EmptyState title="No chats yet">
                     Start your first chat with a shortlisted candidate.
                   </EmptyState>
                 ) : (
-                  sortedThreads.map((t) => {
+                  pagedThreads.map((t) => {
                     const last = lastMessage(t.id);
                     const on = t.id === selectedId;
                     const armed = armedRowId === t.id;
@@ -488,9 +539,8 @@ function InboxPage() {
                       <div key={t.id} className="flex items-start gap-1.5">
                         <button
                           onClick={() => setSelectedId(t.id)}
-                          className={`min-w-0 flex-1 rounded-lg border p-3 text-left transition-colors ${
-                            on ? "border-primary bg-accent/60" : "hover:bg-muted/50"
-                          }`}
+                          className={`min-w-0 flex-1 rounded-lg border p-3 text-left transition-colors ${on ? "border-primary bg-accent/60" : "hover:bg-muted/50"
+                            }`}
                         >
                           <div className="flex items-center justify-between gap-2">
                             <span className="truncate text-sm font-semibold text-foreground">
@@ -613,7 +663,10 @@ function InboxPage() {
                     Shortlisted from: “{selected.sourceText}”
                   </blockquote>
 
-                  <div className="space-y-3">
+                  <div
+                    ref={boxRef}
+                    className="h-[420px] space-y-3 overflow-y-auto rounded-lg border bg-background/40 p-3"
+                  >
                     {messages.length === 0 ? (
                       <EmptyState title="No messages yet" />
                     ) : (
@@ -623,14 +676,13 @@ function InboxPage() {
                           className={`flex ${m.role === "agent" ? "justify-end" : "justify-start"}`}
                         >
                           <div
-                            className={`max-w-[80%] space-y-1 ${m.role === "agent" ? "text-right" : ""}`}
+                            className="max-w-[80%] space-y-1 text-left"
                           >
                             <div
-                              className={`inline-block rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-wrap ${
-                                m.role === "agent"
-                                  ? "rounded-br-sm bg-primary text-primary-foreground"
-                                  : "rounded-bl-sm bg-muted text-foreground"
-                              }`}
+                              className={`inline-block rounded-2xl px-3.5 py-2.5 text-sm whitespace-pre-wrap ${m.role === "agent"
+                                ? "rounded-br-sm bg-primary text-primary-foreground"
+                                : "rounded-bl-sm bg-muted text-foreground"
+                                }`}
                             >
                               {m.text}
                             </div>
@@ -662,6 +714,7 @@ function InboxPage() {
                         <Label htmlFor="own-message">Type a message as yourself</Label>
                         <Textarea
                           id="own-message"
+                          className="h-20 resize-none"
                           value={ownText}
                           onChange={(e) => setOwnText(e.target.value)}
                           placeholder="Write your own message — it goes on your side, like the first message…"

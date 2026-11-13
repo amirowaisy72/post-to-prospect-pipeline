@@ -780,29 +780,95 @@ _DIALOG_SCROLL_JS = r"""() => {
 
 # URL path segments that are never a person/page profile.
 _NAV_PATHS = {
-    "search", "groups", "pages", "events", "marketplace", "watch",
-    "login", "settings", "notifications", "messages", "friends",
-    "photos", "videos", "reels", "reel", "video", "photo", "story",
-    "gaming", "fundraisers", "saved",
-    "bookmarks", "home", "privacy", "help", "about", "ads", "business",
-    "developers", "policies", "dialog", "plugins", "sharer", "tr",
-    "campaign", "boost", "live", "stories", "groups_feed", "profile.php",
+    "search",
+    "groups",
+    "pages",
+    "events",
+    "marketplace",
+    "watch",
+    "login",
+    "settings",
+    "notifications",
+    "messages",
+    "friends",
+    "photos",
+    "videos",
+    "reels",
+    "reel",
+    "video",
+    "photo",
+    "story",
+    "gaming",
+    "fundraisers",
+    "saved",
+    "bookmarks",
+    "home",
+    "privacy",
+    "help",
+    "about",
+    "ads",
+    "business",
+    "developers",
+    "policies",
+    "dialog",
+    "plugins",
+    "sharer",
+    "tr",
+    "campaign",
+    "boost",
+    "live",
+    "stories",
+    "groups_feed",
+    "profile.php",
     # Facebook internal product pages — these appear as links in group
     # and page chrome (e.g. "Creator Dashboard" in a group header) and
     # must NEVER become a lead. A real person is never named after one
     # of these; a false lead here destroys trust in Step 1 quality.
-    "professional_dashboard", "professional", "creator_studio",
-    "monetization", "creator", "creators", "insights",
-    "publishing_tools", "ads_manager", "business_suite",
-    "meta_business_suite", "commerce_manager", "creator_support",
-    "support_inbox", "activity_log", "memories", "feeds", "explore",
-    "discover", "jobs", "offers", "services", "notes", "weather",
-    "birthdays", "subscriptions", "payments", "orders", "apps",
-    "games", "instant_games", "shows", "places", "local", "community",
-    "support", "directory", "nearby", "meta", "ai",
+    "professional_dashboard",
+    "professional",
+    "creator_studio",
+    "monetization",
+    "creator",
+    "creators",
+    "insights",
+    "publishing_tools",
+    "ads_manager",
+    "business_suite",
+    "meta_business_suite",
+    "commerce_manager",
+    "creator_support",
+    "support_inbox",
+    "activity_log",
+    "memories",
+    "feeds",
+    "explore",
+    "discover",
+    "jobs",
+    "offers",
+    "services",
+    "notes",
+    "weather",
+    "birthdays",
+    "subscriptions",
+    "payments",
+    "orders",
+    "apps",
+    "games",
+    "instant_games",
+    "shows",
+    "places",
+    "local",
+    "community",
+    "support",
+    "directory",
+    "nearby",
+    "meta",
+    "ai",
 }
 
-_FILE_EXT_RE = re.compile(r"\.(jpg|jpeg|png|gif|webp|svg|html|htm|php|pdf|mp4|css|js|json|ico)(\?|#|$)", re.I)
+_FILE_EXT_RE = re.compile(
+    r"\.(jpg|jpeg|png|gif|webp|svg|html|htm|php|pdf|mp4|css|js|json|ico)(\?|#|$)", re.I
+)
 
 
 def _clean_text(text: str, limit: int = 200) -> str:
@@ -815,13 +881,14 @@ def _same_url(a: str, b: str) -> bool:
     slash and any query/fragment — a feed already open at the
     target URL must not be reloaded (a same-URL reload of a heavy
     feed is slow and can time out even with the goto retry)."""
+
     def norm(u):
         try:
             p = urlparse((u or "").strip())
-            return (p.scheme.lower(), p.netloc.lower(),
-                    (p.path.rstrip("/") or "/"))
+            return (p.scheme.lower(), p.netloc.lower(), (p.path.rstrip("/") or "/"))
         except Exception:
             return ("", "", (u or "").strip().rstrip("/"))
+
     return bool(a and b) and norm(a) == norm(b)
 
 
@@ -830,7 +897,8 @@ def _same_url(a: str, b: str) -> bool:
 # ----------------------------------------------------------------------
 
 _MEMBER_COUNT_RE = re.compile(
-    r"(\d[\d,]*\.?\d*)\s*([KMkm]?)\s*(members?|followers?)", re.I)
+    r"(\d[\d,]*\.?\d*)\s*([KMkm]?)\s*(members?|followers?)", re.I
+)
 
 
 def _parse_member_count(text: str) -> int | None:
@@ -998,16 +1066,16 @@ _DIAG_ARIA_JS = (
 # texts. Test doubles return canned data when they see the marker.
 _THREAD_MESSAGES_JS = r"""() => {
  /* chat-thread-messages */
- const list = document.querySelector('[role="main"]') || document.body;
+ const box = document.querySelector('div[contenteditable="true"]'); let list = box; while (list && (list.getBoundingClientRect().width < 450 || list.getBoundingClientRect().height < 300)) list = list.parentElement; if (!box) return []; list = list || document.body;
  const rect = list.getBoundingClientRect();
- const mid = rect.left + rect.width / 2;
+ const bb = box ? box.getBoundingClientRect() : rect; const cl = bb.left - 160, cr = bb.right + 45; const mid = (cl + cr) / 2;
  const out = [];
  const nodes = document.querySelectorAll('[dir="auto"]');
  let prev = null;
  for (const n of nodes) {
    const t = (n.innerText || '').trim();
-   if (!t || t === prev) continue;
-   prev = t;
+   if (!t || t === prev || /^(messenger|enter|active now|active today|seen|sent|delivered|today|yesterday|you sent|\d{1,2}:\d{2}\s?(am|pm)?)$/i.test(t)) continue;
+   prev = t; try { const q = n.getBoundingClientRect(); const bt = box ? box.getBoundingClientRect().top : 99999; if (q.top < 130 || q.left < cl || q.right > cr || q.top > bt || Math.abs((q.left + q.right) / 2 - mid) < 20 || /end-to-end|secured with/i.test(t)) continue; } catch (e) {}
    let side = 'unknown';
    try {
      const r = n.getBoundingClientRect();
@@ -1176,11 +1244,11 @@ class FacebookWorker:
         except Exception:
             url = ""
         try:
-            title = (page.title() or "")
+            title = page.title() or ""
         except Exception:
             title = ""
         try:
-            body = page.inner_text("body") or ""
+            body = self._body_after_send(page, text)
         except Exception:
             body = ""
         low = body.lower()
@@ -1218,10 +1286,9 @@ class FacebookWorker:
                 return "empty"
         return "ok"
 
-    def check_session_with_retry(self, page: Page,
-                                 ctx: dict | None = None,
-                                 retries: int = 3,
-                                 delay: float = 0.5) -> str:
+    def check_session_with_retry(
+        self, page: Page, ctx: dict | None = None, retries: int = 3, delay: float = 0.5
+    ) -> str:
         """Re-check the session, retrying ONLY a transient "empty".
 
         Gemini's diagnosis of the live second-press failure: on the
@@ -1281,11 +1348,15 @@ class FacebookWorker:
                 selectors[label] = page.locator(selector).count()
             except Exception:
                 selectors[label] = "error"
-        return {"url": url, "title": title, "body_len": body_len,
-                "links_count": links_count, "selectors": selectors}
+        return {
+            "url": url,
+            "title": title,
+            "body_len": body_len,
+            "links_count": links_count,
+            "selectors": selectors,
+        }
 
-    def _note_session_empty(self, page: Page, ctx: dict | None,
-                            attempts: int) -> None:
+    def _note_session_empty(self, page: Page, ctx: dict | None, attempts: int) -> None:
         """Note what the page actually looked like when the session
         check stayed "empty" after all retries: URL, title, body
         length, link count, and each logged-in selector's count
@@ -1296,11 +1367,13 @@ class FacebookWorker:
         try:
             d = self.session_diagnostic(page)
             parts = [f"{label}={count}" for label, count in d["selectors"].items()]
-            _note(ctx,
-                  f"session check empty after {attempts} attempts: "
-                  f"url={d['url']}, title={d['title']!r}, body_len={d['body_len']}, "
-                  f"links_count={d['links_count']}, "
-                  f"selectors={{{', '.join(parts)}}}")
+            _note(
+                ctx,
+                f"session check empty after {attempts} attempts: "
+                f"url={d['url']}, title={d['title']!r}, body_len={d['body_len']}, "
+                f"links_count={d['links_count']}, "
+                f"selectors={{{', '.join(parts)}}}",
+            )
         except Exception:
             pass
 
@@ -1315,7 +1388,7 @@ class FacebookWorker:
         except Exception:
             title = ""
         try:
-            body = page.inner_text("body") or ""
+            body = self._body_after_send(page, text)
         except Exception:
             body = ""
         try:
@@ -1345,8 +1418,9 @@ class FacebookWorker:
         """
         return f"{self.base_url}/search/{kind}?q={quote(keyword)}"
 
-    def verify_session(self, page: Page, ctx: dict | None,
-                       target_url: str | None = None) -> str:
+    def verify_session(
+        self, page: Page, ctx: dict | None, target_url: str | None = None
+    ) -> str:
         """Classify the session, returning 'ok' when it is alive.
         Callers must STOP the job on any non-ok state. Never raises.
 
@@ -1424,8 +1498,9 @@ class FacebookWorker:
                             page.goto("about:blank", timeout=15000)
                         except Exception:
                             pass
-                        if self._goto(page, target, ctx, "session_recover",
-                                      timeout_ms=45000):
+                        if self._goto(
+                            page, target, ctx, "session_recover", timeout_ms=45000
+                        ):
                             if not self._wait_ready(page, ctx):
                                 self._wait_ready(page, ctx)
                             state = self.check_session_with_retry(page, ctx)
@@ -1438,8 +1513,9 @@ class FacebookWorker:
             else:
                 target_nav = "attempted"
                 try:
-                    if self._goto(page, target, ctx, "session_target",
-                                  timeout_ms=45000):
+                    if self._goto(
+                        page, target, ctx, "session_target", timeout_ms=45000
+                    ):
                         if not self._wait_ready(page, ctx):
                             # Slow SPA load: one more bounded readiness
                             # wait before calling the page empty.
@@ -1460,31 +1536,45 @@ class FacebookWorker:
             self.last_session_path = (
                 f"session check: state={state}, "
                 f"current_url={current_url or '?'}, "
-                f"target_nav={target_nav}")
-            _note(ctx,
-                  f"session check failed: state={state} "
-                  f"current_url={current_url or '?'} "
-                  f"target={target or 'none'} target_nav={target_nav}")
+                f"target_nav={target_nav}"
+            )
+            _note(
+                ctx,
+                f"session check failed: state={state} "
+                f"current_url={current_url or '?'} "
+                f"target={target or 'none'} target_nav={target_nav}",
+            )
             if state == "empty":
-                _note(ctx, "Facebook session state: empty — the target "
-                           "page did not load; the browser may still "
-                           "be signed in.")
+                _note(
+                    ctx,
+                    "Facebook session state: empty — the target "
+                    "page did not load; the browser may still "
+                    "be signed in.",
+                )
             else:
-                _note(ctx, f"Facebook session state: {state} — sign in to "
-                           "Facebook in the agent Chrome window.")
+                _note(
+                    ctx,
+                    f"Facebook session state: {state} — sign in to "
+                    "Facebook in the agent Chrome window.",
+                )
         return state
 
     # ------------------------------------------------------------------
     # Page loading
     # ------------------------------------------------------------------
-    def _goto(self, page: Page, url: str, ctx: dict | None,
-              label: str, timeout_ms: int = 20000) -> bool:
+    def _goto(
+        self,
+        page: Page,
+        url: str,
+        ctx: dict | None,
+        label: str,
+        timeout_ms: int = 20000,
+    ) -> bool:
         """Goto with an explicit timeout + ONE retry on failure.
         Returns True when the navigation completed. Never raises."""
         for attempt in (1, 2):
             try:
-                page.goto(url, wait_until="domcontentloaded",
-                          timeout=timeout_ms)
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                 return True
             except Exception as exc:  # noqa: BLE001 - retry once, then give up
                 # A heavy Facebook page often hits the domcontentloaded
@@ -1493,8 +1583,11 @@ class FacebookWorker:
                 # readiness / session checks decide if it is really OK.
                 try:
                     if _same_url(page.url, url):
-                        _note(ctx, f"goto {label} timed out but the page "
-                                   f"is already on the target - continuing")
+                        _note(
+                            ctx,
+                            f"goto {label} timed out but the page "
+                            f"is already on the target - continuing",
+                        )
                         return True
                 except Exception:
                     pass
@@ -1509,8 +1602,9 @@ class FacebookWorker:
                 return False
         return False
 
-    def _wait_ready(self, page: Page, ctx: dict | None,
-                    timeout_s: float = 10.0, poll_ms: int = 500) -> bool:
+    def _wait_ready(
+        self, page: Page, ctx: dict | None, timeout_s: float = 10.0, poll_ms: int = 500
+    ) -> bool:
         """Poll until the page shows real content (or the bound expires).
         Facebook is a React SPA: domcontentloaded fires long before the
         content renders. Bounded by poll count so it can never hang.
@@ -1540,8 +1634,14 @@ class FacebookWorker:
                 time.sleep(poll_ms / 1000.0)
         return False
 
-    def _load(self, page: Page, url: str, ctx: dict | None,
-              label: str, timeout_ms: int = 20000) -> bool:
+    def _load(
+        self,
+        page: Page,
+        url: str,
+        ctx: dict | None,
+        label: str,
+        timeout_ms: int = 20000,
+    ) -> bool:
         """Load a page: pace, goto+retry, readiness wait, session check.
         Returns True only when the page loaded with a live session.
         On a dead session returns False (noted once) — the caller must
@@ -1556,9 +1656,9 @@ class FacebookWorker:
             return False
         return True
 
-    def _wait_for_articles(self, page: Page, ctx: dict | None,
-                           timeout_s: float = 20.0,
-                           poll_ms: int = 500) -> int:
+    def _wait_for_articles(
+        self, page: Page, ctx: dict | None, timeout_s: float = 20.0, poll_ms: int = 500
+    ) -> int:
         """Poll _ARTICLE_COUNT_JS until articles appear (up to 20s).
         Returns the last count seen (0 when the feed never rendered).
         Never raises."""
@@ -1603,7 +1703,8 @@ class FacebookWorker:
                 f"(bare permalink: "
                 f"{'yes' if s.get('has_bare_permalink') else 'no'}, "
                 f"comment button: "
-                f"{'yes' if s.get('has_comment_button') else 'no'})"]
+                f"{'yes' if s.get('has_comment_button') else 'no'})",
+            ]
             if hrefs:
                 parts.append(f" hrefs: [{', '.join(hrefs)}]")
             if labels:
@@ -1625,7 +1726,8 @@ class FacebookWorker:
             f"{diag.get('doc_comment_labels') or 0} comment labels "
             f"{diag.get('doc_label_samples') or []} "
             f"{diag.get('doc_link_samples') or []}"
-            + (f"; samples: {'; '.join(samples)}" if samples else ""))
+            + (f"; samples: {'; '.join(samples)}" if samples else "")
+        )
         _note(ctx, text)
         return text
 
@@ -1646,8 +1748,9 @@ class FacebookWorker:
                 time.sleep(0.5)
         return False
 
-    def _ensure_on_feed(self, page: Page, source_url: str,
-                        ctx: dict | None = None) -> bool:
+    def _ensure_on_feed(
+        self, page: Page, source_url: str, ctx: dict | None = None
+    ) -> bool:
         """Make sure the browser is on the source feed: skip the
         reload when it is already there (a same-URL reload of a
         heavy feed is slow), else load it. Returns False when the
@@ -1664,9 +1767,14 @@ class FacebookWorker:
     # ------------------------------------------------------------------
     # Feed collection + single-post extraction
     # ------------------------------------------------------------------
-    def collect_feed_posts(self, page: Page, source_url: str,
-                           known_urls, limit: int,
-                           ctx: dict | None = None):
+    def collect_feed_posts(
+        self,
+        page: Page,
+        source_url: str,
+        known_urls,
+        limit: int,
+        ctx: dict | None = None,
+    ):
         """Collect NEW feed posts as entries {post_url|None,
         author_name, comment_count, has_comment_button, key}.
 
@@ -1682,8 +1790,10 @@ class FacebookWorker:
         """
         known = set(known_urls or [])
         if not self._ensure_on_feed(page, source_url, ctx):
-            return [], ("feed did not load - Facebook never showed the "
-                        "source page with a live session")
+            return [], (
+                "feed did not load - Facebook never showed the "
+                "source page with a live session"
+            )
         self._wait_for_articles(page, ctx, timeout_s=30.0)
         found: list = []
         seen = set(known)
@@ -1770,16 +1880,20 @@ class FacebookWorker:
             diag = self._feed_diagnostic(page, ctx)
         return found, diag
 
-    def collect_feed_post_urls(self, page: Page, source_url: str,
-                               known_urls, limit: int,
-                               ctx: dict | None = None) -> list:
+    def collect_feed_post_urls(
+        self,
+        page: Page,
+        source_url: str,
+        known_urls,
+        limit: int,
+        ctx: dict | None = None,
+    ) -> list:
         """URLs of new feed posts (see collect_feed_posts). Kept for
         callers that only need links; posts without a permalink are
         dropped here — use collect_feed_posts to open those via
         their comment button. Never raises.
         """
-        entries, _ = self.collect_feed_posts(
-            page, source_url, known_urls, limit, ctx)
+        entries, _ = self.collect_feed_posts(page, source_url, known_urls, limit, ctx)
         return [e.get("post_url") for e in entries if e.get("post_url")]
 
     def _dialog_state(self, page: Page) -> dict:
@@ -1791,8 +1905,7 @@ class FacebookWorker:
             return {}
         return state if isinstance(state, dict) else {}
 
-    def _scroll_dialog_until_loaded(self, page: Page,
-                                    ctx: dict | None = None) -> dict:
+    def _scroll_dialog_until_loaded(self, page: Page, ctx: dict | None = None) -> dict:
         """Scroll the post dialog until the loaded top-level comment
         count reaches the post's stated total, OR until 5 consecutive
         scrolls bring no new comments and no "Loading..." placeholders
@@ -1853,9 +1966,9 @@ class FacebookWorker:
             _note(ctx, f"expanded {total_clicked} buttons in post dialog")
         return total_clicked
 
-    def _extract_dialog_contents(self, page: Page,
-                                 ctx: dict | None = None,
-                                 label: str = "post") -> dict | None:
+    def _extract_dialog_contents(
+        self, page: Page, ctx: dict | None = None, label: str = "post"
+    ) -> dict | None:
         """Wait for the post dialog, then repeat scroll+expand
         cycles until a full pass adds nothing new: scroll the dialog
         until the stated comment total is loaded (or 5 no-new
@@ -1906,8 +2019,9 @@ class FacebookWorker:
             data["comment_total"] = state.get("total")
         return data
 
-    def extract_post(self, page: Page, post_url: str,
-                     ctx: dict | None = None) -> dict | None:
+    def extract_post(
+        self, page: Page, post_url: str, ctx: dict | None = None
+    ) -> dict | None:
         """Extract one post (with comments/replies) from its dialog —
         EXHAUSTIVELY. No comment or reply may be missed.
 
@@ -1925,8 +2039,9 @@ class FacebookWorker:
         self._close_dialog(page, ctx)
         return data
 
-    def extract_post_via_comment_button(self, page: Page, source_url: str,
-                                        entry, ctx: dict | None = None):
+    def extract_post_via_comment_button(
+        self, page: Page, source_url: str, entry, ctx: dict | None = None
+    ):
         """Open a feed post that has no permalink URL by clicking its
         comment button ("Comment on <Name>'s post, N comments") —
         the button opens the post as a dialog — then extract from
@@ -1941,8 +2056,9 @@ class FacebookWorker:
         key = (entry.get("key") or "").strip()
         author = entry.get("author_name") or "post"
         if not key:
-            _note(ctx, f"cannot open post by comment button "
-                       f"(no feed key): {author}")
+            _note(
+                ctx, f"cannot open post by comment button " f"(no feed key): {author}"
+            )
             return None
         if not self._ensure_on_feed(page, source_url, ctx):
             return None
@@ -1969,11 +2085,13 @@ class FacebookWorker:
             except Exception:
                 time.sleep(1.5)
         if not opened:
-            _note(ctx, f"could not open post by comment button "
-                       f"(not found in feed): {author}")
+            _note(
+                ctx,
+                f"could not open post by comment button "
+                f"(not found in feed): {author}",
+            )
             return None
-        data = self._extract_dialog_contents(
-            page, ctx, f"comment-button:{author}")
+        data = self._extract_dialog_contents(page, ctx, f"comment-button:{author}")
         try:
             post_url = (page.url or "").strip() or None
         except Exception:
@@ -1982,8 +2100,11 @@ class FacebookWorker:
         if not data:
             return None
         if not post_url or _same_url(post_url, source_url):
-            _note(ctx, f"post opened via comment button but no post "
-                       f"URL could be read: {author}")
+            _note(
+                ctx,
+                f"post opened via comment button but no post "
+                f"URL could be read: {author}",
+            )
             return None
         return (post_url, data)
 
@@ -1999,8 +2120,9 @@ class FacebookWorker:
     # logged-in browser. A message counts as sent ONLY when it is
     # still present after a reload.
     # ------------------------------------------------------------------
-    def open_chat_with_profile(self, page: Page, profile_url: str,
-                               ctx: dict | None) -> tuple[str | None, str]:
+    def open_chat_with_profile(
+        self, page: Page, profile_url: str, ctx: dict | None
+    ) -> tuple[str | None, str]:
         """Open a Messenger chat with a profile page.
 
         Goes to the profile, clicks its "Message" button, and returns
@@ -2021,12 +2143,15 @@ class FacebookWorker:
                 time.sleep(2.5)
             if self._check_block(page, ctx):
                 return None, "blocked"
-            clicked = self._click_first_visible(page, (
-                'a[aria-label="Message"]',
-                'div[role="button"][aria-label="Message"]',
-                'button:has-text("Message")',
-                'div[role="button"]:has-text("Message")',
-            ))
+            clicked = self._click_first_visible(
+                page,
+                (
+                    'a[aria-label="Message"]',
+                    'div[role="button"][aria-label="Message"]',
+                    'button:has-text("Message")',
+                    'div[role="button"]:has-text("Message")',
+                ),
+            )
             if not clicked:
                 return None, "no Message button on this profile"
             try:
@@ -2041,17 +2166,180 @@ class FacebookWorker:
             if m:
                 return f"{self.base_url}/messages/t/{m.group(1)}", "opened"
             for href, _text in self._links(page):
-                m = re.search(r"/messages/t/(\d+)", href or "")
+                m = re.search(r"/messages/(?:e2ee/)?t/(\d+)", href or "")
                 if m:
-                    return (f"{self.base_url}/messages/t/{m.group(1)}",
-                            "opened (chat tab)")
-            return None, "Message clicked but no chat thread opened"
+                    return (
+                        f"{self.base_url}/messages/t/{m.group(1)}",
+                        "opened (chat tab)",
+                    )
+            # Facebook often opens a small docked chat and the URL does
+            # not change. Fall back to the thread URL from the numeric id.
+            user_id = self._profile_numeric_id(page, profile_url)
+            if not user_id:
+                _note(ctx, "open chat: no numeric id | " + self._page_state(page))
+                return (
+                    None,
+                    "Message clicked but no chat thread opened (profile id not found)",
+                )
+            direct_url = f"{self.base_url}/messages/t/{user_id}"
+            if not self._goto(page, direct_url, ctx, "open_chat_thread"):
+                return None, "chat thread page did not load"
+            for _ in range(20):
+                if self.messenger_gate(page, ctx) != "clear":
+                    return (
+                        None,
+                        "needs your help: Messenger PIN (upar wala card dekhein)",
+                    )
+                try:
+                    if page.locator('div[contenteditable="true"]').count() > 0:
+                        break
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_timeout(500)
+                except Exception:
+                    time.sleep(0.5)
+            self._wait_ready(page, ctx)
+            try:
+                page.wait_for_timeout(2500)
+            except Exception:
+                time.sleep(2.5)
+            try:
+                has_box = False
+                for _ in range(30):
+                    if (
+                        page.locator(
+                            'div[contenteditable="true"], [role="textbox"], textarea'
+                        ).count()
+                        > 0
+                    ):
+                        has_box = True
+                        break
+                    page.wait_for_timeout(500)
+            except Exception:
+                has_box = False
+            if not has_box:
+                try:
+                    self.report_stuck(
+                        page, ctx, "chat khul gayi lekin message box nahi mila"
+                    )
+                    page.screenshot(path="open_chat_debug.png")
+                except Exception:
+                    pass
+                _note(
+                    ctx,
+                    "open chat: no message box | page end: "
+                    + _clean_text((page.inner_text("body") or "")[-300:], 300),
+                )
+                return (
+                    None,
+                    "chat page opened but no message box | " + self._page_state(page),
+                )
+            wanted = ((ctx or {}).get("profile_name") or "").strip().lower()
+            if wanted:
+                try:
+                    body_low = (page.inner_text("body") or "").lower()
+                except Exception:
+                    body_low = ""
+                if wanted.split()[0] not in body_low:
+                    return (
+                        None,
+                        f"chat opened but name '{wanted}' not seen on page, not sending",
+                    )
+            return direct_url, "opened (direct thread URL)"
         except Exception as exc:  # noqa: BLE001
             _note(ctx, f"open chat failed ({profile_url}): {exc}")
             return None, str(exc)
 
-    def read_messenger_threads(self, page: Page, ctx: dict | None,
-                               source: str = "inbox") -> list[dict]:
+    def _profile_numeric_id(self, page: Page, profile_url: str) -> str | None:
+        """Numeric Facebook id of the profile page we are on."""
+        m = re.search(r"[?&]id=(\d+)", profile_url or "")
+        if m:
+            return m.group(1)
+        try:
+            html = page.content() or ""
+        except Exception:
+            return None
+        for pattern in (
+            r"fb://profile/(\d+)",
+            r'"entity_id":"(\d+)"',
+            r'"profile_id":"(\d+)"',
+            r'"userID":"(\d+)"',
+        ):
+            m = re.search(pattern, html)
+            if m and m.group(1) != "0":
+                return m.group(1)
+        return None
+
+    def pin_screen_present(self, page: Page) -> bool:
+        """True when Messenger is showing its PIN screen."""
+        try:
+            low = (page.inner_text("body") or "").lower()
+        except Exception:
+            return False
+        return "enter your pin" in low or "restore your chats" in low
+
+    def messenger_gate(self, page: Page, ctx: dict | None) -> str:
+        """'clear' | 'needs_pin' | 'pin_wrong'. When Messenger asks for
+        its PIN: ask the user (help card) if we have none, else type it."""
+        if not self.pin_screen_present(page):
+            return "clear"
+        import help_requests
+
+        pin = help_requests.get_pin()
+        if not pin:
+            help_requests.raise_help(
+                "pin",
+                "Messenger apna PIN maang raha hai. Neeche PIN daalein — "
+                "agent baaki kaam khud kar lega.",
+            )
+            _note(ctx, "Messenger asks for its PIN - waiting for the user")
+            return "needs_pin"
+        try:
+            box = page.locator('div[role="dialog"] input').first
+            if box.count() > 0:
+                box.click(timeout=3000)
+        except Exception:
+            pass
+        try:
+            page.keyboard.type(pin, delay=150)
+        except Exception:
+            _note(ctx, "could not type the PIN")
+        for _ in range(40):
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+            if not self.pin_screen_present(page):
+                _note(ctx, "Messenger PIN accepted")
+                return "clear"
+        help_requests.clear_pin()
+        help_requests.raise_help(
+            "pin", "Messenger ne PIN qubool nahi kiya. Sahi PIN dobara daalein."
+        )
+        return "pin_wrong"
+
+    def report_stuck(self, page: Page, ctx: dict | None, what: str) -> None:
+        """Ask the user for help (with a screenshot) instead of failing blindly."""
+        import os
+
+        import help_requests
+
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            page.screenshot(path=os.path.join(here, "last_problem.png"))
+        except Exception:
+            pass
+        help_requests.raise_help(
+            "stuck",
+            f"Agent ruk gaya: {what}. Neeche screenshot mein dekhein agent ko kya "
+            "dikh raha hai. 'Window kholein' dabayein, masla khud theek karein "
+            "(popup band karein / PIN daalein), phir 'Maine theek kar diya' dabayein.",
+        )
+
+    def read_messenger_threads(
+        self, page: Page, ctx: dict | None, source: str = "inbox"
+    ) -> list[dict]:
         """Messenger thread list -> [{thread_url, name, last_text,
         unread, source}]. ``source`` is "inbox" (/messages) or
         "message_requests" (/messages/requests) — a first message to
@@ -2059,15 +2347,19 @@ class FacebookWorker:
         Ported from client-hunting's _collect_threads. Best-effort;
         never raises.
         """
-        url = (f"{self.base_url}/messages/requests"
-               if source == "message_requests"
-               else f"{self.base_url}/messages")
+        url = (
+            f"{self.base_url}/messages/requests"
+            if source == "message_requests"
+            else f"{self.base_url}/messages"
+        )
         if _should_stop(ctx):
             return []
         try:
             if not self._load(page, url, ctx, f"threads:{source}"):
                 return []
-            self._scroll_and_collect(page, ctx, rounds=3)
+            if self.messenger_gate(page, ctx) != "clear":
+                return []
+            self._scroll_and_collect(page, ctx, rounds=1, wait_ms=800)
             seen: dict[str, int] = {}
             out: list[dict] = []
             try:
@@ -2081,21 +2373,28 @@ class FacebookWorker:
                     aria = a.get_attribute("aria-label") or ""
                 except Exception:
                     continue
-                m = re.search(r"/messages/t/(\d+)", href or "")
+                m = re.search(r"/messages/(?:e2ee/)?t/(\d+)", href or "")
                 if not m:
                     continue
-                thread_url = f"{self.base_url}/messages/t/{m.group(1)}"
+                thread_url = f"{self.base_url}/messages/{'e2ee/' if 'e2ee/' in href else ''}t/{m.group(1)}"
                 lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-                name = lines[0] if lines else ""
+                name = next(
+                    (ln for ln in lines if not re.match(r"^active\b", ln, re.I)), ""
+                )
                 if not name and aria:
-                    name = _clean_text(
-                        aria.split(",")[0].replace("unread", ""), 120)
-                last_text = _clean_text(" ".join(lines[1:]), 300)
+                    name = _clean_text(aria.split(",")[0].replace("unread", ""), 120)
+                last_text = _clean_text(
+                    " ".join(
+                        ln
+                        for ln in lines
+                        if ln != name and not re.match(r"^active\b", ln, re.I)
+                    ),
+                    300,
+                )
                 if name and last_text.lower().startswith(name.lower()):
-                    last_text = _clean_text(last_text[len(name):], 300)
+                    last_text = _clean_text(last_text[len(name) :], 300)
                 row = f"{aria} {text}".lower()
-                unread = ("unread" in row
-                          or "mark as read" in text.lower())
+                unread = "unread" in row or "mark as read" in text.lower()
                 if thread_url in seen:
                     stored = out[seen[thread_url]]
                     if not stored.get("name") and name:
@@ -2105,13 +2404,15 @@ class FacebookWorker:
                     stored["unread"] = bool(stored.get("unread") or unread)
                     continue
                 seen[thread_url] = len(out)
-                out.append({
-                    "thread_url": thread_url,
-                    "name": _clean_text(name, 120),
-                    "last_text": last_text,
-                    "unread": unread,
-                    "source": source,
-                })
+                out.append(
+                    {
+                        "thread_url": thread_url,
+                        "name": _clean_text(name, 120),
+                        "last_text": last_text,
+                        "unread": unread,
+                        "source": source,
+                    }
+                )
             if not out:
                 _note(ctx, f"0 threads ({source}): {self._page_state(page)}")
             return out
@@ -2119,8 +2420,9 @@ class FacebookWorker:
             _note(ctx, f"read threads failed ({source}): {exc}")
             return []
 
-    def read_thread_messages(self, page: Page, thread_url: str,
-                             ctx: dict | None) -> list[dict]:
+    def read_thread_messages(
+        self, page: Page, thread_url: str, ctx: dict | None
+    ) -> list[dict]:
         """Read one thread -> [{text, side}] oldest first, side "me" /
         "them" / "unknown" (bounding-rect heuristic, see
         _THREAD_MESSAGES_JS). Never raises; [] on failure."""
@@ -2130,6 +2432,8 @@ class FacebookWorker:
             if not self._load(page, thread_url, ctx, "read_thread"):
                 return []
             try:
+                self._wait_composer(page)
+                page.wait_for_timeout(1500)
                 rows = page.evaluate(_THREAD_MESSAGES_JS) or []
             except Exception:
                 rows = []
@@ -2141,16 +2445,20 @@ class FacebookWorker:
                 if not text:
                     continue
                 side = row.get("side") or "unknown"
-                out.append({"text": text,
-                            "side": side if side in ("me", "them")
-                            else "unknown"})
+                out.append(
+                    {
+                        "text": text,
+                        "side": side if side in ("me", "them") else "unknown",
+                    }
+                )
             return out
         except Exception as exc:  # noqa: BLE001
             _note(ctx, f"read thread failed ({thread_url}): {exc}")
             return []
 
-    def send_thread_message(self, page: Page, thread_url: str, text: str,
-                            ctx: dict | None) -> tuple[bool, str]:
+    def send_thread_message(
+        self, page: Page, thread_url: str, text: str, ctx: dict | None
+    ) -> tuple[bool, str]:
         """Send one message, then RELOAD the thread and confirm it is
         still present before counting it delivered. Returns (ok,
         detail). Types letter by letter; reads the thread's latest
@@ -2162,7 +2470,9 @@ class FacebookWorker:
             return False, "stopped"
         try:
             _pace(ctx)
-            if not self._goto(page, thread_url, ctx, "send_message"):
+            if not thread_url.startswith("compose:") and not self._goto(
+                page, thread_url, ctx, "send_message"
+            ):
                 return False, "page did not load"
             try:
                 page.wait_for_timeout(2500)
@@ -2170,8 +2480,49 @@ class FacebookWorker:
                 time.sleep(2.5)
             if self._check_block(page, ctx):
                 return False, "blocked"
+            if self.messenger_gate(page, ctx) != "clear":
+                return False, "needs your help: Messenger PIN"
+            # Chat page gone (deleted chat / stale link): find the person again.
+            try:
+                gone = "this content isn't available" in (
+                    page.inner_text("body") or ""
+                ).lower().replace("\u2019", "'")
+            except Exception:
+                gone = False
+            if gone:
+                import chat_open
+
+                found = chat_open._open_via_search(
+                    self, page, (ctx or {}).get("profile_name") or "", ctx
+                )
+                if not found:
+                    return (
+                        False,
+                        "chat page not available and person not found in Messenger search",
+                    )
+                thread_url = found
             # Latest state first (discipline: never pile on).
-            self.read_thread_messages(page, thread_url, ctx)
+            if not thread_url.startswith("compose:"):
+                self.read_thread_messages(page, thread_url, ctx)
+            for _ in range(40):
+                if self.messenger_gate(page, ctx) != "clear":
+                    return False, "needs your help: Messenger PIN"
+                try:
+                    loc = page.locator('div[contenteditable="true"]')
+                    if loc.count() > 0 and loc.last.is_visible():
+                        break
+                    if (
+                        "before this chat was secured"
+                        in (page.inner_text("body") or "").lower()
+                    ):
+                        cont = page.locator(
+                            'div[role="button"]:has-text("Continue"), button:has-text("Continue")'
+                        ).last
+                        if cont.count() > 0 and cont.is_visible():
+                            cont.click(timeout=3000)
+                    page.wait_for_timeout(500)
+                except Exception:
+                    time.sleep(0.5)
             if _should_stop(ctx):
                 return False, "stopped"
             box = None
@@ -2189,16 +2540,46 @@ class FacebookWorker:
                 except Exception:
                     continue
             if box is None:
-                return False, "message box not found"
+                try:
+                    cont = page.locator(
+                        'div[role="button"]:has-text("Continue"), button:has-text("Continue")'
+                    ).last
+                    if cont.count() > 0 and cont.is_visible():
+                        cont.click(timeout=3000)
+                        page.wait_for_timeout(2500)
+                    loc = page.locator('div[contenteditable="true"]').last
+                    if loc.count() > 0 and loc.is_visible():
+                        box = loc
+                except Exception:
+                    pass
+                if box is None:
+                    return False, (
+                        self.report_stuck(page, ctx, "message box nahi mila")
+                        or "message box not found"
+                    )
             box.click()
             # Letter by letter (keyboard.type with a per-key delay).
+            if thread_url.startswith("compose:"):
+                import chat_open
+
+                if not chat_open.mark_popup(
+                    page, (ctx or {}).get("profile_name") or ""
+                ):
+                    return (
+                        False,
+                        "chat popup is not the right person's - nothing was sent",
+                    )
+                box = page.locator(
+                    'div[contenteditable="true"][data-lh-target="1"]'
+                ).first
+                box.click()
             try:
-                box.type(text, delay=random.uniform(35, 80))
+                self._human_type(page, text)
             except Exception:
                 try:
                     page.keyboard.type(text, delay=60)
                 except Exception:
-                    box.fill(text)
+                    return False, "could not type the message"
             try:
                 page.wait_for_timeout(800)
             except Exception:
@@ -2208,6 +2589,44 @@ class FacebookWorker:
                 page.wait_for_timeout(2500)
             except Exception:
                 time.sleep(2.5)
+            if thread_url.startswith("compose:"):
+                import chat_open
+
+                real = None
+                for _ in range(40):
+                    real = chat_open._canon(page.url or "")
+                    if not real:
+                        try:
+                            hrefs = page.evaluate(
+                                "(n) => { const out = []; for (const a of document.querySelectorAll('a[href*=\"/messages/\"]')) { const h = a.getAttribute('href') || ''; if (!/\\/messages\\/(e2ee\\/)?t\\/\\d+/.test(h)) continue; const t = (a.innerText || '').toLowerCase(); if (a.getAttribute('aria-current') === 'page' || (n && t.indexOf(n.toLowerCase()) !== -1)) out.push(h); } return out; }",
+                                (ctx or {}).get("profile_name") or "",
+                            )
+                            for h in hrefs or []:
+                                real = chat_open._canon(h)
+                                if real:
+                                    break
+                        except Exception:
+                            pass
+                    if real:
+                        break
+                    try:
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        time.sleep(0.5)
+                if not real:
+                    pass
+                if not real:
+                    real = self._find_sent_thread(page, ctx, text)
+                    if real:
+                        self._goto(page, real, ctx, "after_send")
+                if not real:
+                    return (
+                        False,
+                        "message sent but its chat link was not found in the inbox",
+                    )
+                thread_url = real
+                if ctx is not None:
+                    ctx["new_thread_url"] = real
             # Verify after reload: the message counts ONLY if still present.
             _stage(ctx, "verifying sent")
             tail = _clean_text(text, 120)
@@ -2221,9 +2640,16 @@ class FacebookWorker:
                 except Exception:
                     pass
             try:
-                body = page.inner_text("body") or ""
+                body = self._body_after_send(page, text)
                 # Match on a distinctive tail chunk (last ~60 chars).
-                probe = tail[-60:] if len(tail) > 60 else tail
+                probe = re.sub(
+                    r"\s+",
+                    " ",
+                    text.replace("\u2019", "'")
+                    .replace("\u2018", "'")
+                    .replace("\u201c", '"')
+                    .replace("\u201d", '"'),
+                ).strip()[-40:]
                 if probe and probe in re.sub(r"\s+", " ", body):
                     return True, "sent and confirmed after reload"
                 return False, "sent but NOT found after reload"
@@ -2232,6 +2658,93 @@ class FacebookWorker:
         except Exception as exc:  # noqa: BLE001
             _note(ctx, f"send message failed ({thread_url}): {exc}")
             return False, str(exc)
+
+    def _find_sent_thread(self, page, ctx, text):
+        """The chat we just wrote in: the inbox row whose last line is 'You: <our text>'."""
+        probe = re.sub(r"\s+", " ", (text or "")).strip()[:25].lower()
+        parts = ((ctx or {}).get("profile_name") or "").split()
+        first = parts[0].lower() if parts else ""
+        if not probe:
+            return None
+        for _ in range(4):
+            try:
+                rows = self.read_messenger_threads(page, ctx, "inbox")
+            except Exception:
+                rows = []
+            for r in rows:
+                last = re.sub(r"\s+", " ", (r.get("last_text") or "")).lower()
+                if (
+                    last.startswith("you:")
+                    and probe in last
+                    and r.get("thread_url")
+                    and (not first or first in (r.get("name") or "").lower())
+                ):
+                    return r["thread_url"]
+            try:
+                page.wait_for_timeout(3000)
+            except Exception:
+                time.sleep(3)
+        return None
+
+    def _human_type(self, page, text):
+        """Type like a person: key by key, uneven rhythm, small pauses."""
+        for ch in text:
+            page.keyboard.type(ch)
+            d = random.uniform(0.03, 0.09)
+            if ch in ".,!?":
+                d += random.uniform(0.1, 0.35)
+            elif ch == " " and random.random() < 0.08:
+                d += random.uniform(0.2, 0.6)
+            page.wait_for_timeout(int(d * 1000))
+
+    def _wait_composer(self, page):
+        """Wait for the message box; press Continue if a secured-chat screen blocks it."""
+        for _ in range(25):
+            try:
+                if page.locator('div[contenteditable="true"]').count() > 0:
+                    break
+                cont = page.locator(
+                    'div[role="button"]:has-text("Continue"), button:has-text("Continue")'
+                ).last
+                if cont.count() > 0 and cont.is_visible():
+                    cont.click(timeout=3000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:
+                time.sleep(1)
+
+    def _body_after_send(self, page, text):
+        """Page text after reload; waits (and presses Continue) until the sent message shows."""
+
+        def norm(s):
+            s = (s or "").replace("\u2019", "'").replace("\u2018", "'")
+            s = s.replace("\u201c", '"').replace("\u201d", '"')
+            return re.sub(r"\s+", " ", s)
+
+        probe = norm(text).strip()[-40:]
+        body = ""
+        for _ in range(20):
+            try:
+                body = norm(page.inner_text("body") or "")
+            except Exception:
+                body = ""
+            if probe and probe in body:
+                return body
+            try:
+                cont = page.locator(
+                    'div[role="button"]:has-text("Continue"), button:has-text("Continue")'
+                ).last
+                if cont.count() > 0 and cont.is_visible():
+                    cont.click(timeout=3000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:
+                time.sleep(1)
+        return body
 
     def detect_block(self, page: Page) -> str | None:
         """Return the matched block marker, or None when no block is seen."""
@@ -2263,7 +2776,7 @@ class FacebookWorker:
         except Exception:
             title = ""
         try:
-            body = page.inner_text("body") or ""
+            body = self._body_after_send(page, text)
         except Exception:
             body = ""
         try:
@@ -2286,7 +2799,9 @@ class FacebookWorker:
         """Detect a block, report it via ctx, and return the marker."""
         marker = self.detect_block(page)
         if marker:
-            _blocked(ctx, f"Facebook block/warning: {marker} | {self._page_state(page)}")
+            _blocked(
+                ctx, f"Facebook block/warning: {marker} | {self._page_state(page)}"
+            )
             _activity(ctx, "blocked", f"Facebook block: {marker}")
         return marker
 
@@ -2316,8 +2831,7 @@ class FacebookWorker:
                     continue
         return False
 
-    def _wait_for_visible(self, page: Page, selectors,
-                          timeout_ms: int = 5000) -> bool:
+    def _wait_for_visible(self, page: Page, selectors, timeout_ms: int = 5000) -> bool:
         """Poll until any of the selectors is visible (or the bound
         expires). Waiting for the TEXT to exist is not enough —
         Facebook's React can leave the text in the DOM while the
@@ -2338,13 +2852,12 @@ class FacebookWorker:
                 time.sleep(0.5)
         return False
 
-    def _wait_for_text(self, page: Page, text: str,
-                       timeout_ms: int = 5000) -> bool:
+    def _wait_for_text(self, page: Page, text: str, timeout_ms: int = 5000) -> bool:
         """Poll until the body contains the text (or the bound expires)."""
         polls = max(1, int(timeout_ms / 500))
         for _ in range(polls):
             try:
-                body = page.inner_text("body") or ""
+                body = self._body_after_send(page, text)
                 if text.lower() in body.lower():
                     return True
             except Exception:
@@ -2470,18 +2983,19 @@ class FacebookWorker:
         except Exception:
             pass
         try:
-            body = page.inner_text("body") or ""
+            body = self._body_after_send(page, text)
             if name and body:
                 idx = body.lower().find(name.lower())
                 if idx >= 0:
-                    window = body[idx:idx + len(name) + 120]
+                    window = body[idx : idx + len(name) + 120]
                     return _parse_member_count(window)
         except Exception:
             pass
         return None
 
-    def _scroll_and_collect(self, page: Page, ctx: dict | None,
-                            rounds: int = 8, wait_ms: int = 2000) -> None:
+    def _scroll_and_collect(
+        self, page: Page, ctx: dict | None, rounds: int = 8, wait_ms: int = 2000
+    ) -> None:
         """Scroll the page in steps so lazy-loaded content renders."""
         for _ in range(rounds):
             if _should_stop(ctx):
@@ -2498,8 +3012,9 @@ class FacebookWorker:
             except Exception:
                 time.sleep(wait_ms / 1000.0)
 
-    def _collect_from_links(self, page: Page, kind: str, label: str,
-                            source_url: str) -> list[dict]:
+    def _collect_from_links(
+        self, page: Page, kind: str, label: str, source_url: str
+    ) -> list[dict]:
         """Build candidate dicts from the links currently on the page.
 
         When a profile URL is already seen, a later anchor with a
@@ -2540,13 +3055,17 @@ class FacebookWorker:
                         stored["comment_text"] = comment_text
                     continue
                 seen[url] = len(out)
-                out.append({
-                    "profile_url": url, "name": text or "",
-                    "source": label, "source_url": source_url,
-                    "source_detail": label,
-                    "comment_text": comment_text,
-                    "found_via": found_via,
-                })
+                out.append(
+                    {
+                        "profile_url": url,
+                        "name": text or "",
+                        "source": label,
+                        "source_url": source_url,
+                        "source_detail": label,
+                        "comment_text": comment_text,
+                        "found_via": found_via,
+                    }
+                )
             elif kind == "groups":
                 url = self._group_url(href)
                 if not url:
@@ -2556,13 +3075,20 @@ class FacebookWorker:
                     if not stored.get("name") and text:
                         stored["name"] = text
                     if stored.get("member_count") is None:
-                        count = self._member_count_for(page, anchor, text or stored.get("name") or "")
+                        count = self._member_count_for(
+                            page, anchor, text or stored.get("name") or ""
+                        )
                         if count is not None:
                             stored["member_count"] = count
                     continue
                 seen[url] = len(out)
-                out.append({"url": url, "name": text or "",
-                            "member_count": self._member_count_for(page, anchor, text)})
+                out.append(
+                    {
+                        "url": url,
+                        "name": text or "",
+                        "member_count": self._member_count_for(page, anchor, text),
+                    }
+                )
             elif kind == "pages":
                 url = self._profile_url(href)
                 if not url:
@@ -2572,13 +3098,20 @@ class FacebookWorker:
                     if not stored.get("name") and text:
                         stored["name"] = text
                     if stored.get("member_count") is None:
-                        count = self._member_count_for(page, anchor, text or stored.get("name") or "")
+                        count = self._member_count_for(
+                            page, anchor, text or stored.get("name") or ""
+                        )
                         if count is not None:
                             stored["member_count"] = count
                     continue
                 seen[url] = len(out)
-                out.append({"url": url, "name": text or "",
-                            "member_count": self._member_count_for(page, anchor, text)})
+                out.append(
+                    {
+                        "url": url,
+                        "name": text or "",
+                        "member_count": self._member_count_for(page, anchor, text),
+                    }
+                )
             elif kind == "posts":
                 url = self._post_url(href)
                 if not url:
@@ -2589,8 +3122,14 @@ class FacebookWorker:
                 out.append({"url": url})
         return out
 
-    def _search_via_ui(self, page: Page, keyword: str, tab: str,
-                       ctx: dict | None, kind: str = "profiles") -> list[dict]:
+    def _search_via_ui(
+        self,
+        page: Page,
+        keyword: str,
+        tab: str,
+        ctx: dict | None,
+        kind: str = "profiles",
+    ) -> list[dict]:
         """Search using Facebook's own search box, then collect results.
 
         Search page -> search box -> type keyword -> Enter -> click
@@ -2609,8 +3148,9 @@ class FacebookWorker:
             # call this fallback; anything else loads the groups
             # search — the box + tab click still do the real work.)
             kind_url = kind if kind in ("groups", "pages") else "groups"
-            if not self._load(page, self.search_url(keyword, kind_url),
-                              ctx, "ui_search"):
+            if not self._load(
+                page, self.search_url(keyword, kind_url), ctx, "ui_search"
+            ):
                 return []
             box = None
             for selector in (
@@ -2627,8 +3167,11 @@ class FacebookWorker:
                 except Exception:
                     continue
             if box is None:
-                _note(ctx, f"search box not found for '{keyword}': "
-                           f"{self._page_state(page)}")
+                _note(
+                    ctx,
+                    f"search box not found for '{keyword}': "
+                    f"{self._page_state(page)}",
+                )
                 return []
             box.click()
             box.type(keyword, delay=60)
@@ -2653,8 +3196,11 @@ class FacebookWorker:
                 except Exception:
                     continue
             if not clicked:
-                _note(ctx, f"search tab '{tab}' not clickable for "
-                           f"'{keyword}': {self._page_state(page)}")
+                _note(
+                    ctx,
+                    f"search tab '{tab}' not clickable for "
+                    f"'{keyword}': {self._page_state(page)}",
+                )
             try:
                 page.wait_for_timeout(3000)
             except Exception:
@@ -2663,27 +3209,25 @@ class FacebookWorker:
             # instead of assuming the fixed sleep was enough.
             self._wait_ready(page, ctx)
             if self.check_session(page, ctx) != "ok":
-                _note(ctx, f"session not ok on {label}: "
-                           f"{self._page_state(page)}")
+                _note(ctx, f"session not ok on {label}: " f"{self._page_state(page)}")
                 return []
             self._scroll_and_collect(page, ctx)
             if kind == "profiles":
-                candidates = self._collect_from_links(
-                    page, "profiles", label, page.url)
+                candidates = self._collect_from_links(page, "profiles", label, page.url)
             elif kind == "groups":
-                candidates = self._collect_from_links(
-                    page, "groups", label, page.url)
+                candidates = self._collect_from_links(page, "groups", label, page.url)
             elif kind == "pages":
-                candidates = self._collect_from_links(
-                    page, "pages", label, page.url)
+                candidates = self._collect_from_links(page, "pages", label, page.url)
             else:
-                candidates = self._collect_from_links(
-                    page, "posts", label, page.url)
+                candidates = self._collect_from_links(page, "posts", label, page.url)
             if not candidates:
                 state = self._page_state(page)
                 _note(ctx, f"0 results via search box ({label}): {state}")
-                _activity(ctx, "browse",
-                          f"Search-box fallback empty for '{keyword}' — {state}")
+                _activity(
+                    ctx,
+                    "browse",
+                    f"Search-box fallback empty for '{keyword}' — {state}",
+                )
                 self._check_block(page, ctx)
             return candidates
         except Exception as exc:  # noqa: BLE001 - never raise on one bad page
@@ -2693,8 +3237,7 @@ class FacebookWorker:
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
-    def search_groups(self, page: Page, keyword: str,
-                      ctx: dict | None) -> list[dict]:
+    def search_groups(self, page: Page, keyword: str, ctx: dict | None) -> list[dict]:
         """Search groups -> [{url, name, member_count}]."""
         if _should_stop(ctx):
             return []
@@ -2706,15 +3249,15 @@ class FacebookWorker:
             results = self._collect_from_links(page, "groups", "group_search", url)
             if not results:
                 _note(ctx, f"0 groups for '{keyword}': {self._page_state(page)}")
-                results = self._search_via_ui(page, keyword, "Groups", ctx,
-                                              kind="groups")
+                results = self._search_via_ui(
+                    page, keyword, "Groups", ctx, kind="groups"
+                )
             return results
         except Exception as exc:  # noqa: BLE001
             _note(ctx, f"group search failed ('{keyword}'): {exc}")
             return []
 
-    def search_pages(self, page: Page, keyword: str,
-                     ctx: dict | None) -> list[dict]:
+    def search_pages(self, page: Page, keyword: str, ctx: dict | None) -> list[dict]:
         """Search pages -> [{url, name, member_count}]."""
         if _should_stop(ctx):
             return []
@@ -2726,8 +3269,7 @@ class FacebookWorker:
             results = self._collect_from_links(page, "pages", "page_search", url)
             if not results:
                 _note(ctx, f"0 pages for '{keyword}': {self._page_state(page)}")
-                results = self._search_via_ui(page, keyword, "Pages", ctx,
-                                              kind="pages")
+                results = self._search_via_ui(page, keyword, "Pages", ctx, kind="pages")
             return results
         except Exception as exc:  # noqa: BLE001
             _note(ctx, f"page search failed ('{keyword}'): {exc}")
@@ -2784,8 +3326,7 @@ class FacebookWorker:
             _note(ctx, f"join group failed ({group_url}): {exc}")
             return False
 
-    def leave_group(self, page: Page, group_url: str,
-                    ctx: dict | None) -> bool:
+    def leave_group(self, page: Page, group_url: str, ctx: dict | None) -> bool:
         """Leave a group. Returns True ONLY when the page proves the
         user is no longer a member (a "Join group" button is shown).
 
@@ -2808,11 +3349,14 @@ class FacebookWorker:
             if self._shows_join_button(page):
                 return True
             # Open the Joined menu.
-            opened = self._click_first_visible(page, (
-                'button:has-text("Joined")',
-                'div[role="button"]:has-text("Joined")',
-                'text="Joined"',
-            ))
+            opened = self._click_first_visible(
+                page,
+                (
+                    'button:has-text("Joined")',
+                    'div[role="button"]:has-text("Joined")',
+                    'text="Joined"',
+                ),
+            )
             if not opened:
                 _note(ctx, f"leave group: no Joined button ({group_url})")
                 return False
@@ -2820,20 +3364,27 @@ class FacebookWorker:
             # (up to 5s). The text alone is not proof — React can
             # leave it in the DOM while the menu is half-rendered
             # and not clickable yet.
-            if not self._wait_for_visible(page, (
-                'div[role="menuitem"]:has-text("Leave group")',
-                '[role="menuitem"]:has-text("Leave group")',
-                'span:has-text("Leave group")',
-                'text="Leave group"',
-            ), 5000):
+            if not self._wait_for_visible(
+                page,
+                (
+                    'div[role="menuitem"]:has-text("Leave group")',
+                    '[role="menuitem"]:has-text("Leave group")',
+                    'span:has-text("Leave group")',
+                    'text="Leave group"',
+                ),
+                5000,
+            ):
                 _note(ctx, f"leave group: menu did not open ({group_url})")
                 return False
-            clicked = self._click_first_visible(page, (
-                'div[role="menuitem"]:has-text("Leave group")',
-                '[role="menuitem"]:has-text("Leave group")',
-                'text="Leave group"',
-                'span:has-text("Leave group")',
-            ))
+            clicked = self._click_first_visible(
+                page,
+                (
+                    'div[role="menuitem"]:has-text("Leave group")',
+                    '[role="menuitem"]:has-text("Leave group")',
+                    'text="Leave group"',
+                    'span:has-text("Leave group")',
+                ),
+            )
             if not clicked:
                 _note(ctx, f"leave group: no Leave item ({group_url})")
                 return False
@@ -2845,12 +3396,15 @@ class FacebookWorker:
             # "no confirm button", never silently become "still Joined".
             confirmed = False
             for _ in range(10):
-                if self._click_first_visible(page, (
-                    'button:has-text("Leave group")',
-                    'div[role="button"]:has-text("Leave group")',
-                    'div[aria-label="Leave group"][role="button"]',
-                    'button:has-text("Leave")',
-                )):
+                if self._click_first_visible(
+                    page,
+                    (
+                        'button:has-text("Leave group")',
+                        'div[role="button"]:has-text("Leave group")',
+                        'div[aria-label="Leave group"][role="button"]',
+                        'button:has-text("Leave")',
+                    ),
+                ):
                     confirmed = True
                     break
                 try:
@@ -2873,13 +3427,15 @@ class FacebookWorker:
             # wrongly reported "Could not leave" for a leave that
             # completed moments later.
             for _attempt in range(3):
-                loaded = self._load(page, group_url, ctx,
-                                    "leave_group_verify")
+                loaded = self._load(page, group_url, ctx, "leave_group_verify")
                 if loaded and self._shows_join_button(page):
                     return True
                 if not loaded:
-                    _note(ctx, f"leave group: verify reload failed, "
-                               f"retrying ({group_url})")
+                    _note(
+                        ctx,
+                        f"leave group: verify reload failed, "
+                        f"retrying ({group_url})",
+                    )
                 try:
                     page.wait_for_timeout(5000)
                 except Exception:
@@ -2888,8 +3444,11 @@ class FacebookWorker:
                 _snippet = _clean_text(page.inner_text("body") or "", 200)
             except Exception:
                 _snippet = ""
-            _note(ctx, f"leave group: still Joined after confirm "
-                       f"({group_url}) :: body='{_snippet}'")
+            _note(
+                ctx,
+                f"leave group: still Joined after confirm "
+                f"({group_url}) :: body='{_snippet}'",
+            )
             return False
         except Exception as exc:  # noqa: BLE001
             _note(ctx, f"leave group failed ({group_url}): {exc}")
@@ -2902,13 +3461,12 @@ class FacebookWorker:
         match here wrongly reports a successful leave as failed.
         """
         try:
-            body = page.inner_text("body") or ""
+            body = self._body_after_send(page, text)
             return bool(re.search(r"\bJoin group\b", body, re.I))
         except Exception:
             return False
 
-    def unfollow_page(self, page: Page, page_url: str,
-                      ctx: dict | None) -> bool:
+    def unfollow_page(self, page: Page, page_url: str, ctx: dict | None) -> bool:
         """Unfollow a page. Returns True when no longer following.
 
         Clicks "Following" (opens the menu) then "Unfollow". Returns
@@ -2925,24 +3483,31 @@ class FacebookWorker:
             try:
                 body = page.inner_text("body")[:4000]
                 if re.search(r"\bFollow\b", body) and not re.search(
-                        r"\bFollowing\b", body):
+                    r"\bFollowing\b", body
+                ):
                     return True  # already not following
             except Exception:
                 pass
-            opened = self._click_first_visible(page, (
-                'button:has-text("Following")',
-                'div[role="button"]:has-text("Following")',
-            ))
+            opened = self._click_first_visible(
+                page,
+                (
+                    'button:has-text("Following")',
+                    'div[role="button"]:has-text("Following")',
+                ),
+            )
             if opened:
                 try:
                     page.wait_for_timeout(1500)
                 except Exception:
                     time.sleep(1.5)
-                clicked = self._click_first_visible(page, (
-                    'div[role="menuitem"]:has-text("Unfollow")',
-                    'span:has-text("Unfollow")',
-                    'button:has-text("Unfollow")',
-                ))
+                clicked = self._click_first_visible(
+                    page,
+                    (
+                        'div[role="menuitem"]:has-text("Unfollow")',
+                        'span:has-text("Unfollow")',
+                        'button:has-text("Unfollow")',
+                    ),
+                )
                 if clicked:
                     try:
                         page.wait_for_timeout(2000)
@@ -2952,7 +3517,8 @@ class FacebookWorker:
             try:
                 body = page.inner_text("body")[:4000]
                 if re.search(r"\bFollow\b", body) and not re.search(
-                        r"\bFollowing\b", body):
+                    r"\bFollowing\b", body
+                ):
                     return True
             except Exception:
                 pass
@@ -2961,8 +3527,9 @@ class FacebookWorker:
             _note(ctx, f"unfollow page failed ({page_url}): {exc}")
             return False
 
-    def read_source_member_count(self, page: Page, url: str, name: str,
-                                 ctx: dict | None) -> int | None:
+    def read_source_member_count(
+        self, page: Page, url: str, name: str, ctx: dict | None
+    ) -> int | None:
         """Best-effort member/follower count for one recorded source.
 
         Loads the source's own page (group or page) and parses the
@@ -2983,9 +3550,8 @@ class FacebookWorker:
                 return None
             body = ""
             for _attempt in range(10):
-                body = page.inner_text("body") or ""
-                if body and ("member" in body.lower()
-                             or "follower" in body.lower()):
+                body = self._body_after_send(page, text)
+                if body and ("member" in body.lower() or "follower" in body.lower()):
                     break
                 try:
                     page.wait_for_timeout(1000)
@@ -2997,8 +3563,7 @@ class FacebookWorker:
             if name:
                 idx = body.lower().find(name.lower())
                 if idx >= 0:
-                    count = _parse_member_count(
-                        body[idx:idx + len(name) + 200])
+                    count = _parse_member_count(body[idx : idx + len(name) + 200])
                     if count is not None:
                         return count
             count = _parse_member_count(body)
@@ -3010,7 +3575,7 @@ class FacebookWorker:
                 if name:
                     idx = body.lower().find(name.lower())
                     if idx >= 0:
-                        snippet = body[idx:idx + 300]
+                        snippet = body[idx : idx + 300]
                 if not snippet:
                     snippet = body[:300]
                 snippet = re.sub(r"\s+", " ", snippet).strip()
@@ -3028,9 +3593,9 @@ class FacebookWorker:
             return False
         return bool(isinstance(got, dict) and got.get("loading"))
 
-    def check_comments_activity(self, page: Page, url: str,
-                               ctx: dict | None,
-                               min_comments: int | None = None) -> dict:
+    def check_comments_activity(
+        self, page: Page, url: str, ctx: dict | None, min_comments: int | None = None
+    ) -> dict:
         """Quick activity check for a group/page BEFORE joining it.
 
         The finder's job is to bring back sources our data can come
@@ -3059,8 +3624,11 @@ class FacebookWorker:
             return result
         articles = self._wait_for_articles(page, ctx, timeout_s=20.0)
         if articles == 0:
-            _note(ctx, f"feed never rendered articles for {url} — "
-                       f"gate skipped (0 comments)")
+            _note(
+                ctx,
+                f"feed never rendered articles for {url} — "
+                f"gate skipped (0 comments)",
+            )
             return result
 
         def _count_once() -> tuple[int, int, dict]:

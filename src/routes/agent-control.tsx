@@ -13,6 +13,7 @@ import {
 import { useEffect, useState } from "react";
 
 import { EmptyState, PageHeader } from "@/components/page-header";
+import { AgentHelpCard } from "@/components/agent-help-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -257,6 +258,8 @@ function AgentControl() {
         title="Agent Control"
         description="Agent ki haalat, session, aur browser — sab kuch yahan se. Jo control UI se mumkin nahi, wo neeche saaf likha hai."
       />
+
+      <AgentHelpCard />
 
       {/* Status */}
       <Card className="shadow-card">

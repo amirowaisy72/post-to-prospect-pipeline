@@ -32,6 +32,12 @@ export interface ChatStartInput {
   sourceType: "comment" | "post";
   sourceText: string;
   firstMessage: string;
+  aiFirst?: boolean;
+  script?: ChatScript;
+  geminiKey?: string;
+  model?: string;
+  provider?: string;
+  ollamaUrl?: string;
   dailyCap: number;
 }
 
@@ -48,6 +54,8 @@ export interface ChatWatchInput {
   threads: ChatWatchThread[];
   script: ChatScript;
   geminiKey: string;
+  provider?: string;
+  ollamaUrl?: string;
   model: string;
   dailyCap: number;
 }
@@ -122,6 +130,36 @@ export async function chatWatch(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   }, 20000);
+}
+
+export interface AiBody {
+  provider: string;
+  geminiKey: string;
+  ollamaUrl: string;
+}
+
+/** Model names the provider offers (Gemini via key, Ollama local). */
+export async function aiModels(
+  agentUrl: string,
+  body: AiBody,
+): Promise<ChatResult<{ models: string[] }>> {
+  return call(agentUrl, "/ai/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, 30000);
+}
+
+/** Send one tiny prompt to the model; reports seconds + reply. */
+export async function aiTest(
+  agentUrl: string,
+  body: AiBody & { model: string },
+): Promise<ChatResult<{ seconds: number; reply: string }>> {
+  return call(agentUrl, "/ai/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, 330000);
 }
 
 /** Live thread states for the app to poll. */
