@@ -1,0 +1,317 @@
+# LeadHunter — build the Windows installer (v1.0.0).
+#
+# A Windows .exe cannot be built on a Linux machine, so the build runs
+# on a free GitHub Actions windows-latest runner and produces
+# LeadHunter-Setup-<version>.exe as a build artifact + GitHub Release
+# (private repo — visible to collaborators only; the user forwards the
+# .exe to his partner on WhatsApp, limit 2 GB, so the .exe stays small).
+#
+# Layout (repo amirowaisy72/post-to-prospect-pipeline):
+#   - this file lives at the repo root: .github/workflows/
+#   - the app lives at the repo root: src/, agent/, public/,
+#     extension/, package.json, bun.lock, ...
+#   - the installer bits live in installer/
+#     (leadhunter.iss, Run-LeadHunter.bat, setup-helper.ps1,
+#     manifest-gen.py, version.json, seed/)
+#
+# v1 run mode: ship the source and run `bun run dev`, exactly as the
+# user runs it today. There is NO local production-server build path:
+# vite.config.ts uses @lovable.dev/vite-tanstack-config, whose Nitro
+# build defaults to Cloudflare Workers. A production build is a v2
+# optimisation, not part of this installer.
+#
+# The .exe is a small bootstrapper (~10-20 MB). At install time the
+# setup helper downloads everything the app needs (Bun, Python 3.14,
+# pip packages, Playwright Chromium, node_modules, Ollama + BOTH
+# models) with aria2c, in parallel, SHA-256 verified. Ollama is
+# MANDATORY: if it or either model cannot be installed, the install
+# stops — it never proceeds without Ollama.
+#
+# Updates are differential: the payload carries a SHA-256 manifest
+# (installer/manifest-gen.py) and the setup helper copies only
+# added/changed files. Bun, Python, pip packages, Chromium, Ollama
+# and both models are skipped entirely when already present. User
+# data (agent/profiles/, agent/leadhunter.db, browser localStorage)
+# is never wiped and never shipped — except the owner's seed files
+# (installer/seed/), which are copied ONLY on a fresh install when
+# the target has no copy yet.
+#
+# The workflow smoke-tests the built installer for real: it installs
+# the .exe on the runner, starts the app + agent, and waits for
+# http://127.0.0.1:8080/ and http://127.0.0.1:8001/health — the build
+# FAILS if either does not answer, so a broken installer can never
+# reach the Release step. The smoke test downloads the full component
+# set (Ollama ~1.6 GB + models ~5.9 GB + Chromium ~300 MB +
+# node_modules ~623 MB), so it takes a while and needs disk space.
+
+name: Build LeadHunter Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Installer version (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+      python_version:
+        description: "Python version to install (3.14.x)"
+        required: true
+        default: "3.14.7"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14 (build tools only)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Resolve component versions + download installers
+        id: components
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dl = Join-Path $env:GITHUB_WORKSPACE "build-downloads"
+          New-Item -ItemType Directory -Force -Path $dl | Out-Null
+
+          # Bun: latest release tag via the GitHub API (fallback: 1.4.4).
+          $bunTag = "bun-v1.4.4"
+          try {
+            $rel = gh api repos/oven-sh/bun/releases/latest --jq .tag_name
+            if ($rel) { $bunTag = $rel }
+          } catch { Write-Host "Bun latest lookup failed, using $bunTag" }
+          $bunVersion = $bunTag -replace "^bun-v", ""
+          $bunUrl = "https://github.com/oven-sh/bun/releases/download/$bunTag/bun-windows-x64.zip"
+
+          # Ollama: latest release tag via the GitHub API (fallback: 0.40.16).
+          $ollamaTag = "v0.40.16"
+          try {
+            $rel = gh api repos/ollama/ollama/releases/latest --jq .tag_name
+            if ($rel) { $ollamaTag = $rel }
+          } catch { Write-Host "Ollama latest lookup failed, using $ollamaTag" }
+          $ollamaVersion = $ollamaTag -replace "^v", ""
+          $ollamaUrl = "https://github.com/ollama/ollama/releases/download/$ollamaTag/OllamaSetup.exe"
+
+          # Python: pinned version from the workflow input (verified to
+          # exist at https://www.python.org/ftp/python/3.14.7/).
+          $pyVersion = "${{ inputs.python_version }}"
+          $pyUrl = "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-amd64.exe"
+
+          # aria2c: latest release asset (win-64bit build).
+          $ariaAsset = gh api repos/aria2/aria2/releases/latest --jq '.assets[] | select(.name | test("win-64bit-build.*\\.zip$")) | .browser_download_url' | Select-Object -First 1
+          if (-not $ariaAsset) { throw "Could not find an aria2c Windows asset in the latest release." }
+
+          foreach ($item in @(
+            @{ name = "bun"; url = $bunUrl; file = "bun-windows-x64.zip" },
+            @{ name = "python"; url = $pyUrl; file = "python-installer.exe" },
+            @{ name = "ollama"; url = $ollamaUrl; file = "OllamaSetup.exe" },
+            @{ name = "aria2c"; url = $ariaAsset; file = "aria2c.zip" }
+          )) {
+            Write-Host "Downloading $($item.name) from $($item.url)"
+            Invoke-WebRequest -Uri $item.url -OutFile (Join-Path $dl $item.file) -UseBasicParsing
+          }
+
+          function Sha256($p) { return (Get-FileHash -Algorithm SHA256 -Path $p).Hash.ToLower() }
+
+          # Chromium revision the pinned Playwright expects: read it
+          # from the playwright package's browsers.json after install.
+          python -m venv "$dl\venv"
+          & "$dl\venv\Scripts\python.exe" -m pip install --upgrade pip
+          & "$dl\venv\Scripts\python.exe" -m pip install -r agent/requirements.txt
+          $playwrightDir = & "$dl\venv\Scripts\python.exe" -c "import os, playwright; print(os.path.dirname(playwright.__file__))"
+          $browsersJson = Join-Path $playwrightDir "driver\package\browsers.json"
+          $chromiumRevision = ""
+          if (Test-Path $browsersJson) {
+            $entries = Get-Content $browsersJson -Raw | ConvertFrom-Json
+            $chromium = $entries | Where-Object { $_.name -eq "chromium" } | Select-Object -First 1
+            if ($chromium) { $chromiumRevision = $chromium.revision }
+          }
+          if (-not $chromiumRevision) { Write-Host "WARNING: could not read the Chromium revision — the installer will accept any installed Chromium." }
+
+          # Pinned requirements for a reproducible agent venv.
+          & "$dl\venv\Scripts\python.exe" -m pip freeze | Out-File -Encoding utf8 "$dl\requirements-pinned.txt"
+
+          $downloads = @{
+            bun = @{ url = $bunUrl; sha256 = (Sha256 (Join-Path $dl "bun-windows-x64.zip")); version = $bunVersion }
+            python = @{ url = $pyUrl; sha256 = (Sha256 (Join-Path $dl "python-installer.exe")); version = $pyVersion }
+            ollama = @{ url = $ollamaUrl; sha256 = (Sha256 (Join-Path $dl "OllamaSetup.exe")); version = $ollamaVersion }
+            chromiumRevision = $chromiumRevision
+          }
+          $downloads | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 (Join-Path $dl "downloads.json")
+          Write-Host "Bun $bunVersion, Python $pyVersion, Ollama $ollamaVersion, Chromium revision '$chromiumRevision'"
+
+          # aria2c.exe out of its zip (the installer bundles the exe).
+          $ariaTmp = Join-Path $dl "aria2c-tmp"
+          Expand-Archive (Join-Path $dl "aria2c.zip") $ariaTmp -Force
+          $ariaExe = Get-ChildItem $ariaTmp -Recurse -Filter "aria2c.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ariaExe) { throw "aria2c.zip did not contain aria2c.exe." }
+          Copy-Item $ariaExe (Join-Path $dl "aria2c.exe")
+
+          # Hand the downloads dir to the later steps.
+          "DL_DIR=$dl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Validate the lockfile resolves
+        run: bun install --frozen-lockfile
+
+      - name: Stage the installer payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ws = "${{ github.workspace }}"
+          $payload = Join-Path $ws "build\payload"
+          $inst = Join-Path $ws "build\installer"
+          New-Item -ItemType Directory -Force -Path $payload | Out-Null
+          New-Item -ItemType Directory -Force -Path $inst | Out-Null
+
+          # App payload: the whole tree, then remove what must never ship.
+          Copy-Item (Join-Path $ws "src") $payload -Recurse -Force
+          Copy-Item (Join-Path $ws "public") $payload -Recurse -Force
+          Copy-Item (Join-Path $ws "extension") $payload -Recurse -Force
+          Copy-Item (Join-Path $ws "agent") $payload -Recurse -Force
+          foreach ($f in @("package.json", "bun.lock", "bunfig.toml", "start.bat", "vite.config.ts", "tsconfig.json", "components.json")) {
+            Copy-Item (Join-Path $ws $f) $payload -Force
+          }
+          # NEVER ship: build junk, debug screenshots, any database,
+          # any Facebook session, any venv, node_modules (rebuilt at
+          # install time), or the .git directory.
+          foreach ($junk in @(
+            (Join-Path $payload "agent\__pycache__"),
+            (Join-Path $payload "agent\.pytest_cache"),
+            (Join-Path $payload "agent\.venv"),
+            (Join-Path $payload "agent\profiles"),
+            (Join-Path $payload "agent\leadhunter.db"),
+            (Join-Path $payload "node_modules")
+          )) {
+            if (Test-Path $junk) { Remove-Item $junk -Recurse -Force }
+          }
+          Get-ChildItem (Join-Path $payload "agent") -Filter "*.png" -ErrorAction SilentlyContinue | Remove-Item -Force
+          Get-ChildItem $payload -Recurse -Filter "*.pyc" -ErrorAction SilentlyContinue | Remove-Item -Force
+
+          # Seed files (owner's data) — copied ONLY when present.
+          # The seed database and the seed data file travel inside the
+          # .exe and are applied on a FRESH install only, never on update.
+          $seedDb = Join-Path $ws "installer\seed\leadhunter.db"
+          $seedDbB64 = Join-Path $ws "installer\seed\leadhunter.db.b64"
+          if (Test-Path $seedDb) {
+            Copy-Item $seedDb (Join-Path $payload "agent\leadhunter.db") -Force
+            Write-Host "Seed database bundled."
+          } elseif (Test-Path $seedDbB64) {
+            # The database is binary and cannot travel through the
+            # text-only push path, so it is stored base64-encoded and
+            # decoded here. The decoded bytes must be a SQLite file.
+            $bytes = [Convert]::FromBase64String((Get-Content $seedDbB64 -Raw).Trim())
+            [IO.File]::WriteAllBytes((Join-Path $payload "agent\leadhunter.db"), $bytes)
+            $header = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $payload "agent\leadhunter.db"))[0..15])
+            if (-not $header.StartsWith("SQLite format 3")) { throw "Decoded seed database is not a SQLite file." }
+            Write-Host "Seed database bundled (decoded from base64)."
+          } else {
+            Write-Host "No seed database in installer/seed/ — the installer will ship without one."
+          }
+          $seedJson = Join-Path $ws "installer\seed\leadhunter-v2.json"
+          if (Test-Path $seedJson) {
+            Copy-Item $seedJson (Join-Path $payload "public\seed.json") -Force
+            Write-Host "Seed data file bundled."
+          } else {
+            Write-Host "No seed data file in installer/seed/ — the installer will ship without one."
+          }
+
+          # Installer worker + downloader + download manifest + launcher.
+          Copy-Item (Join-Path $ws "installer\setup-helper.ps1") $inst -Force
+          Copy-Item (Join-Path $ws "installer\Run-LeadHunter.bat") $inst -Force
+          Copy-Item (Join-Path $env:DL_DIR "aria2c.exe") $inst -Force
+          Copy-Item (Join-Path $env:DL_DIR "downloads.json") $inst -Force
+          Copy-Item (Join-Path $env:DL_DIR "requirements-pinned.txt") (Join-Path $payload "agent\requirements-pinned.txt") -Force
+
+          # Version + manifest (the manifest deliberately excludes the
+          # seed files — an update must never overwrite live data).
+          @{ version = "${{ inputs.version }}" } | ConvertTo-Json | Out-File -Encoding utf8 (Join-Path $payload "version.json")
+          python installer/manifest-gen.py "$payload" "${{ inputs.version }}" "$payload\manifest.json"
+
+          # Verify the excludes actually held.
+          if (Test-Path (Join-Path $payload "agent\__pycache__")) { throw "Payload still contains agent/__pycache__." }
+          if (Test-Path (Join-Path $payload "agent\profiles")) { throw "Payload still contains agent/profiles." }
+          if (Test-Path (Join-Path $payload "node_modules")) { throw "Payload still contains node_modules." }
+          if (Get-ChildItem $payload -Recurse -Filter "*.pyc" -ErrorAction SilentlyContinue) { throw "Payload still contains .pyc files." }
+          if (Get-ChildItem (Join-Path $payload "agent") -Filter "*.png" -ErrorAction SilentlyContinue) { throw "Payload still contains agent debug screenshots." }
+          $manifest = Get-Content (Join-Path $payload "manifest.json") -Raw | ConvertFrom-Json
+          if ($manifest.files.PSObject.Properties.Name -contains "agent/leadhunter.db") { throw "Manifest must not list the seed database." }
+          if ($manifest.files.PSObject.Properties.Name -contains "public/seed.json") { throw "Manifest must not list the seed data file." }
+          Write-Host "Payload staged: $($manifest.files.PSObject.Properties.Count) files in the manifest."
+
+      - name: Install Inno Setup and compile the installer
+        run: |
+          choco install innosetup -y
+          iscc /DMyAppVersion="${{ inputs.version }}" /DAppSrc="${{ github.workspace }}" installer/leadhunter.iss
+          if (-not (Test-Path installer/installer-output/LeadHunter-Setup-${{ inputs.version }}.exe)) { throw "Inno Setup did not produce the .exe." }
+
+      - name: Smoke test the built installer on the runner
+        shell: pwsh
+        timeout-minutes: 60
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Get-ChildItem installer/installer-output/LeadHunter-Setup-*.exe | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "Installing $exe (silent)..."
+          $proc = Start-Process -FilePath $exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -Wait -PassThru
+          # The installer runs setup-helper.ps1 itself (Bun, Python,
+          # Chromium, node_modules, Ollama + both models). A non-zero
+          # setup-helper exit shows as a message box, suppressed here —
+          # so verify the install by what is actually on disk instead.
+          $appDir = Join-Path $env:LOCALAPPDATA "LeadHunter"
+          if (-not (Test-Path (Join-Path $appDir "Run-LeadHunter.bat"))) { throw "Installer did not place Run-LeadHunter.bat." }
+          if (-not (Test-Path (Join-Path $appDir "version.json"))) { throw "Installer did not place version.json." }
+          if (-not (Test-Path (Join-Path $appDir "agent\.venv\Scripts\python.exe"))) { throw "Agent venv was not created." }
+          $ollama = Get-Command ollama -ErrorAction SilentlyContinue
+          if (-not $ollama) { throw "Ollama was not installed by the setup helper." }
+          $models = & ollama list 2>$null
+          if (($models -join "`n") -notmatch "qwen2.5:1.5b") { throw "Ollama model qwen2.5:1.5b was not pulled." }
+          if (($models -join "`n") -notmatch "llama3.1:8b") { throw "Ollama model llama3.1:8b was not pulled." }
+
+          Write-Host "Starting the installed app + agent..."
+          $appProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "Run-LeadHunter.bat" -WorkingDirectory $appDir -PassThru
+          try {
+            $okApp = $false
+            $okAgent = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 2
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:8080/" -UseBasicParsing -TimeoutSec 5
+                if ($r.StatusCode -eq 200) { $okApp = $true }
+              } catch { }
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:8001/health" -UseBasicParsing -TimeoutSec 5
+                if ($r.StatusCode -eq 200) { $okAgent = $true }
+              } catch { }
+              if ($okApp -and $okAgent) { break }
+            }
+            if (-not $okApp) { throw "Installed app did not answer http://127.0.0.1:8080/ within 120s." }
+            if (-not $okAgent) { throw "Installed agent did not answer http://127.0.0.1:8001/health within 120s." }
+            Write-Host "Smoke test passed: app :8080 and agent :8001/health both answer."
+          } finally {
+            Get-Process -Name "bun" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Get-Process -Name "python" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Get-Process -Name "node" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeadHunter-Setup-${{ inputs.version }}
+          path: installer/installer-output/LeadHunter-Setup-*.exe
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ inputs.version }}" "installer/installer-output/LeadHunter-Setup-${{ inputs.version }}.exe" --title "LeadHunter v${{ inputs.version }}" --notes "LeadHunter v${{ inputs.version }} — one-click Windows installer. Install it, double-click Run-LeadHunter.bat (or the desktop icon), and the app opens at http://localhost:8080/. First run: pick Gemini or Ollama in Configurations, then sign in to Facebook once from Agent Control. Ollama and both models (qwen2.5:1.5b, llama3.1:8b) are installed by the setup — a failed Ollama install stops the setup. Updates install in place: only changed files are downloaded, your data is never wiped."
