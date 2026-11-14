@@ -63,6 +63,21 @@ function Get-FileSha256 {
     return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
 }
 
+function ConvertTo-Hashtable {
+    # Windows PowerShell 5.1 has no AsHashtable switch on ConvertFrom-Json
+    # (that arrived in PowerShell 6). Convert the PSCustomObject tree by
+    # hand so the manifest diff works on every Windows PC.
+    param([object]$InputObject)
+    if ($InputObject -is [System.Management.Automation.PSCustomObject]) {
+        $ht = @{}
+        foreach ($prop in $InputObject.PSObject.Properties) {
+            $ht[$prop.Name] = ConvertTo-Hashtable $prop.Value
+        }
+        return $ht
+    }
+    return $InputObject
+}
+
 function Test-PortFree {
     param([int]$Port)
     $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -215,13 +230,13 @@ try {
     if (-not (Test-Path $newManifestPath)) {
         Fail "manifest.json is missing from the payload - the installer build is incomplete."
     }
-    $newManifest = Get-Content $newManifestPath -Raw | ConvertFrom-Json -AsHashtable
+    $newManifest = ConvertTo-Hashtable (Get-Content $newManifestPath -Raw | ConvertFrom-Json)
     $newFiles = $newManifest["files"]
     $oldManifestPath = Join-Path $AppDir "manifest.json"
     $oldFiles = @{}
     if (Test-Path $oldManifestPath) {
         try {
-            $oldFiles = (Get-Content $oldManifestPath -Raw | ConvertFrom-Json -AsHashtable)["files"]
+            $oldFiles = (ConvertTo-Hashtable (Get-Content $oldManifestPath -Raw | ConvertFrom-Json))["files"]
         } catch { $oldFiles = @{} }
     }
     # Paths the diff must never delete, even if a manifest ever listed them.
