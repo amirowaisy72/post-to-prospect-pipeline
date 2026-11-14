@@ -103,13 +103,32 @@ function Download-Verified {
             Write-Log "$Label already downloaded and verified - reusing it."
             return
         }
-        Remove-Item $OutFile -Force
+        # Keep a partial download so aria2c can resume it - only delete
+        # when there is no resume control file (completed but corrupt).
+        if (-not (Test-Path "$OutFile.aria2")) {
+            Remove-Item $OutFile -Force
+        } else {
+            Write-Log "$Label partial download found - resuming it."
+        }
     }
     Write-Log "Downloading $Label ..."
     if (Test-Path $Aria2Exe) {
-        # 16 connections, 16 segments, resume on failure.
-        & $Aria2Exe --console-log-level=error -c -x16 -s16 -k1M -d (Split-Path $OutFile -Parent) -o (Split-Path $OutFile -Leaf) $Url
-        if ($LASTEXITCODE -ne 0) { Fail "Download failed for $Label ($Url)." }
+        # 16 connections, 16 segments, resume on failure. Retry the whole
+        # download up to 3 times - a dropped connection must not kill the
+        # install, and the partial file is resumed, never restarted.
+        $attempt = 0
+        $downloaded = $false
+        while ($attempt -lt 3 -and -not $downloaded) {
+            $attempt++
+            & $Aria2Exe --console-log-level=error -c -x16 -s16 -k1M --max-tries=5 --retry-wait=5 -d (Split-Path $OutFile -Parent) -o (Split-Path $OutFile -Leaf) $Url
+            if ($LASTEXITCODE -eq 0) {
+                $downloaded = $true
+            } else {
+                Write-Log "$Label download attempt $attempt failed - retrying from where it stopped..."
+                Start-Sleep -Seconds 10
+            }
+        }
+        if (-not $downloaded) { Fail "Download failed for $Label ($Url)." }
     } else {
         Write-Log "aria2c not found - falling back to a plain download (slower, no resume)."
         Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
