@@ -1,7 +1,7 @@
-# LeadHunter setup helper — runs once per install or update.
+﻿# LeadHunter setup helper - runs once per install or update.
 #
 # Called by the Inno Setup installer after the files are copied
-# (post-install, as the installing user — no admin rights), or by hand:
+# (post-install, as the installing user - no admin rights), or by hand:
 #   powershell -ExecutionPolicy Bypass -File setup-helper.ps1 -AppDir "C:\Users\<you>\AppData\Local\LeadHunter"
 #
 # What it does, in order:
@@ -19,7 +19,7 @@
 #   5. OLLAMA IS MANDATORY. The installer installs Ollama and pulls
 #      BOTH models (qwen2.5:1.5b and llama3.1:8b). If the Ollama install
 #      or either model pull fails, the whole install STOPS with a clear
-#      message — it never proceeds without Ollama.
+#      message - it never proceeds without Ollama.
 #
 # Downloads use the bundled aria2c (multi-connection, segmented,
 # resumable) from official CDNs only, and every downloaded installer
@@ -63,6 +63,21 @@ function Get-FileSha256 {
     return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLower()
 }
 
+function ConvertTo-Hashtable {
+    # Windows PowerShell 5.1 has no AsHashtable switch on ConvertFrom-Json
+    # (that arrived in PowerShell 6). Convert the PSCustomObject tree by
+    # hand so the manifest diff works on every Windows PC.
+    param([object]$InputObject)
+    if ($InputObject -is [System.Management.Automation.PSCustomObject]) {
+        $ht = @{}
+        foreach ($prop in $InputObject.PSObject.Properties) {
+            $ht[$prop.Name] = ConvertTo-Hashtable $prop.Value
+        }
+        return $ht
+    }
+    return $InputObject
+}
+
 function Test-PortFree {
     param([int]$Port)
     $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
@@ -71,7 +86,7 @@ function Test-PortFree {
 
 function Get-Downloads {
     if (-not (Test-Path $DownloadsJson)) {
-        Fail "downloads.json is missing from $InstallerDir — the installer build is incomplete."
+        Fail "downloads.json is missing from $InstallerDir - the installer build is incomplete."
     }
     return (Get-Content $DownloadsJson -Raw | ConvertFrom-Json)
 }
@@ -85,25 +100,44 @@ function Download-Verified {
     )
     if (Test-Path $OutFile) {
         if ((Get-FileSha256 $OutFile) -eq $Sha256.ToLower()) {
-            Write-Log "$Label already downloaded and verified — reusing it."
+            Write-Log "$Label already downloaded and verified - reusing it."
             return
         }
-        Remove-Item $OutFile -Force
+        # Keep a partial download so aria2c can resume it - only delete
+        # when there is no resume control file (completed but corrupt).
+        if (-not (Test-Path "$OutFile.aria2")) {
+            Remove-Item $OutFile -Force
+        } else {
+            Write-Log "$Label partial download found - resuming it."
+        }
     }
     Write-Log "Downloading $Label ..."
     if (Test-Path $Aria2Exe) {
-        # 16 connections, 16 segments, resume on failure.
-        & $Aria2Exe --console-log-level=error -c -x16 -s16 -k1M -d (Split-Path $OutFile -Parent) -o (Split-Path $OutFile -Leaf) $Url
-        if ($LASTEXITCODE -ne 0) { Fail "Download failed for $Label ($Url)." }
+        # 16 connections, 16 segments, resume on failure. Retry the whole
+        # download up to 3 times - a dropped connection must not kill the
+        # install, and the partial file is resumed, never restarted.
+        $attempt = 0
+        $downloaded = $false
+        while ($attempt -lt 3 -and -not $downloaded) {
+            $attempt++
+            & $Aria2Exe --console-log-level=error -c -x16 -s16 -k1M --max-tries=5 --retry-wait=5 -d (Split-Path $OutFile -Parent) -o (Split-Path $OutFile -Leaf) $Url
+            if ($LASTEXITCODE -eq 0) {
+                $downloaded = $true
+            } else {
+                Write-Log "$Label download attempt $attempt failed - retrying from where it stopped..."
+                Start-Sleep -Seconds 10
+            }
+        }
+        if (-not $downloaded) { Fail "Download failed for $Label ($Url)." }
     } else {
-        Write-Log "aria2c not found — falling back to a plain download (slower, no resume)."
+        Write-Log "aria2c not found - falling back to a plain download (slower, no resume)."
         Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
     }
     if (-not (Test-Path $OutFile)) { Fail "Download produced no file for $Label." }
     $actual = Get-FileSha256 $OutFile
     if ($actual -ne $Sha256.ToLower()) {
         Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
-        Fail "$Label failed its SHA-256 check — the download may be corrupt. Delete it and run the installer again."
+        Fail "$Label failed its SHA-256 check - the download may be corrupt. Delete it and run the installer again."
     }
     Write-Log "$Label downloaded and verified."
 }
@@ -192,7 +226,7 @@ try {
     Write-Log "LeadHunter setup started. App dir: $AppDir"
 
     if (-not (Test-Path $PayloadNew)) {
-        Fail "Payload staging folder is missing ($PayloadNew) — the installer build is incomplete."
+        Fail "Payload staging folder is missing ($PayloadNew) - the installer build is incomplete."
     }
     $downloads = Get-Downloads
 
@@ -204,7 +238,7 @@ try {
             Fail "LeadHunter is still running (port 8080 or 8001 is busy). Close both LeadHunter windows and run the installer again."
         }
         Write-Host ""
-        Write-Host "LeadHunter is still running — close both LeadHunter windows first,"
+        Write-Host "LeadHunter is still running - close both LeadHunter windows first,"
         Write-Host "then press Enter here to continue."
         Read-Host | Out-Null
     }
@@ -213,15 +247,15 @@ try {
     Write-Log "Applying the app payload (only changed files are copied)..."
     $newManifestPath = Join-Path $PayloadNew "manifest.json"
     if (-not (Test-Path $newManifestPath)) {
-        Fail "manifest.json is missing from the payload — the installer build is incomplete."
+        Fail "manifest.json is missing from the payload - the installer build is incomplete."
     }
-    $newManifest = Get-Content $newManifestPath -Raw | ConvertFrom-Json -AsHashtable
+    $newManifest = ConvertTo-Hashtable (Get-Content $newManifestPath -Raw | ConvertFrom-Json)
     $newFiles = $newManifest["files"]
     $oldManifestPath = Join-Path $AppDir "manifest.json"
     $oldFiles = @{}
     if (Test-Path $oldManifestPath) {
         try {
-            $oldFiles = (Get-Content $oldManifestPath -Raw | ConvertFrom-Json -AsHashtable)["files"]
+            $oldFiles = (ConvertTo-Hashtable (Get-Content $oldManifestPath -Raw | ConvertFrom-Json))["files"]
         } catch { $oldFiles = @{} }
     }
     # Paths the diff must never delete, even if a manifest ever listed them.
@@ -265,7 +299,7 @@ try {
         Copy-Item $seedDbSrc $seedDbDst -Force
         Write-Log "Seed database installed (fresh install only)."
     } elseif (Test-Path $seedDbDst) {
-        Write-Log "Existing database kept — the seed is never applied over it."
+        Write-Log "Existing database kept - the seed is never applied over it."
     }
     $seedJsonSrc = Join-Path $PayloadNew "public\seed.json"
     $seedJsonDst = Join-Path $AppDir "public\seed.json"
@@ -275,7 +309,7 @@ try {
         Copy-Item $seedJsonSrc $seedJsonDst -Force
         Write-Log "Seed data file installed (fresh install only)."
     } elseif (Test-Path $seedJsonDst) {
-        Write-Log "Existing seed file kept — it is never overwritten."
+        Write-Log "Existing seed file kept - it is never overwritten."
     }
 
     # Record the new manifest + version, then drop the staging folder.
@@ -290,7 +324,7 @@ try {
     # --- 4. Bun. ---
     $bun = Find-Bun
     if ($bun) {
-        Write-Log "Bun already installed ($bun) — skipped."
+        Write-Log "Bun already installed ($bun) - skipped."
     } else {
         $bunZip = Join-Path $tempDir "bun-windows-x64.zip"
         Download-Verified -Url $downloads.bun.url -Sha256 $downloads.bun.sha256 -OutFile $bunZip -Label ("Bun " + $downloads.bun.version)
@@ -312,7 +346,7 @@ try {
     # --- 5. Python 3.14. ---
     $pythonExe = Find-Python314
     if ($pythonExe) {
-        Write-Log "Python 3.14 already installed ($pythonExe) — skipped."
+        Write-Log "Python 3.14 already installed ($pythonExe) - skipped."
     } else {
         $pyInstaller = Join-Path $tempDir "python-installer.exe"
         Download-Verified -Url $downloads.python.url -Sha256 $downloads.python.sha256 -OutFile $pyInstaller -Label ("Python " + $downloads.python.version)
@@ -339,7 +373,7 @@ try {
         if ($oldHash -eq $reqHash) { $venvOk = $true }
     }
     if ($venvOk) {
-        Write-Log "Agent venv already matches the pinned requirements — skipped."
+        Write-Log "Agent venv already matches the pinned requirements - skipped."
     } else {
         Write-Log "Setting up the agent venv (this downloads the Python packages)..."
         if (Test-Path $venvDir) { Remove-Item $venvDir -Recurse -Force }
@@ -353,7 +387,7 @@ try {
         Write-Log "Agent venv ready."
     }
 
-    # --- 7. Playwright Chromium (full Chromium — the one-time Facebook
+    # --- 7. Playwright Chromium (full Chromium - the one-time Facebook
     # sign-in opens a visible window, the headless shell is not enough).
     $chromiumRevision = $downloads.chromiumRevision
     $chromiumExe = $null
@@ -361,7 +395,7 @@ try {
         $chromiumExe = Join-Path $env:LOCALAPPDATA ("ms-playwright\" + $chromiumRevision + "\chrome-win\chrome.exe")
     }
     if ($chromiumExe -and (Test-Path $chromiumExe)) {
-        Write-Log "Playwright Chromium already installed ($chromiumRevision) — skipped."
+        Write-Log "Playwright Chromium already installed ($chromiumRevision) - skipped."
     } else {
         Write-Log "Installing Playwright Chromium (about 300 MB)..."
         & $venvPy -m playwright install chromium
@@ -369,7 +403,7 @@ try {
         if ($chromiumRevision) {
             $chromiumExe = Join-Path $env:LOCALAPPDATA ("ms-playwright\" + $chromiumRevision + "\chrome-win\chrome.exe")
             if (-not (Test-Path $chromiumExe)) {
-                # The installed revision differs from the recorded one —
+                # The installed revision differs from the recorded one -
                 # accept any Chromium the install just placed.
                 $anyChrome = Get-ChildItem (Join-Path $env:LOCALAPPDATA "ms-playwright") -Recurse -Filter "chrome.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
                 if (-not $anyChrome) { Fail "Playwright Chromium install finished but no chrome.exe was found." }
@@ -390,7 +424,7 @@ try {
         if ($oldLock -eq $lockHash) { $nmOk = $true }
     }
     if ($nmOk) {
-        Write-Log "node_modules already matches bun.lock — skipped."
+        Write-Log "node_modules already matches bun.lock - skipped."
     } else {
         Write-Log "Installing the frontend dependencies (bun install)..."
         Push-Location $AppDir
@@ -403,7 +437,7 @@ try {
         Write-Log "Frontend dependencies installed."
     }
 
-    # --- 9. OLLAMA — MANDATORY. Without it the install MUST NOT proceed. ---
+    # --- 9. OLLAMA - MANDATORY. Without it the install MUST NOT proceed. ---
     Write-Log "Checking Ollama (mandatory)..."
     $ollama = Find-Ollama
     if (-not $ollama) {
@@ -420,10 +454,10 @@ try {
         }
         Write-Log "Ollama installed ($ollama)."
     } else {
-        Write-Log "Ollama already installed ($ollama) — skipped the installer."
+        Write-Log "Ollama already installed ($ollama) - skipped the installer."
     }
     if (-not (Test-OllamaServer -OllamaExe $ollama -Tries 12)) {
-        Write-Log "Ollama server is not answering — starting it in the background..."
+        Write-Log "Ollama server is not answering - starting it in the background..."
         try { Start-Process -FilePath $ollama -ArgumentList "serve" -WindowStyle Hidden -ErrorAction Stop | Out-Null } catch { }
         if (-not (Test-OllamaServer -OllamaExe $ollama -Tries 12)) {
             Fail "Ollama is installed but its server does not answer. Start Ollama once by hand, then run the installer again. LeadHunter cannot install without a working Ollama."
@@ -432,10 +466,10 @@ try {
     $installedModels = Get-OllamaModels -OllamaExe $ollama
     foreach ($model in $RequiredModels) {
         if ($installedModels -contains $model) {
-            Write-Log "Ollama model $model already present — skipped."
+            Write-Log "Ollama model $model already present - skipped."
             continue
         }
-        Write-Log "Pulling Ollama model $model (this is a large download — please wait)..."
+        Write-Log "Pulling Ollama model $model (this is a large download - please wait)..."
         & $ollama pull $model
         if ($LASTEXITCODE -ne 0) {
             Fail "Could not pull Ollama model $model. LeadHunter cannot install without both models."
@@ -469,7 +503,7 @@ try {
     Write-Log "Setup failed: $_"
     Write-Host ""
     Write-Host "LeadHunter setup FAILED: $_"
-    Write-Host "Nothing was half-installed into your data — run the installer again once"
+    Write-Host "Nothing was half-installed into your data - run the installer again once"
     Write-Host "the reason above is fixed. Full trail: $LogFile"
     exit 1
 }
