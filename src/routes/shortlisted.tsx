@@ -70,7 +70,7 @@ function ShortlistedPage() {
                   <PriorityBadge priority={l.priority} />
                 </div>
                 <p className="text-sm text-foreground">{l.reason}</p>
-                <p className="text-xs text-muted-foreground">Source: {sourceOf(l.sourcePostId)}</p>
+                <p className="text-xs text-muted-foreground">Source: {l.sourcePostTitle || sourceOf(l.sourcePostId)}</p>
               </CardContent>
             </Card>
           ))}

@@ -51,6 +51,7 @@ import questions
 import followups
 import help_requests
 import jobs
+import sourcing_engine
 from browser import BROWSER, profile_dir
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -228,13 +229,17 @@ def _run_job_thread(job_id, kind, payload):
             should_stop = lambda: _stop_flags.get(job_id, False)  # noqa: E731
             note = agent_log
             if kind == "scrape":
-                jobs.run_scrape(worker, page, db, job_row, should_stop, note=note)
+                sourcing_engine.run_scrape(
+                    worker, page, db, job_row, should_stop, note=note
+                )
             elif kind == "collect":
-                jobs.run_collect_sources(
+                sourcing_engine.run_collect(
                     worker, page, db, job_row, should_stop, note=note
                 )
             else:
-                jobs.run_sync(worker, page, db, job_row, should_stop, note=note)
+                sourcing_engine.run_sync(
+                    worker, page, db, job_row, should_stop, note=note
+                )
 
         BROWSER.run_with_page(account_id, False, _run, fresh=True)
     except Exception as exc:  # noqa: BLE001 - job failure, not a crash
@@ -385,6 +390,22 @@ def _run_chat_start(payload):
 # ----------------------------------------------------------------------
 # Endpoints
 # ----------------------------------------------------------------------
+import analysis_api  # noqa: E402
+import sourcing_api  # noqa: E402
+
+app.include_router(
+    sourcing_api.build_router(
+        db,
+        _post_view,
+        lambda: _running_job_id is not None,
+        lambda acc, fn: BROWSER.run_with_page(_browser_account(acc or ""), False, fn),
+    )
+)
+
+
+app.include_router(analysis_api.build_router(db))
+
+
 @app.get("/health")
 def health():
     return {
@@ -474,6 +495,9 @@ async def collect_sources(request: Request):
             "max_new": max_new,
             "min_comments": min_comments,
             "min_members": min_members,
+            "join": bool(body.get("join", True)),
+            "country": (body.get("country") or "").strip(),
+            "recheck": bool(body.get("recheck", False)),
         },
         {
             "account_id": body.get("accountId"),
@@ -568,6 +592,18 @@ async def stop(request: Request):
 
 @app.get("/jobs")
 def list_jobs_endpoint():
+    with _lock:
+        for stale in db.list_jobs():
+            if (
+                stale["status"] in ("running", "stop-requested")
+                and stale["id"] != _running_job_id
+            ):
+                db.update_job(
+                    stale["id"],
+                    status="failed",
+                    error="interrupted (agent restarted)",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                )
     return {"jobs": [_job_view(row) for row in db.list_jobs()]}
 
 
@@ -1098,6 +1134,14 @@ def agent_activity_endpoint():
     import chat as _c
 
     a = _c.get_activity()
+    if _running_job_id is not None:
+        job = db.get_job(_running_job_id) or {}
+        what = {
+            "collect": "groups/pages dhoond raha hai",
+            "scrape": "posts scrape kar raha hai",
+            "sync": "post sync kar raha hai",
+        }.get(job.get("kind"), "kaam kar raha hai")
+        return {"state": "busy", "detail": what, "watching": _c.is_watching()}
     return {"state": a["state"], "detail": a["detail"], "watching": _c.is_watching()}
 
 

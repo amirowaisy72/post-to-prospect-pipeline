@@ -106,7 +106,7 @@ function LeadsPage() {
               </TableHeader>
               <TableBody>
                 {rows.map((l) => {
-                  const post = postLabel(l.sourcePostId);
+                  const post = l.sourcePostUrl ? { title: l.sourcePostTitle || "Post", url: l.sourcePostUrl } : postLabel(l.sourcePostId);
                   return (
                     <TableRow key={l.id} className="cursor-pointer" onClick={() => setOpenId(l.id)}>
                       <TableCell className="pl-6">

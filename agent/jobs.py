@@ -36,9 +36,16 @@ from datetime import datetime, timezone
 
 from timestamps import posted_at
 
-__all__ = ["merge_post_data", "run_scrape", "run_sync",
-           "run_collect_sources", "delete_source",
-           "count_tree_nodes", "verification_entry", "verification_message"]
+__all__ = [
+    "merge_post_data",
+    "run_scrape",
+    "run_sync",
+    "run_collect_sources",
+    "delete_source",
+    "count_tree_nodes",
+    "verification_entry",
+    "verification_message",
+]
 
 _SIGN_IN_ERROR = (
     "Facebook session is not signed in — please sign in to Facebook "
@@ -107,13 +114,21 @@ def verification_entry(post_url, expected, collected):
     (None when it could not be read — then complete is True and
     missing is None, since there is nothing to verify against)."""
     if expected is None:
-        return {"postUrl": post_url, "expectedComments": None,
-                "collectedComments": collected, "missing": None,
-                "complete": True}
+        return {
+            "postUrl": post_url,
+            "expectedComments": None,
+            "collectedComments": collected,
+            "missing": None,
+            "complete": True,
+        }
     missing = expected - collected
-    return {"postUrl": post_url, "expectedComments": expected,
-            "collectedComments": collected, "missing": missing,
-            "complete": missing == 0}
+    return {
+        "postUrl": post_url,
+        "expectedComments": expected,
+        "collectedComments": collected,
+        "missing": missing,
+        "complete": missing == 0,
+    }
 
 
 def verification_message(entry):
@@ -123,22 +138,23 @@ def verification_message(entry):
     expected = entry["expectedComments"]
     collected = entry["collectedComments"]
     if collected > expected:
-        return (f"collected {collected} of {expected} — "
-                f"{collected - expected} more than stated")
-    return (f"collected {collected} of {expected} — "
-            f"{expected - collected} missing")
+        return (
+            f"collected {collected} of {expected} — "
+            f"{collected - expected} more than stated"
+        )
+    return f"collected {collected} of {expected} — " f"{expected - collected} missing"
 
 
-def _finish_job(db, job_id, *, stopped, verification, processed,
-                new_posts=None, extra_message=None):
+def _finish_job(
+    db, job_id, *, stopped, verification, processed, new_posts=None, extra_message=None
+):
     """Write the final job state: verification entries, a plain
     message when anything mismatched, and the terminal status —
     "stopped", "incomplete" (finished, but >=1 post mismatched) or
     "done" (every touched post verified complete). ``extra_message``
     (e.g. the 0-found feed diagnostic) is stored alongside but never
     changes the status — it is information, not a mismatch."""
-    messages = [m for m in (verification_message(e) for e in verification)
-                if m]
+    messages = [m for m in (verification_message(e) for e in verification) if m]
     if stopped:
         status = "stopped"
     elif messages:
@@ -147,10 +163,13 @@ def _finish_job(db, job_id, *, stopped, verification, processed,
         status = "done"
     if extra_message:
         messages.append(extra_message)
-    fields = {"status": status, "finished_at": _now_iso(),
-              "posts_processed": processed,
-              "verification": verification,
-              "message": "; ".join(messages) if messages else None}
+    fields = {
+        "status": status,
+        "finished_at": _now_iso(),
+        "posts_processed": processed,
+        "verification": verification,
+        "message": "; ".join(messages) if messages else None,
+    }
     if new_posts is not None:
         fields["new_posts"] = new_posts
     db.update_job(job_id, **fields)
@@ -170,8 +189,8 @@ def _with_timestamps(node, collected_at):
         "author_url": node.get("author_url", ""),
         "text": node.get("text", ""),
         "posted_at": posted_at(
-            node.get("posted_at_exact"), node.get("posted_at_label"),
-            collected_at),
+            node.get("posted_at_exact"), node.get("posted_at_label"), collected_at
+        ),
         "posted_at_label": node.get("posted_at_label") or "",
         "replies": [],
     }
@@ -193,8 +212,7 @@ def _to_post_dict(data, source_id, account_id, post_url, collected_at):
         "text": data.get("text", ""),
         "collected_at": collected_at.isoformat(),
         "comments": [
-            _with_timestamps(c, collected_at)
-            for c in (data.get("comments") or [])
+            _with_timestamps(c, collected_at) for c in (data.get("comments") or [])
         ],
     }
 
@@ -217,11 +235,11 @@ def merge_post_data(existing: dict, incoming: dict):
         merged["text"] = incoming.get("text")
 
     existing_comments = merged.setdefault("comments", [])
-    by_key = {_match_key(c.get("author_name"), c.get("text")): c
-              for c in existing_comments}
+    by_key = {
+        _match_key(c.get("author_name"), c.get("text")): c for c in existing_comments
+    }
     for inc_comment in incoming.get("comments") or []:
-        key = _match_key(inc_comment.get("author_name"),
-                         inc_comment.get("text"))
+        key = _match_key(inc_comment.get("author_name"), inc_comment.get("text"))
         stored = by_key.get(key)
         if stored is None:
             existing_comments.append(copy.deepcopy(inc_comment))
@@ -229,11 +247,14 @@ def merge_post_data(existing: dict, incoming: dict):
             added_replies += len(inc_comment.get("replies") or [])
             continue
         stored_replies = stored.setdefault("replies", [])
-        reply_keys = {_match_key(r.get("author_name"), r.get("text"))
-                      for r in stored_replies}
+        reply_keys = {
+            _match_key(r.get("author_name"), r.get("text")) for r in stored_replies
+        }
         for inc_reply in inc_comment.get("replies") or []:
-            if _match_key(inc_reply.get("author_name"),
-                          inc_reply.get("text")) not in reply_keys:
+            if (
+                _match_key(inc_reply.get("author_name"), inc_reply.get("text"))
+                not in reply_keys
+            ):
                 stored_replies.append(copy.deepcopy(inc_reply))
                 added_replies += 1
     return merged, added_comments, added_replies
@@ -241,14 +262,14 @@ def merge_post_data(existing: dict, incoming: dict):
 
 def _fail(db, job_id, error):
     try:
-        db.update_job(job_id, status="failed", finished_at=_now_iso(),
-                      error=str(error))
+        db.update_job(job_id, status="failed", finished_at=_now_iso(), error=str(error))
     except Exception:
         pass
 
 
-def _check_session_first(worker, page, db, job_id, should_stop,
-                         target_url=None, note=None):
+def _check_session_first(
+    worker, page, db, job_id, should_stop, target_url=None, note=None
+):
     """Session check FIRST, via the worker. Returns True when the
     session is ok. On any other state the job is marked failed with
     a message naming that state, and nothing is scraped.
@@ -266,8 +287,7 @@ def _check_session_first(worker, page, db, job_id, should_stop,
     3 attempts" diagnostic never reached the agent console).
     """
     try:
-        state = worker.verify_session(page, _ctx(should_stop, note),
-                                      target_url)
+        state = worker.verify_session(page, _ctx(should_stop, note), target_url)
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
         return False
@@ -310,20 +330,29 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
         if not source_url:
             _fail(db, job_id, "scrape job has no source URL")
             return
-        if not _check_session_first(worker, page, db, job_id, should_stop,
-                                    source_url, note):
+        if not _check_session_first(
+            worker, page, db, job_id, should_stop, source_url, note
+        ):
             return
         if source_id:
             db.upsert_source(
                 source_id,
                 job.get("source_name") or source_id,
                 job.get("source_type") or "group",
-                source_url, None, "joined", account_id or None)
-        known = {p["post_url"] for p in db.get_posts_for_source(source_id)} \
-            if source_id else set()
+                source_url,
+                None,
+                "joined",
+                account_id or None,
+            )
+        known = (
+            {p["post_url"] for p in db.get_posts_for_source(source_id)}
+            if source_id
+            else set()
+        )
         limit = job.get("limit") or 50
         entries, diag = worker.collect_feed_posts(
-            page, source_url, known, limit, _ctx(should_stop, note))
+            page, source_url, known, limit, _ctx(should_stop, note)
+        )
         if not entries and diag and diag.startswith("feed did not load"):
             # Never report a page that failed to load as a quiet
             # "0 posts" success - show it as a real, retryable error.
@@ -352,7 +381,8 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
                     # via its comment button; the real URL is read
                     # from the address bar once the dialog opens.
                     opened = worker.extract_post_via_comment_button(
-                        page, source_url, entry, ctx)
+                        page, source_url, entry, ctx
+                    )
                     if opened:
                         real_url, data = opened
             except Exception:
@@ -363,24 +393,37 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
                 # note (inside the worker) — it never fails the job.
                 continue
             is_new = not db.known_post_url(real_url)
-            post_dict = _to_post_dict(data, source_id, account_id, real_url,
-                                      collected_at)
+            post_dict = _to_post_dict(
+                data, source_id, account_id, real_url, collected_at
+            )
             db.save_post(post_dict)
             processed += 1
             if is_new:
                 new_posts += 1
             ventry = verification_entry(
-                real_url, data.get("comment_total"),
-                count_tree_nodes(post_dict["comments"]))
+                real_url,
+                data.get("comment_total"),
+                count_tree_nodes(post_dict["comments"]),
+            )
             verification.append(ventry)
             msg = verification_message(ventry)
             if msg:
                 note(f"{real_url}: {msg}")
-            db.update_job(job_id, posts_processed=processed,
-                          new_posts=new_posts, verification=verification)
-        _finish_job(db, job_id, stopped=stopped, verification=verification,
-                    processed=processed, new_posts=new_posts,
-                    extra_message=diag)
+            db.update_job(
+                job_id,
+                posts_processed=processed,
+                new_posts=new_posts,
+                verification=verification,
+            )
+        _finish_job(
+            db,
+            job_id,
+            stopped=stopped,
+            verification=verification,
+            processed=processed,
+            new_posts=new_posts,
+            extra_message=diag,
+        )
         if source_id:
             # A completed run re-visited the source even with 0 new
             # posts: record it, so the row shows this run instead of
@@ -432,8 +475,14 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
         # pages) — never the Facebook home page.
         search_kind = "groups" if type_ in ("group", "both") else "pages"
         if not _check_session_first(
-                worker, page, db, job_id, should_stop,
-                worker.search_url(keyword, search_kind), note):
+            worker,
+            page,
+            db,
+            job_id,
+            should_stop,
+            worker.search_url(keyword, search_kind),
+            note,
+        ):
             return
         try:
             max_new = int(job.get("max_new") or 10)
@@ -490,14 +539,14 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
             member_count = candidate.get("member_count")
             if member_count is None:
                 try:
-                    member_count = worker.read_source_member_count(
-                        page, url, name, ctx)
+                    member_count = worker.read_source_member_count(page, url, name, ctx)
                 except Exception:
                     member_count = None
-            if (isinstance(member_count, int)
-                    and member_count < min_members):
-                note(f"Skipped {kind} (too few members): {url} — "
-                     f"{member_count} members (need {min_members})")
+            if isinstance(member_count, int) and member_count < min_members:
+                note(
+                    f"Skipped {kind} (too few members): {url} — "
+                    f"{member_count} members (need {min_members})"
+                )
                 member_skipped += 1
                 continue
             # Comments gate: our data comes purely from comments.
@@ -505,67 +554,136 @@ def run_collect_sources(worker, page, db, job, should_stop, note=None):
             # so a group whose first screen is bare is not skipped
             # for a count the feed had not loaded yet.
             activity = worker.check_comments_activity(
-                page, url, ctx, min_comments=min_comments)
-            if activity.get("comments", 0) < min_comments:
+                page, url, ctx, min_comments=min_comments
+            )
+            if activity.get("comments", 0) < min_comments or _too_few_active(activity):
                 shown = f"{name} ({url})" if name else url
-                note(f"Skipped {kind} (no comments): {shown} — "
-                     f"{activity.get('posts', 0)} post(s), "
-                     f"{activity.get('comments', 0)} comment(s) "
-                     f"(need {min_comments})")
+                note(
+                    f"Skipped {kind} (no comments): {shown} — "
+                    f"{activity.get('posts', 0)} post(s), "
+                    f"{activity.get('comments', 0)} comment(s) "
+                    f"(need {min_comments})"
+                )
                 comment_skipped += 1
                 continue
             source_id = _new_id_source()
+            if job.get("join") is False:
+                db.upsert_source(
+                    source_id,
+                    name,
+                    kind,
+                    url,
+                    member_count,
+                    "not-joined",
+                    account_id or None,
+                )
+                note(f"Recorded {kind} (not joined): {url}")
+                joined.append(
+                    {
+                        "id": source_id,
+                        "name": name,
+                        "type": kind,
+                        "url": url,
+                        "memberCount": member_count,
+                        "status": "not-joined",
+                        "joinedByAccountId": None,
+                    }
+                )
+                db.update_job(
+                    job_id,
+                    posts_processed=checked,
+                    new_posts=len(joined),
+                    result={"sources": joined},
+                )
+                continue
             if kind == "group":
                 try:
                     joined_ok = worker.join_group(page, url, ctx)
                 except Exception:
                     joined_ok = False
                 if not joined_ok:
-                    note(f"Could not join group: {url} — not saved, "
-                         f"try Add Source again")
+                    note(
+                        f"Could not join group: {url} — not saved, "
+                        f"try Add Source again"
+                    )
                     join_failed += 1
                     continue
                 note(f"Joined group: {url}")
             else:
-                note(f"Recorded page: {url}")
-            db.upsert_source(source_id, name, kind, url, member_count,
-                             "joined", account_id or None)
-            joined.append({
-                "id": source_id,
-                "name": name,
-                "type": kind,
-                "url": url,
-                "memberCount": member_count,
-                "joinedByAccountId": account_id or None,
-            })
-            db.update_job(job_id, posts_processed=checked,
-                          new_posts=len(joined),
-                          result={"sources": joined})
-        breakdown = (f"{checked} candidate(s): {already} already joined, "
-                     f"{member_skipped} too few members, "
-                     f"{comment_skipped} no comments, "
-                     f"{join_failed} join failed")
+                try:
+                    followed = bool(worker.follow_page(page, url, ctx))
+                except Exception:
+                    followed = False
+                note(
+                    f"Followed page: {url}"
+                    if followed
+                    else f"Recorded page (follow failed): {url}"
+                )
+            db.upsert_source(
+                source_id, name, kind, url, member_count, "joined", account_id or None
+            )
+            joined.append(
+                {
+                    "id": source_id,
+                    "name": name,
+                    "type": kind,
+                    "url": url,
+                    "memberCount": member_count,
+                    "joinedByAccountId": account_id or None,
+                }
+            )
+            db.update_job(
+                job_id,
+                posts_processed=checked,
+                new_posts=len(joined),
+                result={"sources": joined},
+            )
+        breakdown = (
+            f"{checked} candidate(s): {already} already joined, "
+            f"{member_skipped} too few members, "
+            f"{comment_skipped} no comments, "
+            f"{join_failed} join failed"
+        )
         if joined:
-            message = (f"Joined {len(joined)} new "
-                       f"{'source' if len(joined) == 1 else 'sources'} "
-                       f"for '{keyword}' ({breakdown})")
+            message = (
+                f"Joined {len(joined)} new "
+                f"{'source' if len(joined) == 1 else 'sources'} "
+                f"for '{keyword}' ({breakdown})"
+            )
         else:
-            message = (f"No new sources for '{keyword}' — {breakdown}")
-        db.update_job(job_id,
-                      status="stopped" if stopped else "done",
-                      finished_at=_now_iso(),
-                      posts_processed=checked,
-                      new_posts=len(joined),
-                      message=message,
-                      result={"sources": joined,
-                              "counts": {
-                                  "candidates": checked,
-                                  "already_joined": already,
-                                  "too_few_members": member_skipped,
-                                  "no_comments": comment_skipped,
-                                  "join_failed": join_failed}})
+            message = f"No new sources for '{keyword}' — {breakdown}"
+        db.update_job(
+            job_id,
+            status="stopped" if stopped else "done",
+            finished_at=_now_iso(),
+            posts_processed=checked,
+            new_posts=len(joined),
+            message=message,
+            result={
+                "sources": joined,
+                "counts": {
+                    "candidates": checked,
+                    "already_joined": already,
+                    "too_few_members": member_skipped,
+                    "no_comments": comment_skipped,
+                    "join_failed": join_failed,
+                },
+            },
+        )
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)
+
+
+def _too_few_active(activity):
+    """Several posts seen but fewer than 2 have comments = dead."""
+    try:
+        posts = int(activity.get("posts") or 0)
+        active = activity.get("active")
+        if active is None or posts < 3:
+            return False
+        return int(active) < 2
+    except (TypeError, ValueError):
+        return False
 
 
 def _new_id_source():
@@ -590,8 +708,7 @@ def delete_source(worker, page, db, source_id, should_stop=None):
     try:
         source = db.get_source_by_id(source_id)
         if source is None:
-            return {"ok": False, "left": False,
-                    "detail": "Source not found."}
+            return {"ok": False, "left": False, "detail": "Source not found."}
         kind = source.get("type") or "group"
         url = source.get("url") or ""
         left = False
@@ -606,11 +723,15 @@ def delete_source(worker, page, db, source_id, should_stop=None):
                 left = False
         if not left:
             if kind == "group":
-                detail = ("Could not leave the group on Facebook — "
-                          "it is still in the list, try Delete again.")
+                detail = (
+                    "Could not leave the group on Facebook — "
+                    "it is still in the list, try Delete again."
+                )
             else:
-                detail = ("Could not unfollow the page on Facebook — "
-                          "it is still in the list, try Delete again.")
+                detail = (
+                    "Could not unfollow the page on Facebook — "
+                    "it is still in the list, try Delete again."
+                )
             return {"ok": False, "left": False, "detail": detail}
         db.delete_source(source_id)
         if kind == "group":
@@ -640,8 +761,9 @@ def run_sync(worker, page, db, job, should_stop, note=None):
         target_url = _source_target_url(db, job)
         if not target_url and job.get("post_url"):
             target_url = job["post_url"]
-        if not _check_session_first(worker, page, db, job_id, should_stop,
-                                    target_url, note):
+        if not _check_session_first(
+            worker, page, db, job_id, should_stop, target_url, note
+        ):
             return
         targets = []
         if job.get("post_id"):
@@ -670,21 +792,25 @@ def run_sync(worker, page, db, job, should_stop, note=None):
             if not data:
                 continue
             incoming = _to_post_dict(
-                data, existing.get("source_id") or source_id,
-                existing.get("account_id") or account_id, url, collected_at)
+                data,
+                existing.get("source_id") or source_id,
+                existing.get("account_id") or account_id,
+                url,
+                collected_at,
+            )
             merged, _, _ = merge_post_data(existing, incoming)
             db.save_post(merged, last_synced_at=_now_iso())
             processed += 1
             entry = verification_entry(
-                url, data.get("comment_total"),
-                count_tree_nodes(merged["comments"]))
+                url, data.get("comment_total"), count_tree_nodes(merged["comments"])
+            )
             verification.append(entry)
             msg = verification_message(entry)
             if msg:
                 note(f"{url}: {msg}")
-            db.update_job(job_id, posts_processed=processed,
-                          verification=verification)
-        _finish_job(db, job_id, stopped=stopped, verification=verification,
-                    processed=processed)
+            db.update_job(job_id, posts_processed=processed, verification=verification)
+        _finish_job(
+            db, job_id, stopped=stopped, verification=verification, processed=processed
+        )
     except Exception as exc:  # noqa: BLE001 - never raise out of a job
         _fail(db, job_id, exc)

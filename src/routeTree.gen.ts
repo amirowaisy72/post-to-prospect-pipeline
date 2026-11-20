@@ -19,6 +19,7 @@ import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as LeadsRouteImport } from './routes/leads'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as ShortlistedRouteImport } from './routes/shortlisted'
+import { Route as AnalysisRunIdRouteImport } from './routes/analysis/$runId'
 import { Route as DataSourcingSourceIdRouteImport } from './routes/data-sourcing/$sourceId'
 import { Route as DataSourcingSourceIdPostIdRouteImport } from './routes/data-sourcing/$sourceId/$postId'
 
@@ -72,6 +73,11 @@ const ShortlistedRoute = ShortlistedRouteImport.update({
   path: '/shortlisted',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AnalysisRunIdRoute = AnalysisRunIdRouteImport.update({
+  id: '/$runId',
+  path: '/$runId',
+  getParentRoute: () => AnalysisRoute,
+} as any)
 const DataSourcingSourceIdRoute = DataSourcingSourceIdRouteImport.update({
   id: '/$sourceId',
   path: '/$sourceId',
@@ -88,13 +94,14 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/agent-control': typeof AgentControlRoute
-  '/analysis': typeof AnalysisRoute
+  '/analysis': typeof AnalysisRouteWithChildren
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
   '/inbox': typeof InboxRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
   '/shortlisted': typeof ShortlistedRoute
+  '/analysis/$runId': typeof AnalysisRunIdRoute
   '/data-sourcing/$sourceId': typeof DataSourcingSourceIdRouteWithChildren
   '/data-sourcing/$sourceId/$postId': typeof DataSourcingSourceIdPostIdRoute
 }
@@ -102,13 +109,14 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/agent-control': typeof AgentControlRoute
-  '/analysis': typeof AnalysisRoute
+  '/analysis': typeof AnalysisRouteWithChildren
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
   '/inbox': typeof InboxRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
   '/shortlisted': typeof ShortlistedRoute
+  '/analysis/$runId': typeof AnalysisRunIdRoute
   '/data-sourcing/$sourceId': typeof DataSourcingSourceIdRouteWithChildren
   '/data-sourcing/$sourceId/$postId': typeof DataSourcingSourceIdPostIdRoute
 }
@@ -117,13 +125,14 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/accounts': typeof AccountsRoute
   '/agent-control': typeof AgentControlRoute
-  '/analysis': typeof AnalysisRoute
+  '/analysis': typeof AnalysisRouteWithChildren
   '/configurations': typeof ConfigurationsRoute
   '/data-sourcing': typeof DataSourcingRouteWithChildren
   '/inbox': typeof InboxRoute
   '/leads': typeof LeadsRoute
   '/settings': typeof SettingsRoute
   '/shortlisted': typeof ShortlistedRoute
+  '/analysis/$runId': typeof AnalysisRunIdRoute
   '/data-sourcing/$sourceId': typeof DataSourcingSourceIdRouteWithChildren
   '/data-sourcing/$sourceId/$postId': typeof DataSourcingSourceIdPostIdRoute
 }
@@ -140,6 +149,7 @@ export interface FileRouteTypes {
     | '/leads'
     | '/settings'
     | '/shortlisted'
+    | '/analysis/$runId'
     | '/data-sourcing/$sourceId'
     | '/data-sourcing/$sourceId/$postId'
   fileRoutesByTo: FileRoutesByTo
@@ -154,6 +164,7 @@ export interface FileRouteTypes {
     | '/leads'
     | '/settings'
     | '/shortlisted'
+    | '/analysis/$runId'
     | '/data-sourcing/$sourceId'
     | '/data-sourcing/$sourceId/$postId'
   id:
@@ -168,6 +179,7 @@ export interface FileRouteTypes {
     | '/leads'
     | '/settings'
     | '/shortlisted'
+    | '/analysis/$runId'
     | '/data-sourcing/$sourceId'
     | '/data-sourcing/$sourceId/$postId'
   fileRoutesById: FileRoutesById
@@ -176,7 +188,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AccountsRoute: typeof AccountsRoute
   AgentControlRoute: typeof AgentControlRoute
-  AnalysisRoute: typeof AnalysisRoute
+  AnalysisRoute: typeof AnalysisRouteWithChildren
   ConfigurationsRoute: typeof ConfigurationsRoute
   DataSourcingRoute: typeof DataSourcingRouteWithChildren
   InboxRoute: typeof InboxRoute
@@ -257,6 +269,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShortlistedRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/analysis/$runId': {
+      id: '/analysis/$runId'
+      path: '/$runId'
+      fullPath: '/analysis/$runId'
+      preLoaderRoute: typeof AnalysisRunIdRouteImport
+      parentRoute: typeof AnalysisRoute
+    }
     '/data-sourcing/$sourceId': {
       id: '/data-sourcing/$sourceId'
       path: '/$sourceId'
@@ -273,6 +292,18 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface AnalysisRouteChildren {
+  AnalysisRunIdRoute: typeof AnalysisRunIdRoute
+}
+
+const AnalysisRouteChildren: AnalysisRouteChildren = {
+  AnalysisRunIdRoute: AnalysisRunIdRoute,
+}
+
+const AnalysisRouteWithChildren = AnalysisRoute._addFileChildren(
+  AnalysisRouteChildren,
+)
 
 interface DataSourcingSourceIdRouteChildren {
   DataSourcingSourceIdPostIdRoute: typeof DataSourcingSourceIdPostIdRoute
@@ -301,7 +332,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccountsRoute: AccountsRoute,
   AgentControlRoute: AgentControlRoute,
-  AnalysisRoute: AnalysisRoute,
+  AnalysisRoute: AnalysisRouteWithChildren,
   ConfigurationsRoute: ConfigurationsRoute,
   DataSourcingRoute: DataSourcingRouteWithChildren,
   InboxRoute: InboxRoute,

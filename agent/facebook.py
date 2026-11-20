@@ -988,13 +988,13 @@ _GATE_COUNT_JS = (
     "   if (m[2]) return Math.round(parseFloat(m[1].replace(/,/g, '')) * (m[2].toUpperCase() === 'K' ? 1e3 : 1e6));"
     "   return parseInt(m[1].replace(/[.,]/g, ''), 10);"
     " };"
-    " let posts = 0, total = 0; const seen = new Set();"
+    " let posts = 0, total = 0, active = 0; const seen = new Set();"
     " for (const el of document.querySelectorAll('[aria-label]')) {"
     "   const lab = el.getAttribute('aria-label') || '';"
     "   const m = RE.exec(lab);"
-    "   if (m && !seen.has(el)) { seen.add(el); posts++; total += toNum(m[1]); }"
+    "   if (m && !seen.has(el)) { seen.add(el); posts++; const n = toNum(m[1]); total += n; if (n > 0) active++; }"
     " }"
-    " return {posts: posts, comments: total};"
+    " return {posts: posts, comments: total, active: active};"
     "}"
 )
 
@@ -1248,7 +1248,7 @@ class FacebookWorker:
         except Exception:
             title = ""
         try:
-            body = self._body_after_send(page, text)
+            body = page.inner_text("body") or ""
         except Exception:
             body = ""
         low = body.lower()
@@ -1388,7 +1388,7 @@ class FacebookWorker:
         except Exception:
             title = ""
         try:
-            body = self._body_after_send(page, text)
+            body = page.inner_text("body") or ""
         except Exception:
             body = ""
         try:
@@ -2640,6 +2640,7 @@ class FacebookWorker:
                 except Exception:
                     pass
             try:
+                body = page.inner_text("body") or ""
                 body = self._body_after_send(page, text)
                 # Match on a distinctive tail chunk (last ~60 chars).
                 probe = re.sub(
@@ -2776,7 +2777,7 @@ class FacebookWorker:
         except Exception:
             title = ""
         try:
-            body = self._body_after_send(page, text)
+            body = page.inner_text("body") or ""
         except Exception:
             body = ""
         try:
@@ -2857,7 +2858,7 @@ class FacebookWorker:
         polls = max(1, int(timeout_ms / 500))
         for _ in range(polls):
             try:
-                body = self._body_after_send(page, text)
+                body = page.inner_text("body") or ""
                 if text.lower() in body.lower():
                     return True
             except Exception:
@@ -2983,7 +2984,7 @@ class FacebookWorker:
         except Exception:
             pass
         try:
-            body = self._body_after_send(page, text)
+            body = page.inner_text("body") or ""
             if name and body:
                 idx = body.lower().find(name.lower())
                 if idx >= 0:
@@ -3461,9 +3462,47 @@ class FacebookWorker:
         match here wrongly reports a successful leave as failed.
         """
         try:
-            body = self._body_after_send(page, text)
+            body = page.inner_text("body") or ""
             return bool(re.search(r"\bJoin group\b", body, re.I))
         except Exception:
+            return False
+
+    def follow_page(self, page: Page, page_url: str, ctx: dict | None) -> bool:
+        """Follow a page. True when following afterwards. Never raises."""
+        if _should_stop(ctx):
+            return False
+        try:
+            if not self._load(page, page_url, ctx, "follow_page"):
+                return False
+            if self._check_block(page, ctx):
+                return False
+            try:
+                body = page.inner_text("body")[:4000]
+                if re.search(r"\bFollowing\b", body):
+                    return True
+            except Exception:
+                pass
+            clicked = self._click_first_visible(
+                page,
+                (
+                    'div[role="button"][aria-label="Follow"]',
+                    'button:has-text("Follow")',
+                    'div[role="button"]:has-text("Follow")',
+                ),
+            )
+            if not clicked:
+                return False
+            try:
+                page.wait_for_timeout(2000)
+            except Exception:
+                time.sleep(2)
+            try:
+                body = page.inner_text("body")[:4000]
+                return bool(re.search(r"\bFollowing\b", body))
+            except Exception:
+                return False
+        except Exception as exc:  # noqa: BLE001
+            _note(ctx, f"follow page failed ({page_url}): {exc}")
             return False
 
     def unfollow_page(self, page: Page, page_url: str, ctx: dict | None) -> bool:
@@ -3550,7 +3589,7 @@ class FacebookWorker:
                 return None
             body = ""
             for _attempt in range(10):
-                body = self._body_after_send(page, text)
+                body = page.inner_text("body") or ""
                 if body and ("member" in body.lower() or "follower" in body.lower()):
                     break
                 try:
@@ -3614,7 +3653,8 @@ class FacebookWorker:
         {"posts": n, "comments": n}. Never raises — returns zeros
         when the feed never loads.
         """
-        result: dict = {"posts": 0, "comments": 0}
+        result: dict = {"posts": 0, "comments": 0, "active": None}
+        state = {"active": None}
         if _should_stop(ctx):
             return result
         try:
@@ -3651,6 +3691,7 @@ class FacebookWorker:
                 n_comments = int(got.get("comments") or 0)
             except (TypeError, ValueError):
                 n_comments = 0
+            state["active"] = got.get("active")
             const_via = {"button aria-label": n_posts} if n_posts else {}
             return n_posts, n_comments, const_via
 
@@ -3662,7 +3703,7 @@ class FacebookWorker:
         for _ in range(8):
             if _should_stop(ctx):
                 break
-            if min_comments is not None and n_comments >= min_comments:
+            if min_comments is not None and n_comments >= min_comments and n_posts >= 5:
                 break
             if no_new >= 5 and not self._feed_loading(page):
                 break
@@ -3678,6 +3719,7 @@ class FacebookWorker:
                 no_new += 1
         result["posts"] = n_posts
         result["comments"] = n_comments
+        result["active"] = state["active"]
         # Diagnostic: did the count parsing even see aria-labels?
         # (The accessible name may be computed, not an attribute.)
         try:

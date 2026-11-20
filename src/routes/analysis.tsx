@@ -1,9 +1,11 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { BrainCircuit, CheckCircle2, CopyX, ExternalLink, Loader2, ShieldX, Sparkles } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Link, Outlet, createFileRoute, useChildMatches, useNavigate } from "@tanstack/react-router";
+import { ChevronLeft, ChevronRight, Info, Loader2, Plus } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 
 import { AiChat } from "@/components/ai-chat";
-import { PriorityBadge } from "@/components/badges";
+import { groupRuns, RunStatusBadge, useAutoSaveFinished } from "@/components/analysis-bits";
+import { SourceAnalysisSheet } from "@/components/source-analysis-sheet";
 import { EmptyState, PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,121 +13,224 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { accountName, countReplies, type AnalysisResult } from "@/lib/leadhunter-service";
-import { useActiveAccountData, useStore } from "@/lib/store";
-import type { AiProvider } from "@/lib/types";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  isRunLive,
+  listAnalyses,
+  uncheckedCounts,
+  startAnalysis,
+  type AnalysisSummary,
+} from "@/lib/analysis-client";
+import { fmtDate } from "@/lib/format";
+import { accountName } from "@/lib/leadhunter-service";
+import { listAgentSources, type AgentSource } from "@/lib/sourcing-client";
+import { useStore } from "@/lib/store";
+
+const PAGE_SIZE = 10;
 
 export const Route = createFileRoute("/analysis")({
   head: () => ({
     meta: [
       { title: "AI Analysis — LeadHunter" },
-      { name: "description", content: "Analyse collected Facebook posts and find Rich Beginner and Rich Experienced leads." },
+      { name: "description", content: "Describe the people you want and let AI find them in your collected posts, comments and replies." },
       { property: "og:title", content: "AI Analysis — LeadHunter" },
-      { property: "og:description", content: "Analyse collected Facebook posts and find Rich Beginner and Rich Experienced leads." },
+      { property: "og:description", content: "Describe the people you want and let AI find them in your collected posts, comments and replies." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
-  component: AnalysisPage,
+  component: AnalysisLayout,
 });
 
-const STEPS = ["Loading post data", "Reading comments and replies", "Applying lead criteria", "Removing duplicates"];
-const STEP_MS = 650;
 
-function AnalysisPage() {
-  const { state, runAnalysis, saveLeads } = useStore();
-  const { posts, accountId } = useActiveAccountData();
-  const [selected, setSelected] = useState<string[]>([]);
-  const [provider, setProvider] = useState<AiProvider>(state.settings.provider);
-  const [model, setModel] = useState(state.settings.model);
-  const [step, setStep] = useState(-1);
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const timers = useRef<number[]>([]);
+function AnalysisLayout() {
+  useAutoSaveFinished();
+  const childMatches = useChildMatches();
+  // One query opens on its own page and replaces this one.
+  if (childMatches.length > 0) return <Outlet />;
+  return <AnalysisHome />;
+}
 
-  // Switching account resets the page.
-  useEffect(() => {
-    setSelected([]);
-    setResult(null);
-    setStep(-1);
-  }, [accountId]);
-  useEffect(() => () => timers.current.forEach(clearTimeout), []);
-
-  const running = step >= 0;
+function AnalysisHome() {
+  const { state } = useStore();
+  const navigate = useNavigate();
+  const accountId = state.activeAccountId;
+  const agentUrl = state.settings.agentUrl;
   const account = state.accounts.find((a) => a.id === accountId);
-  const accountBlocked = !running && account?.status !== "active";
-  const sourceName = (id: string) => state.sources.find((s) => s.id === id)?.name ?? "";
-  const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  const accountBlocked = account?.status !== "active";
+  const provider = state.settings.provider;
+  const model = state.settings.model;
+  const geminiKey = state.settings.geminiApiKey;
+  const ollamaUrl = state.settings.ollamaUrl;
+  const modelOk = !!model.trim() && (provider !== "gemini" || !!geminiKey.trim());
 
-  const analyse = () => {
-    if (running) return;
-    const ids = [...selected];
-    const total = STEPS.length * STEP_MS;
-    setResult(null);
-    setStep(0);
-    STEPS.forEach((_, i) => {
-      timers.current.push(window.setTimeout(() => setStep(i), i * STEP_MS));
+  const [sources, setSources] = useState<AgentSource[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [criteria, setCriteria] = useState("");
+  const [quantity, setQuantity] = useState(state.settings.leadRules.defaultLeadsCount || 20);
+  const [offline, setOffline] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [runs, setRuns] = useState<AnalysisSummary[]>([]);
+  const [starting, setStarting] = useState(false);
+  const [page, setPage] = useState(0);
+  const [counts, setCounts] = useState<Record<string, { people: number; unchecked: number }>>({});
+  const [panelFor, setPanelFor] = useState<{ id: string; name: string } | null>(null);
+
+  const leadUrls = state.leads.map((l) => l.profileUrl);
+  const liveRun = runs.find((r) => isRunLive(r)) ?? null;
+  const sourceName = useCallback((id: string) => sources.find((s) => s.id === id)?.name ?? "(deleted source)", [sources]);
+
+  const loadRuns = useCallback(async () => {
+    const r = await listAnalyses(agentUrl, accountId);
+    if (r.ok) {
+      setRuns(r.value.runs);
+      setOffline(false);
+    } else setOffline(true);
+  }, [agentUrl, accountId]);
+
+  useEffect(() => {
+    let off = false;
+    setSelected([]);
+    setLoaded(false);
+    void (async () => {
+      const [s] = await Promise.all([listAgentSources(agentUrl, accountId), loadRuns()]);
+      if (off) return;
+      setOffline(!s.ok);
+      if (s.ok) {
+        const withPosts = s.value.sources.filter((x) => x.postCount > 0);
+        setSources(withPosts);
+        setSelected(withPosts.map((x) => x.id));
+      }
+      setLoaded(true);
+    })();
+    return () => {
+      off = true;
+    };
+  }, [agentUrl, accountId, loadRuns]);
+
+  useEffect(() => {
+    let off = false;
+    void uncheckedCounts(agentUrl, accountId).then((u) => !off && u.ok && setCounts(u.value.sources));
+    return () => {
+      off = true;
+    };
+  }, [agentUrl, accountId, runs.length, liveRun?.id]);
+
+  useEffect(() => {
+    const t = window.setInterval(() => void loadRuns(), liveRun ? 2500 : 8000);
+    return () => window.clearInterval(t);
+  }, [loadRuns, liveRun]);
+
+  const settings = { provider, model: model.trim(), geminiKey, ollamaUrl, excludeUrls: leadUrls };
+
+  const start = async () => {
+    if (liveRun || starting) return;
+    setStarting(true);
+    const r = await startAnalysis(agentUrl, {
+      ...settings,
+      accountId,
+      sourceIds: selected,
+      criteria: criteria.trim(),
+      quantity: Math.max(1, Math.floor(quantity) || 20),
+      rescan: false,
     });
-    timers.current.push(
-      window.setTimeout(() => {
-        const r = runAnalysis(ids);
-        saveLeads(r.found, ids.length);
-        setResult(r);
-        setStep(-1);
-      }, total),
-    );
+    setStarting(false);
+    if (!r.ok) {
+      toast.error(r.error);
+      return;
+    }
+    void navigate({ to: "/analysis/$runId", params: { runId: r.value.id } });
   };
 
+  const canStart =
+    !liveRun && !starting && !accountBlocked && !offline && modelOk && selected.length > 0 && criteria.trim().length >= 5;
+
+  const guide = (() => {
+    if (offline) return { tone: "bad", text: "Agent chal nahi raha. run-agent.bat chalayen, phir page refresh karein." };
+    if (loaded && sources.length === 0)
+      return { tone: "info", text: "Pehle Data Sourcing page par kisi group/page ki posts scrape karein. Phir yahan wapas aayein." };
+    if (liveRun) return { tone: "info", text: "Ek analysis chal rahi hai. Neeche list mein us par click karke progress dekhein." };
+    if (!modelOk) return { tone: "bad", text: "AI model set nahi hai. Configurations mein model chun kar Test karein aur Save karein." };
+    if (selected.length === 0) return { tone: "info", text: "Step 1: left side se woh groups/pages chunein jin ka data check karna hai." };
+    if (criteria.trim().length < 5) return { tone: "info", text: "Step 2: right side par likhein ke aap kin logon ko dhoond rahe hain (apne alfaaz mein)." };
+    return { tone: "ok", text: "Sab tayyar hai. Neeche Start dabayein. Jo log Leads mein hain ya pehle check ho chuke, unhein dobara nahi bheja jayega." };
+  })();
+  const guideClass =
+    guide.tone === "bad"
+      ? "border-destructive/40 bg-destructive/5 text-destructive"
+      : guide.tone === "warn"
+        ? "border-amber-500/40 bg-amber-500/10 text-foreground"
+        : guide.tone === "ok"
+          ? "border-primary/30 bg-accent/60 text-accent-foreground"
+          : "bg-muted/50 text-foreground";
+
+  const groups = groupRuns(runs);
+  const gPages = Math.max(1, Math.ceil(groups.length / PAGE_SIZE));
+  const gPage = Math.min(page, gPages - 1);
+  const pageGroups = groups.slice(gPage * PAGE_SIZE, gPage * PAGE_SIZE + PAGE_SIZE);
+
+  const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   return (
     <>
       <PageHeader
         title="AI Analysis"
-        description="Pick collected posts and an AI model. LeadHunter reads every comment and reply and returns leads that match your criteria."
+        description="Data chunein, likhein kin logon ko dhoondna hai, aur AI har post, comment aur reply parh kar unhein dhoond dega."
       />
+
+      <div className={`mb-6 flex items-start gap-2 rounded-lg border p-3 text-sm ${guideClass}`}>
+        <Info className="mt-0.5 size-4 shrink-0" />
+        <p>{guide.text}</p>
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="shadow-card lg:col-span-2">
           <CardHeader className="flex flex-row items-start justify-between space-y-0">
             <div>
-              <CardTitle className="text-base">1. Pick posts</CardTitle>
-              <CardDescription>{posts.length} collected for {accountName(state, accountId)}</CardDescription>
+              <CardTitle className="text-base">1. Kis data par?</CardTitle>
+              <CardDescription>
+                {sources.length} group/page jin ki posts scrape ho chuki hain · {accountName(state, accountId)}
+              </CardDescription>
             </div>
-            {posts.length > 0 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setSelected(selected.length === posts.length ? [] : posts.map((p) => p.id))}
-                disabled={running}
-              >
-                {selected.length === posts.length ? "Clear" : "Select all"}
+            {sources.length > 0 && (
+              <Button variant="ghost" size="sm" onClick={() => setSelected(selected.length === sources.length ? [] : sources.map((s) => s.id))}>
+                {selected.length === sources.length ? "Sab hatayen" : "Sab chunein"}
               </Button>
             )}
           </CardHeader>
           <CardContent className="space-y-2">
-            {posts.length === 0 ? (
-              <EmptyState title="No collected posts for this account">
-                Add post data on the <Link to="/data-sourcing" className="font-semibold text-primary">Data Sourcing</Link> page first.
+            {sources.length === 0 && loaded ? (
+              <EmptyState title="Abhi koi scraped posts nahi">
+                <Link to="/data-sourcing" className="font-semibold text-primary">Data Sourcing</Link> page par posts scrape karein.
               </EmptyState>
             ) : (
-              posts.map((p) => {
-                const on = selected.includes(p.id);
+              sources.map((s) => {
+                const on = selected.includes(s.id);
                 return (
-                  <label
-                    key={p.id}
-                    className={`flex cursor-pointer gap-3 rounded-lg border p-3 transition-colors ${on ? "border-primary bg-accent/60" : "hover:bg-muted/50"}`}
-                  >
-                    <Checkbox checked={on} onCheckedChange={() => toggle(p.id)} disabled={running} className="mt-0.5" />
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-x-2 text-sm">
-                        <span className="font-semibold text-foreground">{p.author.name}</span>
-                        <span className="text-xs text-muted-foreground">in {sourceName(p.sourceId)}</span>
-                      </div>
-                      <p className="line-clamp-2 text-sm text-muted-foreground">{p.text}</p>
-                      <p className="mt-1 text-xs text-muted-foreground tabular">
-                        {p.comments.length} comments · {countReplies(p)} replies
-                      </p>
+                  <label key={s.id} className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${on ? "border-primary bg-accent/60" : "hover:bg-muted/50"}`}>
+                    <Checkbox checked={on} onCheckedChange={() => toggle(s.id)} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-foreground">{s.name}</p>
+                      <p className="text-xs text-muted-foreground tabular">{s.postCount} posts scraped</p>
+                      {counts[s.id] && (
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          <Badge variant="outline" className="tabular">{counts[s.id]?.people ?? 0} unique log</Badge>
+                          <Badge variant="success" className="tabular">{(counts[s.id]?.people ?? 0) - (counts[s.id]?.unchecked ?? 0)} check ho chuke</Badge>
+                          <Badge variant="warning" className="tabular">{counts[s.id]?.unchecked ?? 0} naye (abhi koi analysis nahi)</Badge>
+                        </div>
+                      )}
                     </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setPanelFor({ id: s.id, name: s.name });
+                      }}
+                    >
+                      Detail
+                    </Button>
                   </label>
                 );
               })
@@ -135,139 +240,90 @@ function AnalysisPage() {
 
         <Card className="h-fit shadow-card">
           <CardHeader>
-            <CardTitle className="text-base">2. AI model</CardTitle>
-            <CardDescription>Defaults come from Configurations.</CardDescription>
+            <CardTitle className="text-base">2. Kya dhoondna hai?</CardTitle>
+            <CardDescription>Apne alfaaz mein likhein, jaise “Jo log YouTube ke liye software dhoond rahe hain”.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
-              <Label>Provider</Label>
-              <Select value={provider} onValueChange={(v) => setProvider(v as AiProvider)} disabled={running}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ollama">Ollama (Local)</SelectItem>
-                  <SelectItem value="gemini">Gemini</SelectItem>
-                </SelectContent>
-              </Select>
+              <Label htmlFor="criteria">Kin logon ko dhoondna hai?</Label>
+              <Textarea id="criteria" rows={5} value={criteria} onChange={(e) => setCriteria(e.target.value)} placeholder="e.g. People who need a software or tool to create YouTube videos faster and may pay for it." />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="model">Model name</Label>
-              <Input id="model" value={model} onChange={(e) => setModel(e.target.value)} className="font-mono text-sm" disabled={running} />
+              <Label htmlFor="qty">Kitne log chahiye?</Label>
+              <Input id="qty" type="number" min={1} max={500} value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} className="tabular" />
+              <p className="text-xs text-muted-foreground">Sab data check hota hai; behtareen itne log Leads mein chale jate hain.</p>
             </div>
-            <Button className="w-full" size="lg" onClick={analyse} disabled={running || accountBlocked || selected.length === 0 || !model.trim()}>
-              {running ? <Loader2 className="animate-spin" /> : <BrainCircuit />}
-              {running ? "Analysing…" : `Analyse ${selected.length || ""} post${selected.length === 1 ? "" : "s"}`}
+            <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+              <p className="text-xs text-muted-foreground">AI model (Configurations se)</p>
+              <p className="mt-0.5 font-semibold text-foreground">
+                {provider === "ollama" ? "Ollama" : "Gemini"} · <span className="font-mono">{model || "—"}</span>
+              </p>
+              <Link to="/configurations" className="mt-1 inline-block text-xs font-semibold text-primary">
+                Model badalna ya test karna ho to Configurations kholen →
+              </Link>
+              {provider === "gemini" && !geminiKey.trim() && <p className="mt-1 text-xs text-destructive">Gemini key Configurations mein save nahi hai.</p>}
+            </div>
+            <Button className="w-full" size="lg" onClick={() => void start()} disabled={!canStart}>
+              {starting ? <Loader2 className="animate-spin" /> : <Plus />}
+              Naya analysis shuru karein
             </Button>
+            {liveRun && <p className="text-xs text-muted-foreground">Ek waqt mein ek analysis chal sakti hai. Pehle chalti hui ko Stop karein.</p>}
             {accountBlocked && (
-              <div className="flex gap-2 rounded-lg border border-primary/25 bg-accent/60 p-3 text-xs text-accent-foreground">
-                <p>
-                  This account is {account?.status ?? "not active"}, so analysis is paused. Set it to Active on the
-                  Accounts page.
-                </p>
-              </div>
+              <p className="rounded-lg border border-primary/25 bg-accent/60 p-3 text-xs text-accent-foreground">
+                Ye account {account?.status ?? "active nahi"} hai. Accounts page par Active karein.
+              </p>
             )}
-            <p className="text-xs text-muted-foreground">Simulated for now — real AI calls arrive with the backend.</p>
           </CardContent>
         </Card>
       </div>
 
-      {running && (
-        <Card className="mt-6 overflow-hidden shadow-card">
-          <div className="relative h-1 overflow-hidden bg-muted">
-            <div className="absolute inset-y-0 w-1/4 animate-scan bg-primary" />
+      <div className="mt-10">
+        <h2 className="text-lg font-bold text-foreground">Meri analyses ({groups.length})</h2>
+        <p className="mb-3 text-sm text-muted-foreground">Har query ka ek card. Click karein to us ka poora record khulega.</p>
+        {loaded && groups.length === 0 ? (
+          <EmptyState title="Abhi koi analysis nahi">Upar se pehli query shuru karein.</EmptyState>
+        ) : (
+          <div className="space-y-3">
+            {pageGroups.map((g) => {
+              const newest = g.runs[0];
+              return (
+                <Link key={g.key} to="/analysis/$runId" params={{ runId: g.id }} className="block">
+                  <Card className="shadow-card transition-colors hover:bg-muted/40">
+                    <CardContent className="flex flex-wrap items-center gap-3 p-4">
+                      <div className="min-w-0 flex-1">
+                        <p className="line-clamp-2 text-sm font-semibold text-foreground">{g.criteria}</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {g.sourceIds.map(sourceName).join(", ")} · {newest ? fmtDate(newest.createdAt) : ""}
+                        </p>
+                        {g.live && newest && <p className="mt-1 text-xs text-muted-foreground">{newest.progress.message}</p>}
+                      </div>
+                      <Badge variant="outline" className="tabular">{g.best} matches</Badge>
+                      {newest && <RunStatusBadge run={newest} />}
+                      <ChevronRight className="size-4 text-muted-foreground" />
+                    </CardContent>
+                  </Card>
+                </Link>
+              );
+            })}
           </div>
-          <CardContent className="space-y-4 p-6">
-            <div className="flex items-center justify-between text-sm">
-              <span className="font-semibold text-foreground">
-                {provider === "ollama" ? "Ollama" : "Gemini"} · <span className="font-mono">{model}</span>
-              </span>
-              <span className="text-muted-foreground tabular">{Math.round(((step + 1) / STEPS.length) * 100)}%</span>
+        )}
+        {groups.length > PAGE_SIZE && (
+          <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
+            <span>Page {gPage + 1} / {gPages}</span>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => setPage(gPage - 1)} disabled={gPage === 0}>
+                <ChevronLeft /> Pichla
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setPage(gPage + 1)} disabled={gPage >= gPages - 1}>
+                Agla <ChevronRight />
+              </Button>
             </div>
-            <Progress value={((step + 1) / STEPS.length) * 100} />
-            <ol className="grid gap-2 sm:grid-cols-4">
-              {STEPS.map((s, i) => (
-                <li key={s} className={`flex items-center gap-2 text-sm ${i <= step ? "text-foreground" : "text-muted-foreground"}`}>
-                  {i < step ? <CheckCircle2 className="size-4 text-success" /> : i === step ? <Loader2 className="size-4 animate-spin text-primary" /> : <span className="size-4 rounded-full border" />}
-                  {s}
-                </li>
-              ))}
-            </ol>
-          </CardContent>
-        </Card>
-      )}
-
-      {result && <AnalysisResults result={result} />}
-
-      <AiChat key={accountId} />
-    </>
-  );
-}
-
-function AnalysisResults({ result }: { result: AnalysisResult }) {
-  return (
-    <div className="mt-6 space-y-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="mr-2 text-lg font-bold text-foreground">Results</h2>
-        <Badge variant="success"><Sparkles className="size-3" /> {result.found.length} new leads</Badge>
-        <Badge variant="neutral"><CopyX className="size-3" /> {result.duplicates.length} already in Leads</Badge>
-        <Badge variant="danger"><ShieldX className="size-3" /> {result.rejected.length} rejected by criteria</Badge>
-        {result.found.length > 0 && (
-          <Button asChild variant="link" size="sm" className="ml-auto">
-            <Link to="/leads">Review in Leads →</Link>
-          </Button>
+          </div>
         )}
       </div>
 
-      {result.found.length === 0 ? (
-        <EmptyState title="No new leads in these posts">Everyone who matched is already in Leads or was rejected.</EmptyState>
-      ) : (
-        <div className="grid gap-3 md:grid-cols-2">
-          {result.found.map((l) => (
-            <Card key={l.id} className="shadow-card">
-              <CardContent className="space-y-3 p-4">
-                <div className="flex items-start justify-between gap-2">
-                  <a href={l.profileUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-foreground hover:text-primary">
-                    {l.name} <ExternalLink className="size-3" />
-                  </a>
-                  <PriorityBadge priority={l.priority} />
-                </div>
-                <p className="text-sm text-foreground">{l.reason}</p>
-                <blockquote className="border-l-2 border-primary pl-3 text-sm italic text-muted-foreground">“{l.quotedComment}”</blockquote>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {(result.duplicates.length > 0 || result.rejected.length > 0) && (
-        <Card className="shadow-card">
-          <CardContent className="grid gap-6 p-4 md:grid-cols-2">
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Skipped — already in Leads</p>
-              <ul className="space-y-1 text-sm">
-                {result.duplicates.map((d) => (
-                  <li key={d.profileUrl} className="flex items-center justify-between gap-2">
-                    <span className="text-foreground">{d.name}</span>
-                    <span className="text-xs text-muted-foreground capitalize">{d.existing.status}</span>
-                  </li>
-                ))}
-                {result.duplicates.length === 0 && <li className="text-muted-foreground">None</li>}
-              </ul>
-            </div>
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Rejected — spam, tip or course sellers</p>
-              <ul className="space-y-1 text-sm">
-                {result.rejected.map((r) => (
-                  <li key={r.profileUrl}>
-                    <span className="text-foreground">{r.name}</span>
-                    <span className="text-xs text-muted-foreground"> — {r.reason}</span>
-                  </li>
-                ))}
-                {result.rejected.length === 0 && <li className="text-muted-foreground">None</li>}
-              </ul>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-    </div>
+      <SourceAnalysisSheet agentUrl={agentUrl} source={panelFor} onClose={() => setPanelFor(null)} />
+      <AiChat key={accountId} />
+    </>
   );
 }

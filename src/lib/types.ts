@@ -76,6 +76,8 @@ export interface Lead {
   priority: LeadPriority;
   reason: string;
   quotedComment: string;
+  sourcePostUrl?: string;
+  sourcePostTitle?: string;
   sourcePostId: string;
   accountId: string;
   status: LeadStatus;

@@ -42,6 +42,14 @@ export function LeadDetailSheet({ leadId, onClose }: { leadId: string | null; on
               </blockquote>
             </section>
 
+            {!post && lead.sourcePostUrl && (
+              <section className="mt-6">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Source post</h3>
+                <a href={lead.sourcePostUrl} target="_blank" rel="noreferrer" className="mt-1.5 inline-flex items-center gap-1 text-sm hover:text-primary">
+                  {lead.sourcePostTitle || "Open post"} <ExternalLink className="size-3" />
+                </a>
+              </section>
+            )}
             {post && (
               <section className="mt-6">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Source post</h3>
