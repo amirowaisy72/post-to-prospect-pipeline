@@ -118,7 +118,7 @@ def init(db) -> None:
                 (crit_hash(r["criteria"]), r["id"]),
             )
         conn.execute(
-            "UPDATE analysis_runs SET status='stopped', error='Agent restart ho gaya - Resume karein', "
+            "UPDATE analysis_runs SET status='stopped', error='Agent restarted - resume it', "
             "finished_at=? WHERE status IN ('running','stop-requested')",
             (_iso(),),
         )
@@ -423,7 +423,7 @@ def _llm(cfg, prompt: str):
                 return "", f"Gemini {err[:80]}"
             _tell(
                 cfg,
-                f"Gemini jawab nahi de raha ({err[:60]}) - dobara try {attempt + 1}/7",
+                f"Gemini is not responding ({err[:60]}) - retrying {attempt + 1}/7",
             )
             time.sleep(3 * (attempt + 1))
             continue
@@ -434,7 +434,7 @@ def _llm(cfg, prompt: str):
             text = "".join(
                 p.get("text", "") for p in parts if isinstance(p, dict)
             ).strip()
-            return text, "" if text else "Gemini ne khali jawab diya"
+            return text, "" if text else "Gemini returned an empty reply"
         err = f"Gemini HTTP {r.status_code}: {r.text[:150]}"
         if (
             r.status_code == 400
@@ -463,13 +463,13 @@ def _llm(cfg, prompt: str):
             if "PerDay" in r.text:
                 return (
                     "",
-                    "Gemini ki aaj ki free limit khatam ho gayi (kal dobara chalegi, ya doosra model/key use karo)",
+                    "Gemini's free limit for today is used up (it resets tomorrow, or use another model/key)",
                 )
             m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', r.text)
             wait = min(90, int(float(m.group(1))) + 2) if m else 30
         _tell(
             cfg,
-            f"Gemini busy/limit (HTTP {r.status_code}) - {wait}s baad dobara try {attempt + 1}/7",
+            f"Gemini busy/limit (HTTP {r.status_code}) - retrying in {wait}s ({attempt + 1}/7)",
         )
         time.sleep(wait)
     return "", err
@@ -557,7 +557,7 @@ def _screen(cfg, criteria, batch):
         for i, s in re.findall(r'"i"\s*:\s*(\d+)\D{1,12}"s"\s*:\s*(\d+)', text or ""):
             if 1 <= int(i) <= len(batch):
                 out[int(i)] = max(0, min(100, int(s)))
-    return out, "" if out else "AI ka jawab samajh nahi aaya"
+    return out, "" if out else "Could not understand the AI's reply"
 
 
 def _judge(cfg, criteria, p):
@@ -568,7 +568,7 @@ def _judge(cfg, criteria, p):
     if isinstance(d, list) and d:
         d = d[0]
     if not isinstance(d, dict):
-        return None, "AI ka jawab samajh nahi aaya"
+        return None, "Could not understand the AI's reply"
     try:
         score = int(float(d.get("score")))
     except Exception:
@@ -663,18 +663,18 @@ def start_run(db, params: dict):
         if _ACTIVE:
             return (
                 None,
-                "Ek analysis pehle se chal raha hai - usay Stop karein, phir ye chalayen",
+                "An analysis is already running - stop it first, then run this one",
             )
         criteria = (params.get("criteria") or "").strip()
         sources = sorted({s for s in (params.get("sourceIds") or []) if s})
         if not criteria:
-            return None, "Criteria likhna zaroori hai"
+            return None, "Criteria is required"
         if not sources:
-            return None, "Kam az kam ek source chuno"
+            return None, "Choose at least one source"
         ch = crit_hash(criteria)
         account = params.get("accountId") or ""
         quantity = max(1, int(params.get("quantity") or 20))
-        progress = json.dumps({"stage": "loading", "message": "Data load ho raha hai…"})
+        progress = json.dumps({"stage": "loading", "message": "Loading data…"})
         with db._connect() as conn:
             run_id = params.get("runId") or ""
             if not run_id:
@@ -731,7 +731,7 @@ def start_run(db, params: dict):
 def resume_run(db, run_id, extra: dict):
     row = _get_row(db, run_id)
     if row is None:
-        return None, "Ye analysis nahi mili"
+        return None, "Analysis not found"
     params = {
         "accountId": row["account_id"],
         "criteria": row["criteria"],
@@ -767,10 +767,10 @@ def set_quantity(db, run_id, quantity: int):
     with _LOCK:
         st = _ACTIVE.get(run_id)
         if not st:
-            return False, "Ye analysis abhi chal nahi rahi"
+            return False, "This analysis is not running right now"
         quantity = int(quantity)
         if quantity < 1:
-            return False, "Kam az kam 1"
+            return False, "At least 1"
         st["quantity"] = quantity
         st["early"] = True
     _save_run(db, run_id, quantity=quantity)
@@ -802,7 +802,7 @@ def _worker(db, run_id, params):
     st = _ACTIVE[run_id]
     prog = {
         "stage": "loading",
-        "message": "Data load ho raha hai…",
+        "message": "Loading data…",
         "people": 0,
         "trivial": 0,
         "excluded": 0,
@@ -867,14 +867,14 @@ def _worker(db, run_id, params):
         cfg["note"] = lambda m: (prog.__setitem__("message", m), push())
 
         # quick check: is the chosen model alive at all? (fails fast with a clear reason)
-        push("Model check ho raha hai…")
+        push("Checking the model…")
         t0 = time.time()
         _, perr = _llm(
             {**cfg, "quick": True, "timeout": 45}, 'Reply with JSON only: {"ok": true}'
         )
         if perr:
             raise RuntimeError(
-                f"Ye model abhi jawab nahi de raha ({perr}). Configurations mein doosra model chuno."
+                f"This model is not responding right now ({perr}). Choose another model in Configurations."
             )
         print(f"analysis: model check ok in {time.time() - t0:.0f}s", flush=True)
 
@@ -924,7 +924,7 @@ def _worker(db, run_id, params):
             candidates=len(backlog),
         )
         push(
-            f"{len(todo_screen)} naye/badle log screen honge, {len(backlog)} detail check ke liye tayyar hain."
+            f"{len(todo_screen)} new/changed people will be screened, {len(backlog)} are ready for a detail check."
         )
 
         def upsert(p, s1=None, s2=None):
@@ -956,7 +956,7 @@ def _worker(db, run_id, params):
                 prog["failed"] += 1
                 prog["lastError"] = err
                 if ctl["fails"] >= MAX_FAILS_IN_ROW:
-                    ctl["failed"] = f"AI baar baar fail hua: {err}"
+                    ctl["failed"] = f"AI kept failing: {err}"
                     return False
                 return True
             ctl["fails"] = 0
@@ -1003,7 +1003,7 @@ def _worker(db, run_id, params):
                 prog["failed"] += len(batch)
                 prog["lastError"] = err
                 if ctl["fails"] >= MAX_FAILS_IN_ROW:
-                    ctl["failed"] = f"AI baar baar fail hua: {err}"
+                    ctl["failed"] = f"AI kept failing: {err}"
                     break
                 push()
                 continue
@@ -1035,14 +1035,14 @@ def _worker(db, run_id, params):
         if status == "done" and st["finish"]:
             prog["partial"] = True
             prog["message"] = (
-                f"Target poora: {n} matching log mil gaye. Baaqi log check nahi hue - "
-                "chaho to Resume karke baaqi bhi check kar sakte ho."
+                f"Target reached: {n} matching people found. The rest were not checked - "
+                "you can Resume to check the rest too."
             )
         else:
             prog["message"] = {
-                "done": f"Mukammal: {n} matching log mile.",
-                "stopped": f"Roka gaya: ab tak {n} matching log mile. Resume se wahin se aage chalega.",
-                "failed": f"Fail: {error}. Ab tak {n} matching log mile. Resume kar sakte hain.",
+                "done": f"Complete: {n} matching people found.",
+                "stopped": f"Stopped: {n} matching people found so far. Resume will continue from here.",
+                "failed": f"Failed: {error}. {n} matching people found so far. You can resume.",
             }[status]
         prog["stage"] = "done" if status == "done" else status
     except Exception as e:  # noqa: BLE001

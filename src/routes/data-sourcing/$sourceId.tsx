@@ -67,7 +67,7 @@ function SourcePostsPage() {
       toast.error(r.error);
       return;
     }
-    toast.success("Sync shuru ho gaya");
+    toast.success("Sync started");
     refresh();
   };
 
@@ -75,7 +75,7 @@ function SourcePostsPage() {
     <>
       <PageHeader
         title="Scraped posts"
-        description="Is source ke saare scraped posts. Post par click karke poora data aur comments dekhen."
+        description="All scraped posts from this source. Click a post to see the full data and comments."
       />
       <div className="mb-4">
         <Link to="/data-sourcing" className="text-sm font-medium text-primary hover:underline">
@@ -85,13 +85,13 @@ function SourcePostsPage() {
       <Card className="shadow-card">
         <CardHeader>
           <CardTitle className="text-base">{total} post{total === 1 ? "" : "s"}</CardTitle>
-          <CardDescription>Naye posts ke liye Data Sourcing page par “Scrap” dabayen.</CardDescription>
+          <CardDescription>For new posts, click “Scrap” on the Data Sourcing page.</CardDescription>
         </CardHeader>
         <CardContent className="px-0">
           <JobBanner job={job} />
           {loaded && posts.length === 0 ? (
             <div className="px-6">
-              <EmptyState title="Is source ke koi posts scrape nahi hue" />
+              <EmptyState title="No posts scraped from this source yet" />
             </div>
           ) : (
             <Table>

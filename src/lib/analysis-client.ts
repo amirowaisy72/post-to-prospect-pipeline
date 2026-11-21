@@ -117,7 +117,7 @@ export interface StartAnalysis extends AnalysisSettings {
   rescan: boolean;
 }
 
-const DOWN = "Agent chal nahi raha — run-agent.bat chalayen.";
+const DOWN = "The agent is not running — start run-agent.bat.";
 
 async function call<T>(agentUrl: string, path: string, init?: RequestInit, timeoutMs = 20000): Promise<AnResult<T>> {
   const base = agentUrl.replace(/\/+$/, "");

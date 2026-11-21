@@ -345,7 +345,7 @@ def open_chat(worker, page, profile_url, ctx):
             if state == "stopped":
                 return None, "stopped"
             if state == "pin":
-                return None, "needs your help: Messenger PIN (upar wala card dekhein)"
+                return None, "needs your help: Messenger PIN (see the card above)"
             if state != "ok":
                 continue
             _pause(page, 1.0)
@@ -377,9 +377,9 @@ def open_chat(worker, page, profile_url, ctx):
         worker.report_stuck(
             page,
             ctx,
-            f"agent confirm nahi kar saka ke khuli chat '{name}' ki hai. Agar neeche "
-            "screenshot mein sahi bande ki chat khuli hai to bas "
-            "'Maine theek kar diya' dabayein",
+            f"the agent could not confirm the open chat is with '{name}'. If the "
+            "screenshot below shows the right person's chat, just "
+            "press 'I fixed it — Continue'",
         )
         return None, (
             f"cannot confirm the open chat is with '{name}' | "

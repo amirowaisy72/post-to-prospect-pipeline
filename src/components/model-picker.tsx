@@ -27,7 +27,7 @@ export function ModelPicker(p: Props) {
         setBusy("");
         if (!r.ok) return setMsg({ ok: false, text: r.error });
         setModels(r.value.models);
-        if (r.value.models.length === 0) setMsg({ ok: false, text: "Koi model nahi mila." });
+        if (r.value.models.length === 0) setMsg({ ok: false, text: "No model found." });
     };
 
     const test = async () => {
@@ -37,7 +37,7 @@ export function ModelPicker(p: Props) {
         setBusy("");
         setMsg(
             r.ok
-                ? { ok: true, text: `Chal raha hai ✓ (${r.value.seconds}s) — jawab: ${r.value.reply}` }
+                ? { ok: true, text: `Working ✓ (${r.value.seconds}s) — reply: ${r.value.reply}` }
                 : { ok: false, text: r.error },
         );
     };
@@ -51,11 +51,11 @@ export function ModelPicker(p: Props) {
 
     return (
         <div className="space-y-2">
-            <div className="text-sm font-medium">Model (list se chunein)</div>
+            <div className="text-sm font-medium">Model (choose from the list)</div>
             <div className="flex gap-2">
                 <Select value={p.model} onValueChange={p.onChange}>
                     <SelectTrigger aria-label="Model" className="font-mono text-sm">
-                        <SelectValue placeholder="Model chunein…" />
+                        <SelectValue placeholder="Choose a model…" />
                     </SelectTrigger>
                     <SelectContent>
                         {options.map((m) => (

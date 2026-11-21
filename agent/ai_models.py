@@ -19,7 +19,7 @@ def list_models(provider, key, ollama_url):
                 return [], f"Ollama HTTP {r.status_code}"
             return [m["name"] for m in r.json().get("models", [])], ""
         if not (key or "").strip():
-            return [], "Pehle Gemini API key daalein."
+            return [], "Enter the Gemini API key first."
         r = httpx.get(
             GEMINI + "/models?pageSize=200",
             headers={"x-goog-api-key": key.strip()},
@@ -77,7 +77,7 @@ def generate(provider, model, key, ollama_url, prompt, http_post=None):
             text = "".join(
                 p.get("text", "") for p in parts if isinstance(p, dict)
             ).strip()
-            return text, "" if text else "Gemini ne khali jawab diya"
+            return text, "" if text else "Gemini returned an empty reply"
         err = f"Gemini HTTP {r.status_code}: {r.text[:150]}"
         if r.status_code not in RETRY:
             break

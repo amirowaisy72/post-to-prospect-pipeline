@@ -151,7 +151,7 @@ function ConfigurationsPage() {
           </div>
           <div className="space-y-1.5">
             <ModelPicker provider={form.provider} model={form.model} geminiKey={form.geminiApiKey} ollamaUrl={form.ollamaUrl} agentUrl={form.agentUrl} onChange={(m) => set("model", m)} />
-            <Label htmlFor="cfg-model">Ya model ka naam khud likhein</Label>
+            <Label htmlFor="cfg-model">Or type the model name yourself</Label>
             <Input
               id="cfg-model"
               value={form.model}

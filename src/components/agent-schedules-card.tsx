@@ -40,7 +40,7 @@ export function AgentSchedulesCard() {
                     key={s.threadId}
                     className="rounded-full border border-primary/40 bg-card px-3 py-1 text-xs font-medium"
                 >
-                    🕒 {s.name}: {new Date(s.dueAt.replace(" ", "T")).toLocaleString()} ko follow-up
+                    🕒 {s.name}: follow-up on {new Date(s.dueAt.replace(" ", "T")).toLocaleString()}
                 </span>
             ))}
         </div>

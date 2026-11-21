@@ -2188,7 +2188,7 @@ class FacebookWorker:
                 if self.messenger_gate(page, ctx) != "clear":
                     return (
                         None,
-                        "needs your help: Messenger PIN (upar wala card dekhein)",
+                        "needs your help: Messenger PIN (see the card above)",
                     )
                 try:
                     if page.locator('div[contenteditable="true"]').count() > 0:
@@ -2221,7 +2221,7 @@ class FacebookWorker:
             if not has_box:
                 try:
                     self.report_stuck(
-                        page, ctx, "chat khul gayi lekin message box nahi mila"
+                        page, ctx, "chat opened but the message box was not found"
                     )
                     page.screenshot(path="open_chat_debug.png")
                 except Exception:
@@ -2290,8 +2290,8 @@ class FacebookWorker:
         if not pin:
             help_requests.raise_help(
                 "pin",
-                "Messenger apna PIN maang raha hai. Neeche PIN daalein — "
-                "agent baaki kaam khud kar lega.",
+                "Messenger is asking for its PIN. Enter the PIN below — "
+                "the agent will handle the rest itself.",
             )
             _note(ctx, "Messenger asks for its PIN - waiting for the user")
             return "needs_pin"
@@ -2315,7 +2315,7 @@ class FacebookWorker:
                 return "clear"
         help_requests.clear_pin()
         help_requests.raise_help(
-            "pin", "Messenger ne PIN qubool nahi kiya. Sahi PIN dobara daalein."
+            "pin", "Messenger did not accept the PIN. Enter the correct PIN again."
         )
         return "pin_wrong"
 
@@ -2332,9 +2332,9 @@ class FacebookWorker:
             pass
         help_requests.raise_help(
             "stuck",
-            f"Agent ruk gaya: {what}. Neeche screenshot mein dekhein agent ko kya "
-            "dikh raha hai. 'Window kholein' dabayein, masla khud theek karein "
-            "(popup band karein / PIN daalein), phir 'Maine theek kar diya' dabayein.",
+            f"The agent stopped: {what}. See in the screenshot below what the agent "
+            "is seeing. Press 'Open the window — fix it yourself', fix the problem yourself "
+            "(close the popup / enter the PIN), then press 'I fixed it — Continue'.",
         )
 
     def read_messenger_threads(
@@ -2554,7 +2554,7 @@ class FacebookWorker:
                     pass
                 if box is None:
                     return False, (
-                        self.report_stuck(page, ctx, "message box nahi mila")
+                        self.report_stuck(page, ctx, "message box not found")
                         or "message box not found"
                     )
             box.click()

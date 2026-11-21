@@ -43,18 +43,18 @@ export function toLead(m: AnalysisMatch, accountId: string): Lead {
 export function RunStatusBadge({ run }: { run: Pick<AnalysisSummary, "status" | "progress"> }) {
   switch (run.status) {
     case "running":
-      return <Badge variant="info">Chal rahi hai</Badge>;
+      return <Badge variant="info">Running</Badge>;
     case "stop-requested":
-      return <Badge variant="warning">Ruk rahi hai…</Badge>;
+      return <Badge variant="warning">Stopping…</Badge>;
     case "stopped":
-      return <Badge variant="warning">Ruki hui · Resume kar sakte hain</Badge>;
+      return <Badge variant="warning">Stopped · You can resume</Badge>;
     case "failed":
-      return <Badge variant="danger">Fail · Resume kar sakte hain</Badge>;
+      return <Badge variant="danger">Failed · You can resume</Badge>;
     default:
       return run.progress.partial ? (
-        <Badge variant="neutral">Target poora · baaqi log baaqi</Badge>
+        <Badge variant="neutral">Target reached · rest not checked</Badge>
       ) : (
-        <Badge variant="success">Mukammal</Badge>
+        <Badge variant="success">Complete</Badge>
       );
   }
 }
@@ -94,7 +94,7 @@ export function useAutoSaveFinished() {
         const top = [...g.value.run.matches].sort((a, b) => b.combined - a.combined).slice(0, g.value.run.quantity);
         if (top.length === 0) continue;
         saveLeads(top.map((m) => toLead(m, g.value.run.accountId)), g.value.run.progress.posts ?? 0);
-        toast.success(`${top.length} log Leads page mein save ho gaye`);
+        toast.success(`${top.length} people saved to the Leads page`);
       }
     };
     void tick();

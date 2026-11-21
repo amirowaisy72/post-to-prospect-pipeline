@@ -276,7 +276,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setState((prev) => ({
           ...prev,
           chatMessages: prev.chatMessages.map((m) =>
-            m.id === messageId ? { ...m, text: "AI pehla message likh raha hai…" } : m,
+            m.id === messageId ? { ...m, text: "The AI is writing the first message…" } : m,
           ),
         }));
       }
@@ -324,7 +324,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setState((prev) => ({
           ...prev,
           chatMessages: prev.chatMessages.map((m) =>
-            m.id === messageId ? { ...m, text: "AI pehla message likh raha hai…" } : m,
+            m.id === messageId ? { ...m, text: "The AI is writing the first message…" } : m,
           ),
         }));
       }

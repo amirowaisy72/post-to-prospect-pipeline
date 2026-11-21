@@ -31,7 +31,7 @@ export const CHAT_SUGGESTIONS = [
   "Summarise my best leads",
   "Write a first message for a Rich Beginner",
   "Why are tip sellers rejected?",
-  "Kaunsa group sab se acha hai?",
+  "Which group is the best?",
 ];
 
 /**
@@ -98,13 +98,13 @@ export function mockInboxReply(ctx: InboxDraftContext): string {
   if (has(t, ["no", "not interested", "no thanks", "stop", "busy"])) {
     return `No problem at all, ${firstName} — thanks for replying. If investing ever comes up for you later, I'm here. All the best!`;
   }
-  if (has(t, ["how", "what", "tell", "more", "plan", "start", "kya", "kaise"])) {
+  if (has(t, ["how", "what", "tell", "more", "plan", "start"])) {
     return [
       `Good question, ${firstName}! The simple start is: a small amount, split across two or three safe options, and we review it together after a month.`,
       "Want me to sketch that first split for you? It takes two minutes.",
     ].join(" ");
   }
-  if (has(t, ["yes", "ok", "sure", "interested", "sounds good", "han", "theek"])) {
+  if (has(t, ["yes", "ok", "sure", "interested", "sounds good"])) {
     return [
       `Great, ${firstName}! Let's keep it easy — can we do a short 10-minute call this week so I can show you the first step properly?`,
       "You pick the time, I'll work around it.",
@@ -121,7 +121,7 @@ export function demoConversation(model: string): ChatMessage[] {
     {
       id: "demo-1",
       role: "user",
-      text: "Mujhe batao is hafte ki sab se achi leads kaun si hain?",
+      text: "Tell me which are the best leads this week?",
       at: "2026-11-11T09:00:00.000Z",
     },
     {
@@ -141,7 +141,7 @@ export function demoConversation(model: string): ChatMessage[] {
     {
       id: "demo-3",
       role: "user",
-      text: "Sana ke liye ek short message likh do.",
+      text: "Write a short message for Sana.",
       at: "2026-11-11T09:01:00.000Z",
     },
     {
@@ -153,7 +153,7 @@ export function demoConversation(model: string): ChatMessage[] {
         "Sure — friendly and short, no hard selling:",
         "",
         "```text",
-        "Assalam o Alaikum Sana! I saw your comment in PSX Investors Pakistan",
+        "Hello Sana! I saw your comment in PSX Investors Pakistan",
         "about getting started with investing. Happy to share how beginners",
         "usually split their first investment — no pressure at all. 🙂",
         "```",
@@ -168,7 +168,7 @@ const has = (t: string, words: string[]) => words.some((w) => t.includes(w));
 export function mockReply(prompt: string, ctx: ChatContext): string {
   const t = prompt.toLowerCase();
 
-  if (has(t, ["message", "likh", "write", "dm", "reach out", "draft"])) {
+  if (has(t, ["message", "write", "dm", "reach out", "draft"])) {
     const lead = ctx.topLeads[0]?.name.split(" ")[0] ?? "there";
     return [
       "Here's a short opener you can send:",
@@ -196,7 +196,7 @@ export function mockReply(prompt: string, ctx: ChatContext): string {
     ].join("\n");
   }
 
-  if (has(t, ["group", "page", "source", "kaunsa", "best group"])) {
+  if (has(t, ["group", "page", "source", "best group"])) {
     return [
       "Based on your collected posts, **PSX Investors Pakistan** gives the most leads per post.",
       "",
@@ -209,7 +209,7 @@ export function mockReply(prompt: string, ctx: ChatContext): string {
     ].join("\n");
   }
 
-  if (has(t, ["lead", "summar", "best", "achi", "top"])) {
+  if (has(t, ["lead", "summar", "best", "top"])) {
     if (ctx.topLeads.length === 0) {
       return `No leads yet for **${ctx.accountName}**. Pick posts above and click **Analyse** — I'll summarise them for you after.`;
     }

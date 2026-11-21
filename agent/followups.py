@@ -1,4 +1,4 @@
-"""Follow-ups the person asked for ('kal baat karunga')."""
+"""Follow-ups the person asked for ('I'll talk tomorrow')."""
 
 import os
 import re

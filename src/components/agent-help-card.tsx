@@ -14,8 +14,8 @@ interface HelpRequest {
 
 /** Shows up only when the agent is stuck and needs the user: Messenger
  * PIN, or any unknown blocker. The user answers here (PIN), or opens
- * the agent window, fixes it by hand and presses "Maine theek kar
- * diya" — the agent then carries on with the same message. */
+ * the agent window, fixes it by hand and presses "I fixed it"
+ * — the agent then carries on with the same message. */
 export function AgentHelpCard() {
     const { state } = useStore();
     const base = state.settings.agentUrl.replace(/\/+$/, "");
@@ -57,7 +57,7 @@ export function AgentHelpCard() {
             setNote(typeof data?.detail === "string" ? data.detail : null);
             if (res.ok && key === "pin") setPin("");
         } catch {
-            setNote("Agent se rabta nahi hua — run-agent.bat wali window check karein.");
+            setNote("Could not reach the agent — check the run-agent.bat window.");
         } finally {
             setBusy(null);
             void refresh();
@@ -71,7 +71,7 @@ export function AgentHelpCard() {
         <Card className="mb-6 border-primary/50 bg-accent/60 shadow-card">
             <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                    {isPin ? <KeyRound /> : <LifeBuoy />} Agent ko aapki madad chahiye
+                    {isPin ? <KeyRound /> : <LifeBuoy />} The agent needs your help
                 </CardTitle>
                 <CardDescription>{help.message}</CardDescription>
             </CardHeader>
@@ -92,14 +92,14 @@ export function AgentHelpCard() {
                             onClick={() => post("pin", "/agent/help/pin", { pin })}
                             disabled={busy !== null || pin.length < 4}
                         >
-                            <KeyRound /> {busy === "pin" ? "Bhej raha hun…" : "PIN bhejein"}
+                            <KeyRound /> {busy === "pin" ? "Sending…" : "Send PIN"}
                         </Button>
                     </div>
                 )}
                 {!isPin && (
                     <img
                         src={`${base}/agent/help/screenshot?t=${encodeURIComponent(help.since)}`}
-                        alt="Agent ko ye dikh raha hai"
+                        alt="This is what the agent sees"
                         className="max-h-64 rounded-lg border"
                     />
                 )}
@@ -109,14 +109,14 @@ export function AgentHelpCard() {
                         onClick={() => post("open", "/agent/help/open-window", { accountId })}
                         disabled={busy !== null}
                     >
-                        <ExternalLink /> {busy === "open" ? "Khol raha hun…" : "Window kholein — khud theek karein"}
+                        <ExternalLink /> {busy === "open" ? "Opening…" : "Open the window — fix it yourself"}
                     </Button>
                     <Button
                         variant="outline"
                         onClick={() => post("done", "/agent/help/resolved", { accountId })}
                         disabled={busy !== null}
                     >
-                        <Check /> {busy === "done" ? "Continue ho raha hai…" : "Maine theek kar diya — Continue"}
+                        <Check /> {busy === "done" ? "Continuing…" : "I fixed it — Continue"}
                     </Button>
                 </div>
                 {note && <p className="text-sm text-muted-foreground">{note}</p>}

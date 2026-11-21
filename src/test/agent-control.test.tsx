@@ -208,8 +208,8 @@ describe("Agent Control page", () => {
     await renderAt("/agent-control");
     fireEvent.click(await screen.findByRole("button", { name: /Re-check session/ }));
 
-    expect(await screen.findByText("Abhi bhi empty — browser restart karein")).toBeInTheDocument();
-    expect(await screen.findByText(/Relaunch browser dabayein/)).toBeInTheDocument();
+    expect(await screen.findByText("Still empty — restart the browser")).toBeInTheDocument();
+    expect(await screen.findByText(/Click Relaunch browser/)).toBeInTheDocument();
     // The empty detail is visible too (body_len -1 and links_count -1).
     expect((await screen.findAllByText("-1")).length).toBe(2);
   });
@@ -225,7 +225,7 @@ describe("Agent Control page", () => {
       expect(relaunch).toBeDefined();
     });
     expect(await screen.findByText(/Browser relaunched \(alive\)/)).toBeInTheDocument();
-    expect(await screen.findByText(/Ab Re-check session dabayein/)).toBeInTheDocument();
+    expect(await screen.findByText(/Now click Re-check session/)).toBeInTheDocument();
   });
 
   it("reloads the Messenger page and re-checks the session", async () => {
@@ -264,11 +264,11 @@ describe("Agent Control page", () => {
     await renderAt("/agent-control");
 
     expect(await screen.findByText("Agent offline")).toBeInTheDocument();
-    expect(await screen.findByText(/Agent window \(run-agent\.bat\) check karein/)).toBeInTheDocument();
+    expect(await screen.findByText(/Check the agent window \(run-agent\.bat\)/)).toBeInTheDocument();
     // The honest limits box is always visible, agent up or down.
-    expect(await screen.findByText(/Jo UI se NAHI ho sakta/)).toBeInTheDocument();
-    expect(await screen.findByText(/Us window mein Ctrl\+C dabayein/)).toBeInTheDocument();
-    expect(await screen.findByText(/Sign-in sirf ek baar/)).toBeInTheDocument();
+    expect(await screen.findByText(/What the UI can NOT do/)).toBeInTheDocument();
+    expect(await screen.findByText(/Press Ctrl\+C in that window/)).toBeInTheDocument();
+    expect(await screen.findByText(/Sign in only once/)).toBeInTheDocument();
   });
 
   it("opens the sign-in window and tells the user to sign in himself", async () => {
@@ -285,7 +285,7 @@ describe("Agent Control page", () => {
       const init = (signin as unknown as [string, RequestInit | undefined])[1];
       expect(JSON.parse(String(init?.body ?? "{}"))).toEqual({ accountId: "acc-1" });
     });
-    expect(await screen.findByText(/Chrome window khul gayi/)).toBeInTheDocument();
-    expect(await screen.findByText(/Relaunch browser dabayein/)).toBeInTheDocument();
+    expect(await screen.findByText(/Chrome window opened/)).toBeInTheDocument();
+    expect(await screen.findByText(/click Relaunch browser/)).toBeInTheDocument();
   });
 });

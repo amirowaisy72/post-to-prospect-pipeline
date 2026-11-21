@@ -38,32 +38,32 @@ export const Route = createFileRoute("/agent-control")({
 
 /**
  * Plain-language verdict for a session state. The two verdicts the
- * user asked for are verbatim ("Session OK" / "Abhi bhi empty —
- * browser restart karein"); the hints say which button fixes it.
+ * user asked for are verbatim ("Session OK" / "Still empty —
+ * restart the browser"); the hints say which button fixes it.
  */
 function sessionVerdict(state: AgentSessionState): { title: string; hint: string } {
   switch (state) {
     case "ok":
-      return { title: "Session OK", hint: "Facebook session live hai — sends ja sakte hain." };
+      return { title: "Session OK", hint: "Facebook session is live — messages can be sent." };
     case "empty":
       return {
-        title: "Abhi bhi empty — browser restart karein",
-        hint: "Messenger page khaali aa raha hai. Relaunch browser dabayein, phir Re-check session.",
+        title: "Still empty — restart the browser",
+        hint: "The Messenger page is coming up blank. Click Relaunch browser, then Re-check session.",
       };
     case "logged_out":
       return {
         title: "Logged out",
-        hint: "Sign in to Facebook dabayein (upar Controls mein) — Chrome window khulegi, khud sign in karein, phir Relaunch browser dabayein.",
+        hint: "Click Sign in to Facebook (in Controls above) — a Chrome window will open; sign in yourself, then click Relaunch browser.",
       };
     case "checkpoint":
       return {
         title: "Checkpoint",
-        hint: "Facebook ne verification mangi hai — apne browser mein khud check karein, phir Re-check session dabayein.",
+        hint: "Facebook asked for verification — check it in your own browser, then click Re-check session.",
       };
     case "blocked":
       return {
         title: "Blocked",
-        hint: "Facebook ne rok diya hai — thoda waqt dein, phir Relaunch browser + Re-check session.",
+        hint: "Facebook has blocked it — wait a while, then Relaunch browser + Re-check session.",
       };
   }
 }
@@ -169,11 +169,11 @@ function AgentControl() {
       const r = await signInAgent();
       if (r.ok) {
         setActionNote(
-          "Chrome window khul gayi — Facebook mein khud sign in karein, phir Relaunch browser dabayein.",
+          "Chrome window opened — sign in to Facebook yourself, then click Relaunch browser.",
         );
         await refreshAll();
       } else {
-        setActionNote(`Sign-in window nahi khuli: ${r.error}`);
+        setActionNote(`Sign-in window did not open: ${r.error}`);
       }
     });
 
@@ -209,7 +209,7 @@ function AgentControl() {
       const r = await relaunchAgentBrowser();
       if (r.ok) {
         setActionNote(
-          `Browser relaunched (${r.value.browser}). Ab Re-check session dabayein — session dobara check hogi.`,
+          `Browser relaunched (${r.value.browser}). Now click Re-check session — the session will be checked again.`,
         );
         await refreshAll();
       } else {
@@ -222,7 +222,7 @@ function AgentControl() {
       if (status?.watching) {
         const r = await unwatchAgent();
         if (r.ok) {
-          setActionNote("Watching stopped — current check ke baad koi reply nahi dekha jayega.");
+          setActionNote("Watching stopped — no replies will be watched after the current check.");
           await refreshAll();
         } else {
           setActionNote(`Stop watching failed: ${r.error}`);
@@ -231,8 +231,8 @@ function AgentControl() {
         const joined = await sendChatWatch();
         setActionNote(
           joined
-            ? "Watching started — agent ab replies ka wait karega."
-            : "Nothing to watch — koi active chat nahi hai, ya Gemini key missing hai.",
+            ? "Watching started — the agent will now wait for replies."
+            : "Nothing to watch — there is no active chat, or the Gemini key is missing.",
         );
         await refreshAll();
       }
@@ -242,7 +242,7 @@ function AgentControl() {
     run("stop", async () => {
       const ok = await stopAllChatting();
       setActionNote(
-        ok ? "All chatting stopped." : "Stop failed — agent running hai ya nahi, upar dekhein.",
+        ok ? "All chatting stopped." : "Stop failed — check above whether the agent is running.",
       );
       await refreshAll();
     });
@@ -256,7 +256,7 @@ function AgentControl() {
     <div className="space-y-6">
       <PageHeader
         title="Agent Control"
-        description="Agent ki haalat, session, aur browser — sab kuch yahan se. Jo control UI se mumkin nahi, wo neeche saaf likha hai."
+        description="The agent's status, session, and browser — everything from here. Anything the controls can't do is written clearly below."
       />
 
       <AgentHelpCard />
@@ -268,13 +268,13 @@ function AgentControl() {
             <Bot /> Agent status
           </CardTitle>
           <CardDescription>
-            Refreshes every 10 seconds. Status check browser launch nahi karta — sirf haalat batata hai.
+            Refreshes every 10 seconds. The status check does not launch a browser — it only reports the status.
           </CardDescription>
         </CardHeader>
         <CardContent>
           {statusError && !status ? (
             <EmptyState title="Agent offline">
-              {statusError} Agent window (run-agent.bat) check karein — wo band ho to dobara chalayein.
+              {statusError} Check the agent window (run-agent.bat) — if it is closed, start it again.
             </EmptyState>
           ) : !status ? (
             <EmptyState title="Checking agent…" />
@@ -339,7 +339,7 @@ function AgentControl() {
                     </span>
                   </>
                 ) : (
-                  "Not checked yet — Re-check session dabayein."
+                  "Not checked yet — click Re-check session."
                 )}
               </DiagnosticRow>
               <DiagnosticRow label="Sends today">
@@ -357,7 +357,7 @@ function AgentControl() {
         <CardHeader>
           <CardTitle className="text-base">Controls</CardTitle>
           <CardDescription>
-            Session-empty ka fix bhi yahin se: pehle Re-check session, phir Relaunch browser, phir dobara Re-check.
+            Fix an empty session here too: first Re-check session, then Relaunch browser, then Re-check again.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -395,16 +395,16 @@ function AgentControl() {
           {actionNote && <p className="text-sm text-muted-foreground">{actionNote}</p>}
 
           <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
-            <p className="font-semibold text-foreground">Jo UI se NAHI ho sakta — chhupaya nahi:</p>
+            <p className="font-semibold text-foreground">What the UI can NOT do — nothing hidden:</p>
             <ul className="mt-1 list-disc space-y-1 pl-5">
               <li>
-                Agent process ko yahan se restart nahi kar sakte — wo alag window mein chalta hai
-                (run-agent.bat). Us window mein Ctrl+C dabayein, phir run-agent.bat dobara chalayein.
+                You can't restart the agent process from here — it runs in a separate window
+                (run-agent.bat). Press Ctrl+C in that window, then run run-agent.bat again.
               </li>
               <li>
-                Sign-in sirf ek baar: "Sign in to Facebook" dabayein — Chrome window khulegi,
-                khud sign in karein. Session agent ki apni profile (agent\profiles) mein save
-                hoti hai; koi doosri app ki profile use nahi hoti.
+                Sign in only once: click "Sign in to Facebook" — a Chrome window will open,
+                sign in yourself. The session is saved in the agent's own profile (agent\profiles);
+                no other app's profile is used.
               </li>
             </ul>
           </div>
@@ -421,7 +421,7 @@ function AgentControl() {
           <CardContent>
             {!lastCheck ? (
               <EmptyState title="No session check yet">
-                Re-check session dabayein — detail yahan aayegi.
+                Click Re-check session — the detail will appear here.
               </EmptyState>
             ) : (
               <SessionDetail detail={lastCheck.detail} at={lastCheck.at} />
@@ -432,12 +432,12 @@ function AgentControl() {
         <Card className="shadow-card">
           <CardHeader>
             <CardTitle className="text-base">Recent send stages</CardTitle>
-            <CardDescription>Apke messages ki aakhri haalat (Inbox wali stages).</CardDescription>
+            <CardDescription>The latest status of your messages (the Inbox stages).</CardDescription>
           </CardHeader>
           <CardContent>
             {stagedMessages.length === 0 ? (
               <EmptyState title="No sends with a stage yet">
-                Koi message abhi send nahi hua, ya uska stage khatam ho gaya.
+                No message has been sent yet, or its stage has ended.
               </EmptyState>
             ) : (
               <ul className="space-y-2">
@@ -462,12 +462,12 @@ function AgentControl() {
       <Card className="shadow-card">
         <CardHeader>
           <CardTitle className="text-base">Agent logs</CardTitle>
-          <CardDescription>Last ~50 lines (newest last). Poora log agent window mein hai.</CardDescription>
+          <CardDescription>Last ~50 lines (newest last). The full log is in the agent window.</CardDescription>
         </CardHeader>
         <CardContent>
           {logs.length === 0 ? (
             <EmptyState title="No log lines yet">
-              Agent se koi line nahi aayi — koi control dabayein ya chat bhejein.
+              No lines from the agent yet — press a control or send a chat.
             </EmptyState>
           ) : (
             <pre className="max-h-80 overflow-auto rounded-lg bg-muted/60 p-3 font-mono text-xs whitespace-pre-wrap text-foreground">
@@ -478,8 +478,8 @@ function AgentControl() {
       </Card>
 
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Play className="size-4" /> Agent start karne ke liye: agent window mein run-agent.bat chalayein.
-        <Square className="ml-4 size-4" /> Band karne ke liye usi window mein Ctrl+C.
+        <Play className="size-4" /> To start the agent: run run-agent.bat in the agent window.
+        <Square className="ml-4 size-4" /> To stop it, press Ctrl+C in the same window.
       </div>
     </div>
   );
@@ -498,7 +498,7 @@ function SessionDetail({ detail, at }: { detail: SessionDiagnostic; at: string }
       <DiagnosticRow label="Body length">{detail.body_len}</DiagnosticRow>
       <DiagnosticRow label="Links">{detail.links_count}</DiagnosticRow>
       <div className="pt-2">
-        <p className="text-sm text-muted-foreground">Selectors (logged-in page ke nishan):</p>
+        <p className="text-sm text-muted-foreground">Selectors (signs of a logged-in page):</p>
         <div className="mt-1 flex flex-wrap gap-1.5">
           {Object.entries(detail.selectors).map(([label, count]) => (
             <Badge key={label} variant={count === 0 || count === "error" ? "destructive" : "success"}>

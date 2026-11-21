@@ -62,9 +62,9 @@ export function useLiveJob(): {
 }
 
 const KIND_LABEL: Record<string, string> = {
-  collect: "Naye groups/pages dhoond raha hai",
-  scrape: "Posts scrape kar raha hai",
-  sync: "Post sync kar raha hai",
+  collect: "Finding new groups/pages",
+  scrape: "Scraping posts",
+  sync: "Syncing posts",
 };
 
 /** Banner for the running job, with a Stop button. Stop finishes
@@ -86,16 +86,16 @@ export function JobBanner({ job }: { job: AgentJob | null }) {
     <div className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
       <div className="flex items-center gap-2">
         <Loader2 className="size-4 animate-spin text-primary" />
-        <span className="font-medium">{KIND_LABEL[job.kind] ?? "Agent kaam kar raha hai"}</span>
+        <span className="font-medium">{KIND_LABEL[job.kind] ?? "The agent is working"}</span>
         <span className="text-muted-foreground">
           {job.kind === "collect"
-            ? `${job.postsProcessed} check kiye, ${job.newPosts} mile`
+            ? `${job.postsProcessed} checked, ${job.newPosts} found`
             : job.kind === "scrape"
-              ? `${job.newPosts} naye posts save hue`
+              ? `${job.newPosts} new posts saved`
               : ""}
         </span>
         {stopping && (
-          <span className="text-amber-600">· current post khatam hone ke baad ruk jayega…</span>
+          <span className="text-amber-600">· will stop after the current post finishes…</span>
         )}
       </div>
       <Button variant="outline" size="sm" disabled={stopping} onClick={onStop}>

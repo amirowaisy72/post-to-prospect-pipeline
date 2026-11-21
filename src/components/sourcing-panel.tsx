@@ -48,7 +48,7 @@ export function SourcesPanel() {
     setLoaded(true);
   }, [agentUrl, accountId]);
 
-  // "N log abhi AI se nahi guzre" per source (refreshed when sources reload).
+  // "N people haven't gone through AI yet" per source (refreshed when sources reload).
   useEffect(() => {
     if (!accountId || sources.length === 0) return;
     let off = false;
@@ -78,9 +78,9 @@ export function SourcesPanel() {
     const u = unchecked[s.id];
     if (!u) return <span className="text-xs text-muted-foreground">…</span>;
     return (
-      <button type="button" onClick={() => setPanelFor(s)} title="AI Analysis record dekhein">
+      <button type="button" onClick={() => setPanelFor(s)} title="View AI Analysis record">
         <Badge variant={u.unchecked > 0 ? "warning" : "success"}>
-          {u.unchecked > 0 ? `${u.unchecked} log unchecked` : "Naya data nahi"}
+          {u.unchecked > 0 ? `${u.unchecked} people unchecked` : "No new data"}
         </Badge>
       </button>
     );
@@ -92,7 +92,7 @@ export function SourcesPanel() {
         <div>
           <CardTitle className="text-base">Sources</CardTitle>
           <CardDescription>
-            Groups aur pages jo agent ne dhoonde ya aap ne add kiye. Scraped number par click karke posts dekhen.
+            Groups and pages the agent found or you added. Click a scraped count to see its posts.
           </CardDescription>
         </div>
         <Button onClick={() => setAddOpen(true)} disabled={!accountId || running}>
@@ -107,7 +107,7 @@ export function SourcesPanel() {
         )}
         {!online && (
           <div className="mx-6 mb-4 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            Agent chal nahi raha — run-agent.bat chalayen.
+            The agent is not running — start run-agent.bat.
           </div>
         )}
         <JobBanner job={job} />
@@ -121,7 +121,7 @@ export function SourcesPanel() {
         {loaded && sources.length === 0 ? (
           <div className="px-6">
             <EmptyState title="No sources yet">
-              “Add Source” dabayen: topic likhen, kitne chahiye, group/page chunen — agent khud dhoond lega.
+              Click “Add Source”: enter a topic, how many you want, and pick a group/page — the agent will find them itself.
             </EmptyState>
           </div>
         ) : (
@@ -142,7 +142,7 @@ export function SourcesPanel() {
               {sources.map((s) => (
                 <TableRow key={s.id}>
                   <TableCell className="pl-6">
-                    <button type="button" onClick={() => setPanelFor(s)} className="text-left font-semibold text-foreground hover:text-primary" title="AI Analysis record dekhein">
+                    <button type="button" onClick={() => setPanelFor(s)} className="text-left font-semibold text-foreground hover:text-primary" title="View AI Analysis record">
                       {s.name || "(no name)"}
                     </button>
                     {s.url && (
@@ -234,7 +234,7 @@ function RejectedList({
       toast.error(res.error);
       return;
     }
-    toast.success(`“${r.name}” list mein add ho gaya`);
+    toast.success(`“${r.name}” added to the list`);
     setHidden((h) => ({ ...h, [r.url]: true }));
     onAdded();
   };
@@ -242,9 +242,9 @@ function RejectedList({
     <div className="mx-6 mb-4 rounded-md border">
       <div className="flex items-center justify-between border-b px-3 py-2 text-sm">
         <div>
-          <span className="font-medium">Agent ne ye skip kiye ({items.length})</span>
+          <span className="font-medium">Skipped by the agent ({items.length})</span>
           <span className="ml-2 text-muted-foreground">
-            Ye sirf abhi ke liye hain — page refresh par chale jayenge.
+            These are only temporary — they disappear on page refresh.
           </span>
         </div>
         <Button size="sm" variant="ghost" onClick={onClose}>Hide</Button>
@@ -301,7 +301,7 @@ function RowActions({
     const r = await removeSource(state.settings.agentUrl, source.id, failed);
     setBusy(false);
     if (!r.ok) {
-      toast.error(`${r.error} — dobara dabane par sirf record hatega (Force delete).`);
+      toast.error(`${r.error} — clicking again removes only the record (Force delete).`);
       setFailed(true);
       return;
     }
@@ -310,14 +310,14 @@ function RowActions({
   };
   return (
     <div className="flex gap-1.5">
-      <Button size="sm" disabled={disabled} onClick={onScrap} title="Is source se aur posts scrape karen">
+      <Button size="sm" disabled={disabled} onClick={onScrap} title="Scrape more posts from this source">
         Scrap
       </Button>
       <Button
         variant={armed ? "destructive" : "outline"}
         size="sm"
         disabled={disabled || busy}
-        title="Facebook par leave/unfollow karta hai aur record hata deta hai"
+        title="Leaves/unfollows on Facebook and removes the record"
         onClick={onDelete}
       >
         {busy ? "Deleting…" : armed ? (failed ? "Force delete?" : "Confirm delete?") : "Delete"}
@@ -352,7 +352,7 @@ function ScrapeDialog({
       toast.error(r.error);
       return;
     }
-    toast.success(`Scraping shuru: ${source.name}`);
+    toast.success(`Scraping started: ${source.name}`);
     onClose();
     onStarted();
   };
@@ -362,11 +362,11 @@ function ScrapeDialog({
         <DialogHeader>
           <DialogTitle>Scrap posts</DialogTitle>
           <DialogDescription>
-            {source?.name} se kitne naye posts scrape karne hain? Jo posts pehle se save hain wo dobara nahi aate.
+            {source?.name} — how many new posts should be scraped? Posts already saved won't come again.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-1.5">
-          <Label htmlFor="scrap-n">Naye posts (max)</Label>
+          <Label htmlFor="scrap-n">New posts (max)</Label>
           <Input id="scrap-n" type="number" min={1} max={200} value={limit} onChange={(e) => setLimit(e.target.value)} />
         </div>
         <DialogFooter>
@@ -407,12 +407,12 @@ function AddSourceDialog({
   const submitAgent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!topic.trim()) {
-      toast.error("Topic / category likhen (jaise: stock market Pakistan).");
+      toast.error("Enter a topic / category (e.g. stock market Pakistan).");
       return;
     }
     const n = Math.floor(Number(qty));
     if (!Number.isFinite(n) || n < 1 || n > 50) {
-      toast.error("Quantity 1 se 50 ke beech honi chahiye.");
+      toast.error("Quantity must be between 1 and 50.");
       return;
     }
     setBusy(true);
@@ -432,7 +432,7 @@ function AddSourceDialog({
       toast.error(r.error);
       return;
     }
-    toast.success("Agent ne search shuru kar di");
+    toast.success("The agent started the search");
     onOpenChange(false);
     onStarted();
   };
@@ -441,7 +441,7 @@ function AddSourceDialog({
     e.preventDefault();
     const count = Number(members);
     if (!name.trim() || !url.trim() || members.trim() === "" || !Number.isInteger(count) || count < 0) {
-      toast.error("Name, link aur members (poora number) zaroori hain.");
+      toast.error("Name, link, and members (a whole number) are required.");
       return;
     }
     setBusy(true);
@@ -451,7 +451,7 @@ function AddSourceDialog({
       toast.error(r.error);
       return;
     }
-    toast.success(`“${name.trim()}” add ho gaya`);
+    toast.success(`“${name.trim()}” added`);
     setName("");
     setUrl("");
     setMembers("");
@@ -465,13 +465,13 @@ function AddSourceDialog({
         <DialogHeader>
           <DialogTitle>Add source</DialogTitle>
           <DialogDescription>
-            Agent se dhoondwayen, ya apna group/page khud add karen.
+            Let the agent find them, or add your own group/page.
           </DialogDescription>
         </DialogHeader>
         <Tabs value={mode} onValueChange={(v) => setMode(v as Mode)}>
           <TabsList>
-            <TabsTrigger value="agent">Agent se dhoondo</TabsTrigger>
-            <TabsTrigger value="manual">Khud add karo</TabsTrigger>
+            <TabsTrigger value="agent">Find with the agent</TabsTrigger>
+            <TabsTrigger value="manual">Add it yourself</TabsTrigger>
           </TabsList>
         </Tabs>
         {mode === "agent" ? (
@@ -482,43 +482,43 @@ function AddSourceDialog({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="src-country">Country (optional)</Label>
-              <Input id="src-country" value={country} onChange={(e) => setCountry(e.target.value)} placeholder="e.g. Pakistan — khali chhorein to general search" />
+              <Input id="src-country" value={country} onChange={(e) => setCountry(e.target.value)} placeholder="e.g. Pakistan — leave empty for a general search" />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="src-qty">Kitne chahiye (1–50)</Label>
+              <Label htmlFor="src-qty">How many (1–50)</Label>
               <Input id="src-qty" type="number" min={1} max={50} value={qty} onChange={(e) => setQty(e.target.value)} />
             </div>
             <div className="space-y-1.5">
-              <Label>Kya dhoondna hai</Label>
+              <Label>What to look for</Label>
               <div className="flex flex-wrap gap-4 text-sm">
                 {(["group", "page", "both"] as const).map((k) => (
                   <label key={k} className="flex items-center gap-1.5">
                     <input type="radio" name="src-kind" checked={kind === k} onChange={() => setKind(k)} />
-                    {k === "group" ? "Groups" : k === "page" ? "Pages" : "Dono"}
+                    {k === "group" ? "Groups" : k === "page" ? "Pages" : "Both"}
                   </label>
                 ))}
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label>Mil jane par</Label>
+              <Label>When found</Label>
               <div className="space-y-1 text-sm">
                 <label className="flex items-center gap-1.5">
                   <input type="radio" name="src-join" checked={join} onChange={() => setJoin(true)} />
-                  Groups join karo / pages follow karo (aur records mein save)
+                  Join groups / follow pages (and save in records)
                 </label>
                 <label className="flex items-center gap-1.5">
                   <input type="radio" name="src-join" checked={!join} onChange={() => setJoin(false)} />
-                  Sirf records mein save karo (join/follow nahi)
+                  Only save in records (no join/follow)
                 </label>
               </div>
             </div>
             <label className="flex items-center gap-1.5 text-sm">
               <input type="checkbox" checked={recheck} onChange={(e) => setRecheck(e.target.checked)} />
-              Jo groups pichle 14 din mein reject hue the unhein dobara check karo
+              Re-check groups rejected in the last 14 days
             </label>
             <p className="text-xs text-muted-foreground">
-              Agent har group/page ke kai posts dekh kar judge karta hai ke wahan sach mein comments/replies aa rahe hain
-              (sirf pehli post nahi). Min comments {state.settings.sourcing.minComments}, min members {state.settings.sourcing.minMembers} (Configurations se).
+              The agent judges each group/page from several of its posts, checking whether comments/replies are really coming in
+              (not just the first post). Min comments {state.settings.sourcing.minComments}, min members {state.settings.sourcing.minMembers} (from Configurations).
             </p>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>

@@ -56,7 +56,7 @@ export function AgentQuestionsCard() {
         <div className="mb-4 space-y-3">
             {qs.map((q) => (
                 <div key={q.threadId} className="rounded-xl border border-primary/40 bg-card p-4">
-                    <div className="text-sm font-semibold">Agent ko aap ki madad chahiye: {q.name}</div>
+                    <div className="text-sm font-semibold">The agent needs your help: {q.name}</div>
                     <div className="mt-2 space-y-1 text-sm text-muted-foreground">
                         {q.messages.map((m, i) => (
                             <div key={i}>“{m}”</div>
@@ -65,12 +65,12 @@ export function AgentQuestionsCard() {
                     <div className="mt-2 text-sm">{q.question}</div>
                     <Textarea
                         className="mt-2"
-                        placeholder="Aap ka jawab (AI isay natural andaz mein bhejega)…"
+                        placeholder="Your answer (the AI will send it in a natural tone)…"
                         value={text[q.threadId] ?? ""}
                         onChange={(e) => setText((t) => ({ ...t, [q.threadId]: e.target.value }))}
                     />
                     <Button className="mt-2" onClick={() => send(q)}>
-                        Jawab bhejein
+                        Send answer
                     </Button>
                 </div>
             ))}

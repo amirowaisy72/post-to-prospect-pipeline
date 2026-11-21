@@ -42,12 +42,12 @@ export function SourceAnalysisSheet({
       <SheetContent side="left" className="w-full overflow-y-auto sm:max-w-lg">
         <SheetHeader>
           <SheetTitle className="text-xl">{source?.name || "Source"}</SheetTitle>
-          <SheetDescription>Is group/page par AI Analysis ka poora record.</SheetDescription>
+          <SheetDescription>The full AI Analysis record for this group/page.</SheetDescription>
         </SheetHeader>
 
         {!data && !error && (
           <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Hisaab ho raha hai…
+            <Loader2 className="size-4 animate-spin" /> Calculating…
           </p>
         )}
         {error && <p className="mt-6 text-sm text-destructive">{error}</p>}
@@ -57,21 +57,21 @@ export function SourceAnalysisSheet({
             <section className="grid grid-cols-2 gap-3 text-sm">
               <Box label="Posts" value={data.posts} />
               <Box label="Comments + replies" value={data.comments + data.replies} />
-              <Box label="Kul log (parhne laiq)" value={data.checkable} />
-              <Box label="AI se guzre" value={data.checked} tone="ok" />
-              <Box label="Abhi check nahi hue" value={data.unchecked} tone={data.unchecked > 0 ? "warn" : "ok"} wide />
+              <Box label="Total people (readable)" value={data.checkable} />
+              <Box label="Checked by AI" value={data.checked} tone="ok" />
+              <Box label="Not checked yet" value={data.unchecked} tone={data.unchecked > 0 ? "warn" : "ok"} wide />
             </section>
             <p className="text-xs text-muted-foreground">
-              “Check nahi hue” wo log hain jin ko abhi tak kisi bhi query mein AI ne nahi parha, jaise naye scrape huay posts ke log.
+              “Not checked yet” are the people the AI hasn't read in any query so far, e.g. people from newly scraped posts.
             </p>
 
             <section>
               <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Is par chali hui queries ({data.runs.length})
+                Queries run on this ({data.runs.length})
               </h3>
               {data.runs.length === 0 ? (
                 <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                  Abhi is par koi query nahi chali. AI Analysis page se shuru karein.
+                  No query has run on this yet. Start one from the AI Analysis page.
                 </p>
               ) : (
                 <ul className="space-y-3">
@@ -80,13 +80,13 @@ export function SourceAnalysisSheet({
                       <p className="font-medium text-foreground">{r.criteria}</p>
                       <div className="flex flex-wrap items-center gap-2">
                         <RunStatusBadge run={r} />
-                        <Badge variant="outline" className="tabular">{r.matchesHere} matches yahan se</Badge>
+                        <Badge variant="outline" className="tabular">{r.matchesHere} matches from here</Badge>
                       </div>
                       <p className="text-xs text-muted-foreground tabular">
-                        {r.checkedHere} log check ho chuke · {r.pendingHere} baaqi (is query ke liye) · {r.provider === "ollama" ? "Ollama" : "Gemini"} {r.model} · {fmtDate(r.createdAt)}
+                        {r.checkedHere} people checked · {r.pendingHere} remaining (for this query) · {r.provider === "ollama" ? "Ollama" : "Gemini"} {r.model} · {fmtDate(r.createdAt)}
                       </p>
                       <Button asChild size="sm" variant="outline">
-                        <Link to="/analysis/$runId" params={{ runId: r.id }}>Natija dekhein</Link>
+                        <Link to="/analysis/$runId" params={{ runId: r.id }}>View result</Link>
                       </Button>
                     </li>
                   ))}

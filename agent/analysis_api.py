@@ -33,7 +33,7 @@ def build_router(db) -> APIRouter:
         b = await _body(request)
         run_id, err = eng.start_run(db, b)
         if err:
-            return _err(err, 409 if "pehle se" in err else 400)
+            return _err(err, 409 if "already running" in err else 400)
         return {"id": run_id}
 
     @r.get("/analysis/runs")
@@ -56,7 +56,7 @@ def build_router(db) -> APIRouter:
         b = await _body(request)
         new_id, err = eng.resume_run(db, run_id, b)
         if err:
-            return _err(err, 409 if "pehle se" in err else 400)
+            return _err(err, 409 if "already running" in err else 400)
         return {"id": new_id}
 
     @r.post("/analysis/runs/{run_id}/quantity")
@@ -65,7 +65,7 @@ def build_router(db) -> APIRouter:
         try:
             q = int(b.get("quantity"))
         except (TypeError, ValueError):
-            return _err("quantity number honi chahiye")
+            return _err("quantity must be a number")
         ok, msg = eng.set_quantity(db, run_id, q)
         if not ok:
             return _err(msg)
@@ -74,7 +74,7 @@ def build_router(db) -> APIRouter:
     @r.post("/analysis/runs/{run_id}/delete")
     def delete(run_id: str):
         if not eng.delete_run(db, run_id):
-            return _err("Chalti hui analysis delete nahi ho sakti - pehle Stop karein", 409)
+            return _err("A running analysis cannot be deleted - stop it first", 409)
         return {"ok": True}
 
     @r.get("/analysis/source/{source_id}")

@@ -53,7 +53,7 @@ function PostDetailPage() {
       <>
         <PageHeader
           title={missing ? "Post not found" : "Loading…"}
-          description={missing ? "Ye post ab data mein nahi hai." : "Agent se post la raha hoon."}
+          description={missing ? "This post is no longer in the data." : "Fetching the post from the agent."}
         />
         {back}
       </>
@@ -68,7 +68,7 @@ function PostDetailPage() {
       toast.error(r.error);
       return;
     }
-    toast.success("Sync shuru ho gaya");
+    toast.success("Sync started");
     refresh();
   };
 
@@ -128,12 +128,12 @@ function PostDetailPage() {
               Comments ({post.comments.length}) · Replies ({totalReplies})
             </CardTitle>
             <CardDescription>
-              Facebook jis tarteeb mein dikhata hai usi tarteeb mein. Waqt exact hai jab Facebook deta hai, warna label (jaise 5d) approximate.
+              In the same order Facebook shows them. The time is exact when Facebook provides it, otherwise the label (e.g. 5d) is approximate.
             </CardDescription>
           </CardHeader>
           <CardContent>
             {post.comments.length === 0 ? (
-              <EmptyState title="Is post ke comments abhi collect nahi hue" />
+              <EmptyState title="No comments collected for this post yet" />
             ) : (
               <div className="space-y-5">
                 {post.comments.map((c, ci) => (

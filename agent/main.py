@@ -922,7 +922,7 @@ async def agent_session_check_endpoint(request: Request):
     same check a send runs. A dead browser is relaunched first;
     the result names the state + the structured detail, so the
     page can say plainly what to do next ("Session OK" or
-    "Abhi bhi empty — browser restart karein")."""
+    "Still empty — restart the browser")."""
     account = _browser_account(await _read_body_account(request))
 
     def _check(page):
@@ -1026,17 +1026,17 @@ def _resume_after_help() -> str:
     global _chat_start_busy, _chat_start_thread_id
     payload = help_requests.resolve()
     if not payload:
-        return "Theek hai — agent agle check par kaam jaari rakhega."
+        return "OK — the agent will continue on the next check."
     with _lock:
         if _chat_start_busy or _running_job_id is not None:
             return (
-                "Agent abhi masroof hai — thodi der baad Inbox mein "
-                "'Send to Messenger now' dabayein."
+                "The agent is busy right now — press 'Send to Messenger now' in Inbox "
+                "again in a little while."
             )
         _chat_start_busy = True
         _chat_start_thread_id = payload.get("threadId") or ""
     threading.Thread(target=_run_chat_start, args=(payload,), daemon=True).start()
-    return "Shukriya — agent ne wahi message dobara bhejna shuru kar diya."
+    return "Thank you — the agent has started sending that message again."
 
 
 @app.get("/agent/help")
@@ -1061,7 +1061,7 @@ async def agent_help_pin_endpoint(request: Request):
     pin = str((body or {}).get("pin") or "").strip() if isinstance(body, dict) else ""
     if not (pin.isdigit() and 4 <= len(pin) <= 8):
         return JSONResponse(
-            status_code=400, content={"detail": "PIN sirf 4 se 8 digits ka hota hai."}
+            status_code=400, content={"detail": "A PIN is only 4 to 8 digits."}
         )
     help_requests.set_pin(pin)
     agent_log("Messenger PIN received from the app (value not logged)")
@@ -1078,9 +1078,9 @@ async def agent_help_open_window_endpoint(request: Request):
     agent_log("help window opened on Messenger")
     return {
         "ok": True,
-        "detail": "Chrome window khul gayi. Masla khud theek karein "
-        "(PIN daalein / popup band karein), phir "
-        "'Maine theek kar diya' dabayein.",
+        "detail": "The Chrome window is open. Fix the problem yourself "
+        "(enter the PIN / close the popup), then "
+        "press 'I fixed it — Continue'.",
     }
 
 
@@ -1137,10 +1137,10 @@ def agent_activity_endpoint():
     if _running_job_id is not None:
         job = db.get_job(_running_job_id) or {}
         what = {
-            "collect": "groups/pages dhoond raha hai",
-            "scrape": "posts scrape kar raha hai",
-            "sync": "post sync kar raha hai",
-        }.get(job.get("kind"), "kaam kar raha hai")
+            "collect": "finding groups/pages",
+            "scrape": "scraping posts",
+            "sync": "syncing posts",
+        }.get(job.get("kind"), "working")
         return {"state": "busy", "detail": what, "watching": _c.is_watching()}
     return {"state": a["state"], "detail": a["detail"], "watching": _c.is_watching()}
 
@@ -1159,7 +1159,7 @@ def agent_questions_endpoint():
 async def agent_questions_answer_endpoint(request: Request):
     b = await _ai_body(request)
     if not questions.answer(str(b.get("threadId") or ""), str(b.get("answer") or "")):
-        return JSONResponse(status_code=404, content={"detail": "sawal nahi mila"})
+        return JSONResponse(status_code=404, content={"detail": "question not found"})
     return {"ok": True}
 
 

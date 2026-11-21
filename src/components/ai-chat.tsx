@@ -172,7 +172,7 @@ export function AiChat() {
             <ConversationEmptyState>
               <HunterAvatar size={56} />
               <div className="space-y-1">
-                <h3 className="text-base font-bold text-foreground">Kya poochna hai?</h3>
+                <h3 className="text-base font-bold text-foreground">What do you want to ask?</h3>
                 <p className="max-w-sm text-sm text-muted-foreground">
                   Ask Hunter AI to summarise leads, draft a first message, or explain the lead rules.
                 </p>

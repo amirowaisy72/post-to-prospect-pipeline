@@ -75,7 +75,7 @@ export interface AgentJob {
 export const isJobLive = (j: { status: string } | null | undefined) =>
   !!j && (j.status === "running" || j.status === "stop-requested");
 
-const DOWN = "Agent chal nahi raha — run-agent.bat chalayen.";
+const DOWN = "The agent is not running — start run-agent.bat.";
 
 async function call<T>(
   agentUrl: string,

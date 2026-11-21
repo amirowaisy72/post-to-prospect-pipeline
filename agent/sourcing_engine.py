@@ -371,14 +371,14 @@ def judge(counts, seen, min_comments):
     if seen < 5:
         return (
             False,
-            f"sirf {seen} post(s) nazar aayi (kam az kam 5 chahiye)",
+            f"only {seen} post(s) seen (at least 5 needed)",
             active,
             need,
         )
     if active < need:
         return (
             False,
-            f"{seen} posts mein se sirf {active} par {thr}+ comments (chahiye {need})",
+            f"only {active} of {seen} posts have {thr}+ comments (need {need})",
             active,
             need,
         )
@@ -431,9 +431,9 @@ def check_activity(page, url, min_comments, note=None, should_stop=lambda: False
     if not best or best["seen"] == 0:
         snapshot(page, "activity-no-posts", note)
         res["why"] = (
-            "private group (posts nazar nahi aaye)"
+            "private group (posts not visible)"
             if best and best["private"]
-            else "page par koi post detect nahi hui (debug snapshot dekhen)"
+            else "no post detected on the page (see debug snapshot)"
         )
         res["private"] = bool(best and best["private"])
         return res
@@ -605,7 +605,7 @@ def delete_source(page, db, source_id, force=False, note=None):
     are removed. Returns {ok, left, detail}."""
     src = db.get_source_by_id(source_id)
     if src is None:
-        return {"ok": False, "left": False, "detail": "source nahi mila"}
+        return {"ok": False, "left": False, "detail": "source not found"}
     left = False
     if (src.get("status") or "") == "joined" and src.get("url"):
         try:
@@ -621,7 +621,7 @@ def delete_source(page, db, source_id, force=False, note=None):
             return {
                 "ok": False,
                 "left": False,
-                "detail": f"Facebook par {what} nahi ho saka — record rakha hai",
+                "detail": f"could not {what} on Facebook — record kept",
             }
     db.delete_source(source_id)
     try:
@@ -636,9 +636,9 @@ def delete_source(page, db, source_id, force=False, note=None):
         "ok": True,
         "left": left,
         "detail": (
-            "Facebook se leave/unfollow kiya aur record hata diya"
+            "Left/unfollowed on Facebook and removed the record"
             if left
-            else "record hata diya"
+            else "record removed"
         ),
     }
 
@@ -1268,13 +1268,13 @@ def run_collect(worker, page, db, job, should_stop, note=None):
                             old = _recently_rejected(db, url)
                             if old:
                                 counts["remembered"] += 1
-                                note(f"skip (pehle dekha, {old}): {cand['name']}")
+                                note(f"skip (seen before, {old}): {cand['name']}")
                                 continue
                         members = cand.get("member_count")
                         if members is not None and members < min_members:
                             reject(
                                 cand,
-                                f"sirf {members} members (chahiye {min_members})",
+                                f"only {members} members (need {min_members})",
                                 "few_members",
                             )
                             continue
@@ -1285,14 +1285,14 @@ def run_collect(worker, page, db, job, should_stop, note=None):
                         ):
                             reject(
                                 cand,
-                                "search card ke mutabiq group kam active hai",
+                                "group is less active per the search card",
                                 "inactive",
                             )
                             continue
                         if cand.get("private"):
                             reject(
                                 cand,
-                                "private group: join kiye baghair posts nahi dikhte",
+                                "private group: posts are not visible without joining",
                                 "private",
                             )
                             continue
@@ -1304,7 +1304,7 @@ def run_collect(worker, page, db, job, should_stop, note=None):
                         if members is not None and members < min_members:
                             reject(
                                 cand,
-                                f"sirf {members} members (chahiye {min_members})",
+                                f"only {members} members (need {min_members})",
                                 "few_members",
                             )
                             continue
@@ -1316,7 +1316,7 @@ def run_collect(worker, page, db, job, should_stop, note=None):
                             if kind == "group":
                                 r = join_group(work, url, note)
                                 if r == "failed":
-                                    reject(cand, "join nahi ho saka", "join_failed")
+                                    reject(cand, "could not join", "join_failed")
                                     continue
                                 status = "joined" if r == "joined" else "not-joined"
                                 if r == "pending":
@@ -1361,12 +1361,12 @@ def run_collect(worker, page, db, job, should_stop, note=None):
                 if should_stop():
                     stopped = True
         msg = (
-            f"{len(saved)} source save hue (chahiye {want}). Checked {checked}: "
-            f"{counts['already']} pehle se, {counts['remembered']} pehle reject hue the, {counts['few_members']} kam members, "
-            f"{counts['inactive']} inactive, {counts['private']} private, {counts['join_failed']} join fail"
+            f"{len(saved)} sources saved (need {want}). Checked {checked}: "
+            f"{counts['already']} already saved, {counts['remembered']} rejected before, {counts['few_members']} too few members, "
+            f"{counts['inactive']} inactive, {counts['private']} private, {counts['join_failed']} join failed"
         )
         if len(saved) < want and not stopped:
-            msg += ". Search results khatam ho gaye"
+            msg += ". Search results exhausted"
         _finish(
             db,
             job_id,
@@ -1431,7 +1431,7 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
             else set()
         )
         links = feed_post_links(page, url, known, limit, note, should_stop)
-        note(f"{len(links)} naye post links mile")
+        note(f"{len(links)} new post links found")
         done = failed = 0
         problems = []
         stopped = False
@@ -1457,13 +1457,13 @@ def run_scrape(worker, page, db, job, should_stop, note=None):
             _pause(2.0, 4.5)
         if source_id:
             db.touch_source_scraped(source_id, _iso(_now()))
-        msg = f"{done} post save hue" + (f", {failed} fail" if failed else "")
+        msg = f"{done} posts saved" + (f", {failed} failed" if failed else "")
         if not links:
             msg = (
-                "koi naya post nahi mila (debug snapshot agent/debug mein ho sakta hai)"
+                "no new post found (a debug snapshot may be in agent/debug)"
             )
         if problems:
-            msg += f". Kam comments mile: {len(problems)} post(s) mein"
+            msg += f". Few comments found: in {len(problems)} post(s)"
         _finish(
             db,
             job_id,
@@ -1518,7 +1518,7 @@ def run_sync(worker, page, db, job, should_stop, note=None):
                     {**c, "replies": [dict(r) for r in c.get("replies") or []]}
                     for c in old.get("comments") or []
                 ]
-                notes.append("kam comments dikhe, purana data rakha")
+                notes.append("few comments seen, kept the old data")
             if not data["text"]:
                 data["text"] = old.get("text") or ""
             if not data["author_name"]:
@@ -1535,7 +1535,7 @@ def run_sync(worker, page, db, job, should_stop, note=None):
             done += 1
             db.update_job(job_id, posts_processed=done, new_posts=0)
             _pause(2.0, 4.0)
-        msg = f"{done} post sync hue" + (
+        msg = f"{done} posts synced" + (
             f" ({'; '.join(sorted(set(notes)))})" if notes else ""
         )
         _finish(db, job_id, "stopped" if stopped else "done", msg, posts_processed=done)

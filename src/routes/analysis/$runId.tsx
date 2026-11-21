@@ -133,7 +133,7 @@ function AnalysisQueryPage() {
     void load();
   };
   const removeAll = async () => {
-    if (!window.confirm("Ye analysis delete kar dein? (Leads mein gaye log delete nahi honge)")) return;
+    if (!window.confirm("Delete this analysis? (People already in Leads will not be deleted)")) return;
     for (const r of attempts) {
       const x = await deleteAnalysis(agentUrl, r.id);
       if (!x.ok) {
@@ -147,7 +147,7 @@ function AnalysisQueryPage() {
     if (!liveAttempt) return;
     const q = Math.floor(Number(shrinkTo));
     if (!q || q < 1) {
-      toast.error("1 ya us se bara number likhein");
+      toast.error("Enter a number of 1 or more");
       return;
     }
     const r = await shrinkAnalysis(agentUrl, liveAttempt.id, q);
@@ -155,23 +155,23 @@ function AnalysisQueryPage() {
       toast.error(r.error);
       return;
     }
-    toast.success(`Ab ${q} matches milte hi analysis rukh jayegi aur complete ho jayegi`);
+    toast.success(`Once ${q} matches are found, the analysis will stop and complete`);
     setShrinkTo("");
   };
   const addOne = (m: AnalysisMatch) => {
     if (inLeads(m)) return;
     saveLeads([toLead(m, accountId)], focus?.progress.posts ?? 0);
-    toast.success(`${m.name} Leads mein add ho gaya`);
+    toast.success(`${m.name} added to Leads`);
   };
   const addAll = () => {
     if (notInLeads.length === 0) return;
     saveLeads(notInLeads.map((m) => toLead(m, accountId)), focus?.progress.posts ?? 0);
-    toast.success(`${notInLeads.length} log Leads mein add ho gaye`);
+    toast.success(`${notInLeads.length} people added to Leads`);
   };
 
   const back = (
     <Button asChild variant="ghost" size="sm" className="mb-3 -ml-2">
-      <Link to="/analysis"><ChevronLeft /> Sab analyses</Link>
+      <Link to="/analysis"><ChevronLeft /> All analyses</Link>
     </Button>
   );
 
@@ -179,14 +179,14 @@ function AnalysisQueryPage() {
     return (
       <>
         {back}
-        <EmptyState title="Ye analysis nahi mili">Shayad delete ho chuki hai.</EmptyState>
+        <EmptyState title="This analysis was not found">It may have been deleted.</EmptyState>
       </>
     );
   if (!anchor || !focus)
     return (
       <>
         {back}
-        <p className="text-sm text-muted-foreground">Load ho raha hai…</p>
+        <p className="text-sm text-muted-foreground">Loading…</p>
       </>
     );
 
@@ -242,34 +242,34 @@ function AnalysisQueryPage() {
           </div>
           <Progress value={percent} />
           <div className="grid gap-2 text-xs text-muted-foreground tabular sm:grid-cols-3 lg:grid-cols-6">
-            <span>{p.people ?? 0} kul log</span>
-            <span>{p.excluded ?? 0} Leads mein pehle se (skip)</span>
-            <span>{p.reused ?? 0} pehle se check shuda</span>
-            <span>{p.trivial ?? 0} khali comments</span>
+            <span>{p.people ?? 0} people total</span>
+            <span>{p.excluded ?? 0} already in Leads (skipped)</span>
+            <span>{p.reused ?? 0} already checked</span>
+            <span>{p.trivial ?? 0} empty comments</span>
             <span>{p.screened ?? 0} screened</span>
-            <span>{p.judged ?? 0} detail check</span>
+            <span>{p.judged ?? 0} detail-checked</span>
           </div>
           {(p.failed ?? 0) > 0 && <p className="text-xs text-muted-foreground">{p.failed} AI errors{p.lastError ? ` · last: ${p.lastError}` : ""}</p>}
           {focus.status === "failed" && focus.error && <p className="text-sm text-destructive">{focus.error}</p>}
           {!live && canResume(focus) && (
             <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 p-3 text-sm">
-              <span>Resume se pehle: kitne matches par rukna hai? (abhi <b className="tabular">{focus.matchCount}</b> mile hain)</span>
-              <Input type="number" min={1} value={stopAt} onChange={(e) => setStopAt(e.target.value)} placeholder="khali = poora data" className="h-8 w-36 tabular" />
-              <span className="text-xs text-muted-foreground">Itne matches milte hi analysis khud ruk kar complete ho jayegi.</span>
+              <span>Before resuming: stop after how many matches? (<b className="tabular">{focus.matchCount}</b> found so far)</span>
+              <Input type="number" min={1} value={stopAt} onChange={(e) => setStopAt(e.target.value)} placeholder="empty = all data" className="h-8 w-36 tabular" />
+              <span className="text-xs text-muted-foreground">Once this many matches are found, the analysis will stop and complete on its own.</span>
             </div>
           )}
           {liveAttempt && (
             <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 p-3 text-sm">
-              <span>Abhi <b className="tabular">{liveAttempt.matchCount}</b> matches mile hain.</span>
+              <span><b className="tabular">{liveAttempt.matchCount}</b> matches found so far.</span>
               {(liveAttempt.progress.stopAt ?? 0) > 0 ? (
-                <Badge variant="accent">Limit: {liveAttempt.progress.stopAt} matches par ruk jayegi</Badge>
+                <Badge variant="accent">Limit: will stop at {liveAttempt.progress.stopAt} matches</Badge>
               ) : (
-                <span className="text-muted-foreground">Koi limit nahi, poora data check hoga.</span>
+                <span className="text-muted-foreground">No limit — all data will be checked.</span>
               )}
-              <span>Naya limit:</span>
-              <Input type="number" min={1} value={shrinkTo} onChange={(e) => setShrinkTo(e.target.value)} placeholder={`jaise ${liveAttempt.matchCount + 5}`} className="h-8 w-28 tabular" />
-              <Button size="sm" variant="outline" onClick={() => void shrink()} disabled={!shrinkTo}>Set karein</Button>
-              <span className="text-xs text-muted-foreground">Itne matches milte hi analysis khud ruk kar complete ho jayegi; baaqi log check nahi honge.</span>
+              <span>New limit:</span>
+              <Input type="number" min={1} value={shrinkTo} onChange={(e) => setShrinkTo(e.target.value)} placeholder={`e.g. ${liveAttempt.matchCount + 5}`} className="h-8 w-28 tabular" />
+              <Button size="sm" variant="outline" onClick={() => void shrink()} disabled={!shrinkTo}>Set</Button>
+              <span className="text-xs text-muted-foreground">Once this many matches are found, the analysis will stop and complete on its own; the remaining people will not be checked.</span>
             </div>
           )}
         </CardContent>
@@ -279,8 +279,8 @@ function AnalysisQueryPage() {
         <div className="mt-6 space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="mr-2 text-lg font-bold text-foreground">Results</h2>
-            <Badge variant="success"><Sparkles className="size-3" /> {ranked.length} log</Badge>
-            <Badge variant="neutral">{ranked.length - notInLeads.length} Leads mein</Badge>
+            <Badge variant="success"><Sparkles className="size-3" /> {ranked.length} people</Badge>
+            <Badge variant="neutral">{ranked.length - notInLeads.length} in Leads</Badge>
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <Select value={sort} onValueChange={(v) => { setSort(v as typeof sort); setPage(0); }}>
                 <SelectTrigger className="w-[160px]" aria-label="Sort results"><SelectValue /></SelectTrigger>
@@ -289,8 +289,8 @@ function AnalysisQueryPage() {
                   <SelectItem value="recent">Most recent</SelectItem>
                 </SelectContent>
               </Select>
-              {notInLeads.length > 0 && <Button variant="outline" size="sm" onClick={addAll}>Baaqi {notInLeads.length} bhi Leads mein dalein</Button>}
-              <Button asChild variant="link" size="sm"><Link to="/leads">Leads dekhein →</Link></Button>
+              {notInLeads.length > 0 && <Button variant="outline" size="sm" onClick={addAll}>Add the remaining {notInLeads.length} to Leads too</Button>}
+              <Button asChild variant="link" size="sm"><Link to="/leads">View Leads →</Link></Button>
             </div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
@@ -304,7 +304,7 @@ function AnalysisQueryPage() {
                         {m.name} <ExternalLink className="size-3" />
                       </a>
                       <div className="flex shrink-0 gap-1.5">
-                        <Badge variant="outline">{m.role === "poster" ? "Post ki" : "Comment kiya"}</Badge>
+                        <Badge variant="outline">{m.role === "poster" ? "Posted" : "Commented"}</Badge>
                         <Badge variant="accent" className="tabular">{m.score}%</Badge>
                       </div>
                     </div>
@@ -312,7 +312,7 @@ function AnalysisQueryPage() {
                     <blockquote className="border-l-2 border-primary pl-3 text-sm italic text-muted-foreground">“{m.quote}”</blockquote>
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="min-w-0 text-xs text-muted-foreground">
-                        <p>{m.lastActiveAt ? `Last active ${fmtDate(m.lastActiveAt)}` : "Last active maloom nahi"} · {m.activityCount} item{m.activityCount === 1 ? "" : "s"}</p>
+                        <p>{m.lastActiveAt ? `Last active ${fmtDate(m.lastActiveAt)}` : "Last active unknown"} · {m.activityCount} item{m.activityCount === 1 ? "" : "s"}</p>
                         {m.postUrl && (
                           <a href={m.postUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-primary">
                             {m.postTitle || "Post"} <ExternalLink className="size-3" />
@@ -320,9 +320,9 @@ function AnalysisQueryPage() {
                         )}
                       </div>
                       {added ? (
-                        <Badge variant="success" className="shrink-0"><CheckCircle2 className="size-3" /> Leads mein hai</Badge>
+                        <Badge variant="success" className="shrink-0"><CheckCircle2 className="size-3" /> In Leads</Badge>
                       ) : (
-                        <Button size="sm" onClick={() => addOne(m)} className="shrink-0"><Plus /> Leads mein dalein</Button>
+                        <Button size="sm" onClick={() => addOne(m)} className="shrink-0"><Plus /> Add to Leads</Button>
                       )}
                     </div>
                   </CardContent>
@@ -334,8 +334,8 @@ function AnalysisQueryPage() {
             <div className="flex items-center justify-between text-sm text-muted-foreground">
               <span>Page {safePage + 1} / {pages}</span>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => setPage(safePage - 1)} disabled={safePage === 0}>Pichla</Button>
-                <Button size="sm" variant="outline" onClick={() => setPage(safePage + 1)} disabled={safePage >= pages - 1}>Agla</Button>
+                <Button size="sm" variant="outline" onClick={() => setPage(safePage - 1)} disabled={safePage === 0}>Previous</Button>
+                <Button size="sm" variant="outline" onClick={() => setPage(safePage + 1)} disabled={safePage >= pages - 1}>Next</Button>
               </div>
             </div>
           )}
@@ -344,7 +344,7 @@ function AnalysisQueryPage() {
 
       {!live && ranked.length === 0 && (
         <div className="mt-6">
-          <EmptyState title="Abhi koi matching banda nahi mila">Resume karein, ya query ko thora broad likh kar naya analysis chalayen.</EmptyState>
+          <EmptyState title="No matching person found yet">Resume, or write the query a bit broader and run a new analysis.</EmptyState>
         </div>
       )}
     </>

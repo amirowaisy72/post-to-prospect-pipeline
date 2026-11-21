@@ -237,7 +237,7 @@ def _draft_reply_old(
     injectable for tests (defaults to httpx.post).
     """
     if not (gemini_key or "").strip():
-        print("chat: Gemini key missing - app ne key nahi bheji")
+        print("chat: Gemini key missing - the app did not send a key")
         return None
     import httpx
 
@@ -700,7 +700,7 @@ def _human_wait(note, who):
     import random
 
     secs = random.randint(3, 8)
-    note(f"chat: {who} ko jawab dene se pehle {secs}s ruk raha hoon")
+    note(f"chat: waiting {secs}s before replying to {who}")
     for _ in range(secs):
         if stop_requested():
             return
@@ -710,7 +710,7 @@ def _human_wait(note, who):
 def _watch_thread(
     worker, page, ctx, cfg, note, summary, thread_url, thread_id, row, inbox_row
 ):
-    set_activity("busy", "Jawab: " + str(row.get("profile_name") or ""))
+    set_activity("busy", "Reply: " + str(row.get("profile_name") or ""))
     try:
         return _watch_thread_inner(
             worker, page, ctx, cfg, note, summary, thread_url, thread_id, row, inbox_row
@@ -744,7 +744,7 @@ def _watch_thread_inner(
         "daily_cap"
     ]:
         summary["skipped"] += 1
-        note(f"chat: daily limit reached ({cfg['daily_cap']}) - {name} ko jawab nahi")
+        note(f"chat: daily limit reached ({cfg['daily_cap']}) - not replying to {name}")
         return
     if (
         need_reply
@@ -792,7 +792,7 @@ def _watch_thread_inner(
                 created_at=_now_iso(),
             )
     if batch and _STOP_RE.search(" ".join(batch)):
-        note(f"chat: {name} ne mana kiya - chat band")
+        note(f"chat: {name} declined - closing chat")
         db.set_chat_thread(thread_id, status="done", last_seen_text=last_text)
         return
     existing = db.list_chat_messages(thread_id)
@@ -816,32 +816,32 @@ def _watch_thread_inner(
     )
     if not draft:
         summary["skipped"] += 1
-        note("chat: AI draft failed - agle pass mein dobara")
+        note("chat: AI draft failed - retrying next pass")
         return
     up = draft.strip().upper()
     if up.startswith("SCHEDULE"):
         parsed = followups.parse(draft)
         if not parsed:
-            note(f"chat: {name} schedule samajh nahi aaya - skip")
+            note(f"chat: could not understand {name}'s schedule - skipping")
             db.set_chat_thread(thread_id, last_seen_text=last_text)
             return
         followups.save(thread_id, name, parsed[0])
-        note(f"chat: {name} ke saath follow-up {parsed[0]} par schedule hua")
+        note(f"chat: follow-up with {name} scheduled for {parsed[0]}")
         draft = parsed[1]
     if up.startswith("NO_REPLY"):
-        note(f"chat: {name} ko jawab ki zaroorat nahi")
+        note(f"chat: {name} does not need a reply")
         db.set_chat_thread(thread_id, last_seen_text=last_text)
         return
     if up.startswith("END_CHAT"):
-        note(f"chat: {name} chat band karna chahta hai")
+        note(f"chat: {name} wants to end the chat")
         db.set_chat_thread(thread_id, status="done", last_seen_text=last_text)
         return
     if up.startswith("ASK_USER"):
         q = draft.split(":", 1)[1].strip() if ":" in draft else ""
         questions.ask(
-            thread_id, name, batch or [last_text], q or "Is ka jawab kya dun?"
+            thread_id, name, batch or [last_text], q or "What should I reply to this?"
         )
-        note(f"chat: {name} ke baare mein aap se puchha ja raha hai")
+        note(f"chat: asking you about {name}")
         db.set_chat_thread(thread_id, last_seen_text=last_text)
         return
     sent_any = False
@@ -1222,7 +1222,7 @@ def _ai_first_message(payload, fallback, note):
     )
     text = _clean_draft(text)
     if err or not text:
-        note(f"chat: AI first message failed ({err or 'empty'}) - template use hoga")
+        note(f"chat: AI first message failed ({err or 'empty'}) - using template")
         return fallback
     print("chat: first message written by", provider, payload.get("model"))
     return text

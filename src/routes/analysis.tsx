@@ -146,14 +146,14 @@ function AnalysisHome() {
     !liveRun && !starting && !accountBlocked && !offline && modelOk && selected.length > 0 && criteria.trim().length >= 5;
 
   const guide = (() => {
-    if (offline) return { tone: "bad", text: "Agent chal nahi raha. run-agent.bat chalayen, phir page refresh karein." };
+    if (offline) return { tone: "bad", text: "The agent is not running. Start run-agent.bat, then refresh the page." };
     if (loaded && sources.length === 0)
-      return { tone: "info", text: "Pehle Data Sourcing page par kisi group/page ki posts scrape karein. Phir yahan wapas aayein." };
-    if (liveRun) return { tone: "info", text: "Ek analysis chal rahi hai. Neeche list mein us par click karke progress dekhein." };
-    if (!modelOk) return { tone: "bad", text: "AI model set nahi hai. Configurations mein model chun kar Test karein aur Save karein." };
-    if (selected.length === 0) return { tone: "info", text: "Step 1: left side se woh groups/pages chunein jin ka data check karna hai." };
-    if (criteria.trim().length < 5) return { tone: "info", text: "Step 2: right side par likhein ke aap kin logon ko dhoond rahe hain (apne alfaaz mein)." };
-    return { tone: "ok", text: "Sab tayyar hai. Neeche Start dabayein. Jo log Leads mein hain ya pehle check ho chuke, unhein dobara nahi bheja jayega." };
+      return { tone: "info", text: "First scrape posts from a group/page on the Data Sourcing page. Then come back here." };
+    if (liveRun) return { tone: "info", text: "An analysis is running. Click it in the list below to see its progress." };
+    if (!modelOk) return { tone: "bad", text: "No AI model is set. Pick a model in Configurations, Test it, and Save." };
+    if (selected.length === 0) return { tone: "info", text: "Step 1: on the left, pick the groups/pages whose data you want to check." };
+    if (criteria.trim().length < 5) return { tone: "info", text: "Step 2: on the right, write who you are looking for (in your own words)." };
+    return { tone: "ok", text: "Everything is ready. Click Start below. People already in Leads or already checked won't be sent again." };
   })();
   const guideClass =
     guide.tone === "bad"
@@ -174,7 +174,7 @@ function AnalysisHome() {
     <>
       <PageHeader
         title="AI Analysis"
-        description="Data chunein, likhein kin logon ko dhoondna hai, aur AI har post, comment aur reply parh kar unhein dhoond dega."
+        description="Pick data, write who you're looking for, and the AI will read every post, comment, and reply to find them."
       />
 
       <div className={`mb-6 flex items-start gap-2 rounded-lg border p-3 text-sm ${guideClass}`}>
@@ -186,21 +186,21 @@ function AnalysisHome() {
         <Card className="shadow-card lg:col-span-2">
           <CardHeader className="flex flex-row items-start justify-between space-y-0">
             <div>
-              <CardTitle className="text-base">1. Kis data par?</CardTitle>
+              <CardTitle className="text-base">1. Which data?</CardTitle>
               <CardDescription>
-                {sources.length} group/page jin ki posts scrape ho chuki hain · {accountName(state, accountId)}
+                {sources.length} group/page whose posts have been scraped · {accountName(state, accountId)}
               </CardDescription>
             </div>
             {sources.length > 0 && (
               <Button variant="ghost" size="sm" onClick={() => setSelected(selected.length === sources.length ? [] : sources.map((s) => s.id))}>
-                {selected.length === sources.length ? "Sab hatayen" : "Sab chunein"}
+                {selected.length === sources.length ? "Deselect all" : "Select all"}
               </Button>
             )}
           </CardHeader>
           <CardContent className="space-y-2">
             {sources.length === 0 && loaded ? (
-              <EmptyState title="Abhi koi scraped posts nahi">
-                <Link to="/data-sourcing" className="font-semibold text-primary">Data Sourcing</Link> page par posts scrape karein.
+              <EmptyState title="No scraped posts yet">
+                <Link to="/data-sourcing" className="font-semibold text-primary">Data Sourcing</Link> page — scrape posts there.
               </EmptyState>
             ) : (
               sources.map((s) => {
@@ -213,9 +213,9 @@ function AnalysisHome() {
                       <p className="text-xs text-muted-foreground tabular">{s.postCount} posts scraped</p>
                       {counts[s.id] && (
                         <div className="mt-1.5 flex flex-wrap gap-1.5">
-                          <Badge variant="outline" className="tabular">{counts[s.id]?.people ?? 0} unique log</Badge>
-                          <Badge variant="success" className="tabular">{(counts[s.id]?.people ?? 0) - (counts[s.id]?.unchecked ?? 0)} check ho chuke</Badge>
-                          <Badge variant="warning" className="tabular">{counts[s.id]?.unchecked ?? 0} naye (abhi koi analysis nahi)</Badge>
+                          <Badge variant="outline" className="tabular">{counts[s.id]?.people ?? 0} unique people</Badge>
+                          <Badge variant="success" className="tabular">{(counts[s.id]?.people ?? 0) - (counts[s.id]?.unchecked ?? 0)} checked</Badge>
+                          <Badge variant="warning" className="tabular">{counts[s.id]?.unchecked ?? 0} new (no analysis yet)</Badge>
                         </div>
                       )}
                     </div>
@@ -240,37 +240,37 @@ function AnalysisHome() {
 
         <Card className="h-fit shadow-card">
           <CardHeader>
-            <CardTitle className="text-base">2. Kya dhoondna hai?</CardTitle>
-            <CardDescription>Apne alfaaz mein likhein, jaise “Jo log YouTube ke liye software dhoond rahe hain”.</CardDescription>
+            <CardTitle className="text-base">2. What are you looking for?</CardTitle>
+            <CardDescription>In your own words, e.g. “People looking for software to create YouTube videos”.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="criteria">Kin logon ko dhoondna hai?</Label>
+              <Label htmlFor="criteria">Who are you looking for?</Label>
               <Textarea id="criteria" rows={5} value={criteria} onChange={(e) => setCriteria(e.target.value)} placeholder="e.g. People who need a software or tool to create YouTube videos faster and may pay for it." />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="qty">Kitne log chahiye?</Label>
+              <Label htmlFor="qty">How many people?</Label>
               <Input id="qty" type="number" min={1} max={500} value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} className="tabular" />
-              <p className="text-xs text-muted-foreground">Sab data check hota hai; behtareen itne log Leads mein chale jate hain.</p>
+              <p className="text-xs text-muted-foreground">All data is checked; the best of these go to Leads.</p>
             </div>
             <div className="rounded-lg border bg-muted/40 p-3 text-sm">
-              <p className="text-xs text-muted-foreground">AI model (Configurations se)</p>
+              <p className="text-xs text-muted-foreground">AI model (from Configurations)</p>
               <p className="mt-0.5 font-semibold text-foreground">
                 {provider === "ollama" ? "Ollama" : "Gemini"} · <span className="font-mono">{model || "—"}</span>
               </p>
               <Link to="/configurations" className="mt-1 inline-block text-xs font-semibold text-primary">
-                Model badalna ya test karna ho to Configurations kholen →
+                To change or test the model, open Configurations →
               </Link>
-              {provider === "gemini" && !geminiKey.trim() && <p className="mt-1 text-xs text-destructive">Gemini key Configurations mein save nahi hai.</p>}
+              {provider === "gemini" && !geminiKey.trim() && <p className="mt-1 text-xs text-destructive">The Gemini key is not saved in Configurations.</p>}
             </div>
             <Button className="w-full" size="lg" onClick={() => void start()} disabled={!canStart}>
               {starting ? <Loader2 className="animate-spin" /> : <Plus />}
-              Naya analysis shuru karein
+              Start a new analysis
             </Button>
-            {liveRun && <p className="text-xs text-muted-foreground">Ek waqt mein ek analysis chal sakti hai. Pehle chalti hui ko Stop karein.</p>}
+            {liveRun && <p className="text-xs text-muted-foreground">Only one analysis can run at a time. Stop the running one first.</p>}
             {accountBlocked && (
               <p className="rounded-lg border border-primary/25 bg-accent/60 p-3 text-xs text-accent-foreground">
-                Ye account {account?.status ?? "active nahi"} hai. Accounts page par Active karein.
+                This account is {account?.status ?? "not active"}. Activate it on the Accounts page.
               </p>
             )}
           </CardContent>
@@ -278,10 +278,10 @@ function AnalysisHome() {
       </div>
 
       <div className="mt-10">
-        <h2 className="text-lg font-bold text-foreground">Meri analyses ({groups.length})</h2>
-        <p className="mb-3 text-sm text-muted-foreground">Har query ka ek card. Click karein to us ka poora record khulega.</p>
+        <h2 className="text-lg font-bold text-foreground">My analyses ({groups.length})</h2>
+        <p className="mb-3 text-sm text-muted-foreground">One card per query. Click it to open its full record.</p>
         {loaded && groups.length === 0 ? (
-          <EmptyState title="Abhi koi analysis nahi">Upar se pehli query shuru karein.</EmptyState>
+          <EmptyState title="No analyses yet">Start your first query above.</EmptyState>
         ) : (
           <div className="space-y-3">
             {pageGroups.map((g) => {
@@ -312,10 +312,10 @@ function AnalysisHome() {
             <span>Page {gPage + 1} / {gPages}</span>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" onClick={() => setPage(gPage - 1)} disabled={gPage === 0}>
-                <ChevronLeft /> Pichla
+                <ChevronLeft /> Previous
               </Button>
               <Button size="sm" variant="outline" onClick={() => setPage(gPage + 1)} disabled={gPage >= gPages - 1}>
-                Agla <ChevronRight />
+                Next <ChevronRight />
               </Button>
             </div>
           </div>
