@@ -1141,7 +1141,7 @@ def _worker(db, run_id, params):
             batch = todo_screen[i : i + bsize]
             t0 = time.time()
             print(
-                f"analysis: screening batch {i // bsize + 1}/{math.ceil(len(todo_screen) / bsize)} ({len(batch)} log)",
+                f"analysis: screening batch {i // bsize + 1}/{math.ceil(len(todo_screen) / bsize)} ({len(batch)} people)",
                 flush=True,
             )
             scores, err = _screen(cfg, criteria, batch, training)
@@ -1172,7 +1172,7 @@ def _worker(db, run_id, params):
                     prog["failed"] += 1
             promising.sort(key=lambda t: -t[0])
             prog["candidates"] += len(promising)
-            push(f"Screening: {prog['screened']} / {prog['toScreen']} log")
+            push(f"Screening: {prog['screened']} / {prog['toScreen']} people")
             for s1, p in promising:
                 if should_end():
                     break

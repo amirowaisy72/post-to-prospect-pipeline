@@ -383,7 +383,7 @@ function AnalysisHome() {
       </div>
 
       <SourceAnalysisSheet agentUrl={agentUrl} source={panelFor} onClose={() => setPanelFor(null)} />
-      {trainingMode ? (
+      {trainingMode && (
         <AiChat
           key={`train-${accountId}`}
           trainingMode={{
@@ -399,8 +399,6 @@ function AnalysisHome() {
             },
           }}
         />
-      ) : (
-        <AiChat key={accountId} />
       )}
     </>
   );
