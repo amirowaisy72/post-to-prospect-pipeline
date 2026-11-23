@@ -30,6 +30,7 @@ export function toLead(m: AnalysisMatch, accountId: string): Lead {
     name: m.name,
     profileUrl: m.profileUrl,
     priority: "other",
+    ...(m.category ? { category: m.category } : {}),
     reason: `Match ${m.score}% — ${m.reason}`,
     quotedComment: m.quote,
     sourcePostId: `agent:${m.postId}`,

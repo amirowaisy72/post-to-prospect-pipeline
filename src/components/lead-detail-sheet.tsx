@@ -1,6 +1,7 @@
 import { Check, ExternalLink, RotateCcw, X } from "lucide-react";
 
 import { LeadStatusBadge, PriorityBadge } from "@/components/badges";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { fmtDate } from "@/lib/format";
@@ -27,6 +28,7 @@ export function LeadDetailSheet({ leadId, onClose }: { leadId: string | null; on
             </SheetHeader>
             <div className="mt-4 flex gap-2">
               <PriorityBadge priority={lead.priority} />
+              {lead.category && <Badge variant="info">{lead.category}</Badge>}
               <LeadStatusBadge status={lead.status} />
             </div>
 

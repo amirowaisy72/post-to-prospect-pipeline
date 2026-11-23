@@ -1,5 +1,6 @@
 import { Check, Copy, MessageSquarePlus, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import hunterMark from "@/assets/hunter-ai-mark.png";
 import { PRIORITY_LABEL } from "@/components/badges";
@@ -28,6 +29,7 @@ import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { chatAnalysis, suggestQuestions, saveTraining, type ClarifyQuestion, type Training } from "@/lib/analysis-client";
 import { accountName } from "@/lib/leadhunter-service";
 import { CHAT_SUGGESTIONS, DEFAULT_MODELS, demoConversation, mockReply, providerLabel, type ChatMessage } from "@/lib/mock-chat";
 import { useActiveAccountData, useStore } from "@/lib/store";
@@ -37,6 +39,8 @@ type Status = "ready" | "submitted" | "streaming";
 
 const THINK_MS = 700;
 const TICK_MS = 28;
+const CATEGORIES_QUESTION =
+  "Which categories should I tag matches with? (for example: beginner, rich, poor — or type your own, comma-separated)";
 
 function HunterAvatar({ size = 28 }: { size?: number }) {
   return <img src={hunterMark} alt="" width={size} height={size} className="shrink-0 rounded-md" style={{ width: size, height: size }} />;
@@ -60,19 +64,43 @@ function CopyAction({ text }: { text: string }) {
 
 const timeOf = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-export function AiChat() {
+export interface TrainingModeProps {
+  criteria: string;
+  sourceIds: string[];
+  onTrainingSaved: (t: Training) => void;
+  onSkip: () => void;
+}
+
+export function AiChat({ trainingMode }: { trainingMode?: TrainingModeProps }) {
   const { state } = useStore();
   const { accountId, posts, leads } = useActiveAccountData();
   const settings = state.settings;
+  const agentUrl = settings.agentUrl;
 
   const [provider, setProvider] = useState<AiProvider>(settings.provider);
   const model = provider === settings.provider ? settings.model : DEFAULT_MODELS[provider];
   const modelLabel = `${providerLabel(provider)} · ${model}`;
 
-  const [messages, setMessages] = useState<ChatMessage[]>(() => demoConversation(`${providerLabel(settings.provider)} · ${settings.model}`));
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    trainingMode ? [] : demoConversation(`${providerLabel(settings.provider)} · ${settings.model}`),
+  );
   const [status, setStatus] = useState<Status>("ready");
+  /** True while the replies on screen are demo replies, not real model answers. */
+  const [demo, setDemo] = useState(!trainingMode);
   const timers = useRef<number[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // ---- Training mode state ----
+  const [questions, setQuestions] = useState<ClarifyQuestion[] | null>(null);
+  /** Index of the question currently being answered; == questions.length means the categories question. */
+  const [qIndex, setQIndex] = useState(0);
+  const [answers, setAnswers] = useState<{ question: string; answer: string }[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [trainingDone, setTrainingDone] = useState(false);
+  const [trainingLoading, setTrainingLoading] = useState(!!trainingMode);
+  const [trainingError, setTrainingError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const trainingStartedFor = useRef<string | null>(null);
 
   const clearTimers = () => {
     timers.current.forEach((t) => window.clearTimeout(t));
@@ -96,44 +124,156 @@ export function AiChat() {
     [state, accountId, posts, leads, settings.leadRules.defaultLeadsCount],
   );
 
+  const askQuestion = useCallback((text: string) => {
+    setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text, model: modelLabel, at: new Date().toISOString() }]);
+  }, [modelLabel]);
+
+  const loadQuestions = useCallback(async () => {
+    if (!trainingMode) return;
+    setTrainingLoading(true);
+    setTrainingError(null);
+    const r = await suggestQuestions(agentUrl, {
+      accountId,
+      sourceIds: trainingMode.sourceIds,
+      criteria: trainingMode.criteria,
+      provider: settings.provider,
+      model: settings.model,
+      geminiKey: settings.geminiApiKey,
+      ollamaUrl: settings.ollamaUrl,
+    });
+    setTrainingLoading(false);
+    if (!r.ok) {
+      setTrainingError(r.error);
+      setMessages((m) => [
+        ...m,
+        { id: crypto.randomUUID(), role: "assistant", text: `I could not look at your data to prepare questions: ${r.error}`, at: new Date().toISOString() },
+      ]);
+      return;
+    }
+    const qs = r.value.questions ?? [];
+    setQuestions(qs);
+    if (qs.length === 0) {
+      setQIndex(0);
+      askQuestion(CATEGORIES_QUESTION);
+    } else {
+      setQIndex(0);
+      askQuestion(qs[0]?.text ?? "");
+    }
+  }, [trainingMode, agentUrl, accountId, settings.provider, settings.model, settings.geminiApiKey, settings.ollamaUrl, askQuestion]);
+
+  // Training mode: fetch the clarification questions once, on mount.
+  useEffect(() => {
+    if (!trainingMode) return;
+    const key = `${trainingMode.criteria}\n${[...trainingMode.sourceIds].sort().join(",")}`;
+    if (trainingStartedFor.current === key) return;
+    trainingStartedFor.current = key;
+    void loadQuestions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trainingMode?.criteria]);
+
   const stop = useCallback(() => {
     clearTimers();
     setStatus("ready");
     textareaRef.current?.focus();
   }, []);
 
+  /** Reveal an assistant reply a few characters at a time, like a streamed answer. */
+  const reveal = useCallback((full: string, label: string, delayMs: number) => {
+    const id = crypto.randomUUID();
+    timers.current.push(
+      window.setTimeout(() => {
+        setStatus("streaming");
+        setMessages((m) => [...m, { id, role: "assistant", text: "", model: label, at: new Date().toISOString() }]);
+        let shown = 0;
+        const tick = () => {
+          shown = Math.min(full.length, shown + 4 + Math.floor(Math.random() * 6));
+          setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, text: full.slice(0, shown) } : msg)));
+          if (shown < full.length) timers.current.push(window.setTimeout(tick, TICK_MS));
+          else {
+            setStatus("ready");
+            textareaRef.current?.focus();
+          }
+        };
+        tick();
+      }, delayMs),
+    );
+  }, []);
+
   const send = useCallback(
     (raw: string) => {
       const text = raw.trim();
       if (!text || status !== "ready") return;
+      // Training mode: wait for the questions to arrive before taking answers.
+      if (trainingMode && !questions) return;
       const now = new Date().toISOString();
       setMessages((m) => [...m, { id: crypto.randomUUID(), role: "user", text, at: now }]);
       setStatus("submitted");
 
-      const full = mockReply(text, ctx);
-      const id = crypto.randomUUID();
-      const label = modelLabel;
-      timers.current.push(
-        window.setTimeout(() => {
-          setStatus("streaming");
-          setMessages((m) => [...m, { id, role: "assistant", text: "", model: label, at: new Date().toISOString() }]);
-          // Reveal the reply a few characters at a time, like a streamed answer.
-          let shown = 0;
-          const tick = () => {
-            shown = Math.min(full.length, shown + 4 + Math.floor(Math.random() * 6));
-            setMessages((m) => m.map((msg) => (msg.id === id ? { ...msg, text: full.slice(0, shown) } : msg)));
-            if (shown < full.length) timers.current.push(window.setTimeout(tick, TICK_MS));
-            else {
+      // Training mode: free-form text is the answer to the current question.
+      if (trainingMode && questions) {
+        if (qIndex < questions.length) {
+          const q = questions[qIndex];
+          if (!q) return;
+          const nextAnswers = [...answers, { question: q.text, answer: text }];
+          setAnswers(nextAnswers);
+          const next = qIndex + 1;
+          setQIndex(next);
+          const nextQ = next < questions.length ? questions[next] : null;
+          timers.current.push(
+            window.setTimeout(() => {
+              askQuestion(nextQ ? nextQ.text : CATEGORIES_QUESTION);
               setStatus("ready");
               textareaRef.current?.focus();
-            }
-          };
-          tick();
-        }, THINK_MS),
-      );
+            }, THINK_MS),
+          );
+        } else {
+          // Answer to the categories question.
+          const parsed = text.split(",").map((c) => c.trim().toLowerCase()).filter(Boolean);
+          setCategories(parsed);
+          setTrainingDone(true);
+          timers.current.push(
+            window.setTimeout(() => {
+              askQuestion(
+                parsed.length > 0
+                  ? `Got it — matches will be tagged with: ${parsed.join(", ")}. Click "Save training & start analysis" when you are ready.`
+                  : `Got it — no categories. Matches will not be tagged. Click "Save training & start analysis" when you are ready.`,
+              );
+              setStatus("ready");
+              textareaRef.current?.focus();
+            }, THINK_MS),
+          );
+        }
+        textareaRef.current?.focus();
+        return;
+      }
+
+      // General chat: try the real agent first, fall back to demo replies.
+      const history = [...messages, { id: "new", role: "user" as const, text, at: now }].map((m) => ({
+        role: m.role as "user" | "assistant",
+        text: m.text,
+      }));
+      void (async () => {
+        const r = await chatAnalysis(agentUrl, {
+          accountId,
+          criteria: "",
+          provider,
+          model,
+          geminiKey: settings.geminiApiKey,
+          ollamaUrl: settings.ollamaUrl,
+          messages: history,
+        });
+        const real = r.ok && !r.value.error?.trim() && !!r.value.reply?.trim() ? r.value.reply : null;
+        if (real) {
+          setDemo(false);
+          reveal(real, modelLabel, 0);
+        } else {
+          setDemo(true);
+          reveal(mockReply(text, ctx), modelLabel, THINK_MS);
+        }
+      })();
       textareaRef.current?.focus();
     },
-    [status, ctx, modelLabel],
+    [status, ctx, modelLabel, messages, trainingMode, questions, qIndex, answers, askQuestion, agentUrl, accountId, provider, model, settings.geminiApiKey, settings.ollamaUrl, reveal],
   );
 
   const onSubmit = (msg: PromptInputMessage) => send(msg.text ?? "");
@@ -143,6 +283,19 @@ export function AiChat() {
     setStatus("ready");
     setMessages([]);
     textareaRef.current?.focus();
+  };
+
+  const saveAndStart = async () => {
+    if (!trainingMode || saving) return;
+    setSaving(true);
+    const training: Training = { rules: answers, categories };
+    const r = await saveTraining(agentUrl, { accountId, criteria: trainingMode.criteria, rules: answers, categories });
+    setSaving(false);
+    if (!r.ok) {
+      toast.error(r.error);
+      return;
+    }
+    trainingMode.onTrainingSaved(training);
   };
 
   const busy = status !== "ready";
@@ -155,15 +308,25 @@ export function AiChat() {
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-bold text-foreground">Hunter AI</p>
-            <Badge variant="neutral" className="text-[10px]">Demo replies</Badge>
+            {trainingMode ? (
+              <Badge variant="accent" className="text-[10px]">Training</Badge>
+            ) : demo ? (
+              <Badge variant="neutral" className="text-[10px]">Demo replies</Badge>
+            ) : (
+              <span className="font-mono text-[10px] text-muted-foreground">{modelLabel}</span>
+            )}
           </div>
           <p className="truncate text-xs text-muted-foreground">
-            Ask about your leads, posts and outreach · {ctx.accountName}
+            {trainingMode
+              ? "Answer a few questions so the analysis knows exactly who you want"
+              : `Ask about your leads, posts and outreach · ${ctx.accountName}`}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={newChat} disabled={messages.length === 0 && !busy}>
-          <MessageSquarePlus /> <span className="hidden sm:inline">New chat</span>
-        </Button>
+        {!trainingMode && (
+          <Button variant="outline" size="sm" onClick={newChat} disabled={messages.length === 0 && !busy}>
+            <MessageSquarePlus /> <span className="hidden sm:inline">New chat</span>
+          </Button>
+        )}
       </div>
 
       <Conversation className="bg-muted/30">
@@ -172,9 +335,13 @@ export function AiChat() {
             <ConversationEmptyState>
               <HunterAvatar size={56} />
               <div className="space-y-1">
-                <h3 className="text-base font-bold text-foreground">What do you want to ask?</h3>
+                <h3 className="text-base font-bold text-foreground">
+                  {trainingMode ? "Preparing your training questions…" : "What do you want to ask?"}
+                </h3>
                 <p className="max-w-sm text-sm text-muted-foreground">
-                  Ask Hunter AI to summarise leads, draft a first message, or explain the lead rules.
+                  {trainingMode
+                    ? "Hunter AI is looking at a sample of your data, then it will ask one question at a time."
+                    : "Ask Hunter AI to summarise leads, draft a first message, or explain the lead rules."}
                 </p>
               </div>
             </ConversationEmptyState>
@@ -212,7 +379,7 @@ export function AiChat() {
           {status === "submitted" && (
             <div className="flex items-center gap-3">
               <HunterAvatar />
-              <Shimmer className="text-sm">{`Thinking with ${modelLabel}…`}</Shimmer>
+              <Shimmer className="text-sm">{trainingMode && trainingLoading ? "Looking at your data…" : `Thinking with ${modelLabel}…`}</Shimmer>
             </div>
           )}
         </ConversationContent>
@@ -220,7 +387,25 @@ export function AiChat() {
       </Conversation>
 
       <div className="space-y-2 border-t bg-card px-4 py-3">
-        {messages.length === 0 && (
+        {trainingMode && trainingError && (
+          <div className="mx-auto flex max-w-3xl items-center justify-between gap-2 text-sm">
+            <span className="text-destructive">{trainingError}</span>
+            <Button type="button" variant="outline" size="sm" onClick={() => void loadQuestions()} disabled={trainingLoading}>
+              Try again
+            </Button>
+          </div>
+        )}
+        {trainingMode && (
+          <div className="mx-auto flex max-w-3xl gap-2">
+            <Button type="button" variant="outline" className="flex-1" onClick={trainingMode.onSkip} disabled={busy || saving}>
+              Skip
+            </Button>
+            <Button type="button" className="flex-1" onClick={() => void saveAndStart()} disabled={!trainingDone || busy || saving}>
+              {saving ? "Saving…" : "Save training & start analysis"}
+            </Button>
+          </div>
+        )}
+        {!trainingMode && messages.length === 0 && (
           <Suggestions>
             {CHAT_SUGGESTIONS.map((s) => (
               <Suggestion key={s} suggestion={s} onClick={send} disabled={busy} />
@@ -230,7 +415,7 @@ export function AiChat() {
         <PromptInput onSubmit={onSubmit} className="mx-auto max-w-3xl">
           <PromptInputTextarea
             ref={textareaRef}
-            placeholder="Message Hunter AI…"
+            placeholder={trainingMode ? "Type your answer…" : "Message Hunter AI…"}
           />
           <PromptInputFooter>
             <PromptInputTools>
@@ -246,7 +431,7 @@ export function AiChat() {
                   ))}
                 </PromptInputSelectContent>
               </PromptInputSelect>
-              {messages.length > 0 && last?.role === "assistant" && !busy && (
+              {!trainingMode && messages.length > 0 && last?.role === "assistant" && !busy && (
                 <Button
                   type="button"
                   variant="ghost"

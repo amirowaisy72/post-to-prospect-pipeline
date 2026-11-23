@@ -15,11 +15,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  getTraining,
   isRunLive,
   listAnalyses,
   uncheckedCounts,
   startAnalysis,
   type AnalysisSummary,
+  type Training,
 } from "@/lib/analysis-client";
 import { fmtDate } from "@/lib/format";
 import { accountName } from "@/lib/leadhunter-service";
@@ -72,6 +74,11 @@ function AnalysisHome() {
   const [loaded, setLoaded] = useState(false);
   const [runs, setRuns] = useState<AnalysisSummary[]>([]);
   const [starting, setStarting] = useState(false);
+  const [checkingTraining, setCheckingTraining] = useState(false);
+  const [foundTraining, setFoundTraining] = useState<Training | null>(null);
+  const [showTrainingPanel, setShowTrainingPanel] = useState(false);
+  const [trainingMode, setTrainingMode] = useState(false);
+  const [trainingCriteria, setTrainingCriteria] = useState("");
   const [page, setPage] = useState(0);
   const [counts, setCounts] = useState<Record<string, { people: number; unchecked: number }>>({});
   const [panelFor, setPanelFor] = useState<{ id: string; name: string } | null>(null);
@@ -123,7 +130,7 @@ function AnalysisHome() {
 
   const settings = { provider, model: model.trim(), geminiKey, ollamaUrl, excludeUrls: leadUrls };
 
-  const start = async () => {
+  const doStart = async (training?: Training, rescan = false) => {
     if (liveRun || starting) return;
     setStarting(true);
     const r = await startAnalysis(agentUrl, {
@@ -132,7 +139,8 @@ function AnalysisHome() {
       sourceIds: selected,
       criteria: criteria.trim(),
       quantity: Math.max(1, Math.floor(quantity) || 20),
-      rescan: false,
+      rescan,
+      ...(training ? { training } : {}),
     });
     setStarting(false);
     if (!r.ok) {
@@ -142,8 +150,32 @@ function AnalysisHome() {
     void navigate({ to: "/analysis/$runId", params: { runId: r.value.id } });
   };
 
+  /** Start click: check for saved training first, then train, then start. */
+  const handleStartClick = async () => {
+    if (liveRun || starting || checkingTraining || trainingMode) return;
+    const crit = criteria.trim();
+    setTrainingCriteria(crit);
+    setCheckingTraining(true);
+    const r = await getTraining(agentUrl, accountId, crit);
+    setCheckingTraining(false);
+    if (!r.ok) {
+      toast.error(r.error);
+      return;
+    }
+    if (r.value.found) {
+      setFoundTraining({ rules: r.value.rules ?? [], categories: r.value.categories ?? [] });
+      setShowTrainingPanel(true);
+    } else {
+      setFoundTraining(null);
+      setShowTrainingPanel(false);
+      setTrainingMode(true);
+    }
+  };
+
+  const start = handleStartClick;
+
   const canStart =
-    !liveRun && !starting && !accountBlocked && !offline && modelOk && selected.length > 0 && criteria.trim().length >= 5;
+    !liveRun && !starting && !checkingTraining && !trainingMode && !accountBlocked && !offline && modelOk && selected.length > 0 && criteria.trim().length >= 5;
 
   const guide = (() => {
     if (offline) return { tone: "bad", text: "The agent is not running. Start run-agent.bat, then refresh the page." };
@@ -192,7 +224,7 @@ function AnalysisHome() {
               </CardDescription>
             </div>
             {sources.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={() => setSelected(selected.length === sources.length ? [] : sources.map((s) => s.id))}>
+              <Button variant="ghost" size="sm" onClick={() => setSelected(selected.length === sources.length ? [] : sources.map((s) => s.id))} disabled={trainingMode}>
                 {selected.length === sources.length ? "Deselect all" : "Select all"}
               </Button>
             )}
@@ -207,7 +239,7 @@ function AnalysisHome() {
                 const on = selected.includes(s.id);
                 return (
                   <label key={s.id} className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${on ? "border-primary bg-accent/60" : "hover:bg-muted/50"}`}>
-                    <Checkbox checked={on} onCheckedChange={() => toggle(s.id)} />
+                    <Checkbox checked={on} onCheckedChange={() => toggle(s.id)} disabled={trainingMode} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold text-foreground">{s.name}</p>
                       <p className="text-xs text-muted-foreground tabular">{s.postCount} posts scraped</p>
@@ -246,7 +278,7 @@ function AnalysisHome() {
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="criteria">Who are you looking for?</Label>
-              <Textarea id="criteria" rows={5} value={criteria} onChange={(e) => setCriteria(e.target.value)} placeholder="e.g. People who need a software or tool to create YouTube videos faster and may pay for it." />
+              <Textarea id="criteria" rows={5} value={criteria} disabled={trainingMode} onChange={(e) => { setCriteria(e.target.value); setShowTrainingPanel(false); setFoundTraining(null); }} placeholder="e.g. People who need a software or tool to create YouTube videos faster and may pay for it." />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="qty">How many people?</Label>
@@ -263,10 +295,38 @@ function AnalysisHome() {
               </Link>
               {provider === "gemini" && !geminiKey.trim() && <p className="mt-1 text-xs text-destructive">The Gemini key is not saved in Configurations.</p>}
             </div>
+            {showTrainingPanel && foundTraining && (
+              <div className="space-y-2 rounded-lg border border-primary/30 bg-accent/60 p-3 text-sm">
+                <p className="font-semibold text-foreground">
+                  Training found for this query — {foundTraining.rules.length} rule{foundTraining.rules.length === 1 ? "" : "s"}
+                  , categories: {foundTraining.categories.length > 0 ? foundTraining.categories.join(", ") : "none"}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" onClick={() => void doStart(foundTraining, false)} disabled={starting}>
+                    Use training
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setShowTrainingPanel(false);
+                      setTrainingCriteria(criteria.trim());
+                      setTrainingMode(true);
+                    }}
+                  >
+                    Retrain
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => void doStart(undefined, false)} disabled={starting}>
+                    Run without training
+                  </Button>
+                </div>
+              </div>
+            )}
             <Button className="w-full" size="lg" onClick={() => void start()} disabled={!canStart}>
-              {starting ? <Loader2 className="animate-spin" /> : <Plus />}
-              Start a new analysis
+              {starting || checkingTraining ? <Loader2 className="animate-spin" /> : <Plus />}
+              {checkingTraining ? "Checking training…" : "Start a new analysis"}
             </Button>
+            {trainingMode && <p className="text-xs text-muted-foreground">Answer the questions in the chat below — the analysis starts once you save the training (or skip it).</p>}
             {liveRun && <p className="text-xs text-muted-foreground">Only one analysis can run at a time. Stop the running one first.</p>}
             {accountBlocked && (
               <p className="rounded-lg border border-primary/25 bg-accent/60 p-3 text-xs text-accent-foreground">
@@ -323,7 +383,25 @@ function AnalysisHome() {
       </div>
 
       <SourceAnalysisSheet agentUrl={agentUrl} source={panelFor} onClose={() => setPanelFor(null)} />
-      <AiChat key={accountId} />
+      {trainingMode ? (
+        <AiChat
+          key={`train-${accountId}`}
+          trainingMode={{
+            criteria: trainingCriteria,
+            sourceIds: selected,
+            onTrainingSaved: (t) => {
+              setTrainingMode(false);
+              void doStart(t, true);
+            },
+            onSkip: () => {
+              setTrainingMode(false);
+              void doStart(undefined, false);
+            },
+          }}
+        />
+      ) : (
+        <AiChat key={accountId} />
+      )}
     </>
   );
 }

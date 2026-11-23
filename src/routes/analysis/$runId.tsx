@@ -202,7 +202,7 @@ function AnalysisQueryPage() {
   return (
     <>
       {back}
-      <PageHeader title="Analysis ka record" description={srcIds.map(sourceName).join(", ")}
+      <PageHeader title="Analysis record" description={srcIds.map(sourceName).join(", ")}
         actions={
           <>
             <RunStatusBadge run={focus} />
@@ -304,12 +304,41 @@ function AnalysisQueryPage() {
                         {m.name} <ExternalLink className="size-3" />
                       </a>
                       <div className="flex shrink-0 gap-1.5">
+                        {m.category && <Badge variant="info">{m.category}</Badge>}
                         <Badge variant="outline">{m.role === "poster" ? "Posted" : "Commented"}</Badge>
                         <Badge variant="accent" className="tabular">{m.score}%</Badge>
                       </div>
                     </div>
                     <p className="text-sm text-foreground">{m.reason}</p>
                     <blockquote className="border-l-2 border-primary pl-3 text-sm italic text-muted-foreground">“{m.quote}”</blockquote>
+                    {m.reference && (
+                      <details className="rounded-lg border bg-muted/40 p-3 text-sm">
+                        <summary className="cursor-pointer font-semibold text-foreground">Why this person?</summary>
+                        <div className="mt-2 space-y-2 text-muted-foreground">
+                          {m.reference.sourceName && <p>From {m.reference.sourceName}</p>}
+                          {m.reference.postText && (
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wider">Post</p>
+                              <p className="whitespace-pre-wrap text-foreground">{m.reference.postText}</p>
+                            </div>
+                          )}
+                          {m.reference.itemText && (
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wider">
+                                {m.reference.itemKind ? `Matched ${m.reference.itemKind}` : "Matched text"}
+                              </p>
+                              <p className="whitespace-pre-wrap text-foreground">{m.reference.itemText}</p>
+                              {m.reference.parentText && <p className="mt-1 whitespace-pre-wrap">In reply to: {m.reference.parentText}</p>}
+                            </div>
+                          )}
+                          {(m.reference.postUrl || m.postUrl) && (
+                            <a href={m.reference.postUrl || m.postUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-primary">
+                              {m.reference.postTitle || m.postTitle || "Open post"} <ExternalLink className="size-3" />
+                            </a>
+                          )}
+                        </div>
+                      </details>
+                    )}
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="min-w-0 text-xs text-muted-foreground">
                         <p>{m.lastActiveAt ? `Last active ${fmtDate(m.lastActiveAt)}` : "Last active unknown"} · {m.activityCount} item{m.activityCount === 1 ? "" : "s"}</p>

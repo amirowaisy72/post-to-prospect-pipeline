@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS analysis_people (
     updated_at TEXT,
     PRIMARY KEY (crit_hash, person_key)
 );
+CREATE TABLE IF NOT EXISTS analysis_training (
+    account_id TEXT NOT NULL DEFAULT '',
+    crit_hash TEXT NOT NULL,
+    criteria TEXT NOT NULL DEFAULT '',
+    rules TEXT NOT NULL DEFAULT '[]',
+    categories TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT,
+    PRIMARY KEY (account_id, crit_hash)
+);
 """
 
 _THINK: dict = {}  # Gemini model -> thinking setting that works
@@ -122,6 +131,81 @@ def init(db) -> None:
             "finished_at=? WHERE status IN ('running','stop-requested')",
             (_iso(),),
         )
+
+
+# ----------------------------------------------------------------------
+# training: the user's answers to clarification questions, per query
+# ----------------------------------------------------------------------
+def save_training(db, account_id, criteria, rules, categories):
+    """Store the user's training for one query (rules + categories)."""
+    rules = rules or []
+    categories = categories or []
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO analysis_training (account_id, crit_hash, criteria, rules, "
+            "categories, updated_at) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(account_id, crit_hash) DO UPDATE SET criteria=excluded.criteria, "
+            "rules=excluded.rules, categories=excluded.categories, "
+            "updated_at=excluded.updated_at",
+            (
+                account_id or "",
+                crit_hash(criteria),
+                criteria or "",
+                json.dumps(rules),
+                json.dumps(categories),
+                _iso(),
+            ),
+        )
+    return {"criteria": criteria, "rules": rules, "categories": categories}
+
+
+def get_training(db, account_id, criteria):
+    """The saved training for one query, or None when there is none."""
+    with db._connect() as conn:
+        r = conn.execute(
+            "SELECT criteria, rules, categories, updated_at FROM analysis_training "
+            "WHERE account_id=? AND crit_hash=?",
+            (account_id or "", crit_hash(criteria)),
+        ).fetchone()
+    if r is None:
+        return None
+    try:
+        rules = json.loads(r["rules"] or "[]")
+    except Exception:
+        rules = []
+    try:
+        categories = json.loads(r["categories"] or "[]")
+    except Exception:
+        categories = []
+    return {
+        "criteria": r["criteria"],
+        "rules": rules if isinstance(rules, list) else [],
+        "categories": categories if isinstance(categories, list) else [],
+        "updated_at": r["updated_at"],
+    }
+
+
+def training_block(training) -> str:
+    """The training as prompt text ("" when there is no training)."""
+    if not training:
+        return ""
+    rules = training.get("rules") or []
+    cats = training.get("categories") or []
+    if not rules and not cats:
+        return ""
+    lines = [
+        "TRAINING FROM THE USER (answers given before this analysis — follow them exactly):"
+    ]
+    for r in rules:
+        if isinstance(r, dict):
+            lines.append(f"Q: {r.get('question') or ''}\nA: {r.get('answer') or ''}")
+    if cats:
+        lines.append(
+            "Tag each match with one of these categories: "
+            + ", ".join(str(c) for c in cats)
+            + '. Use "other" when none of them fits.'
+        )
+    return "\n".join(lines)
 
 
 _RESERVED = {
@@ -506,36 +590,51 @@ _RULES = (
 )
 
 
-def _screen_prompt(criteria: str, batch) -> str:
+def _screen_prompt(criteria: str, batch, training=None) -> str:
     blocks = "\n\n".join(
         f"### {n}\n{dossier(p, 700, 220)}" for n, p in enumerate(batch, 1)
     )
+    tb = training_block(training)
     return (
         "You screen Facebook people for a lead list.\n\n"
         f"WHAT THE USER IS LOOKING FOR:\n{criteria}\n\n{_RULES}\n\n"
+        + (tb + "\n\n" if tb else "")
+        + "Score 0-20 when the person only gives advice, sells/promotes, or wants something else than the thing described.\n"
         "For EVERY person below give a score 0-100: 0-20 no match, 21-44 weak, 45-70 possible, 71-100 clearly states the need.\n"
         'Return ONLY JSON like {"results":[{"i":1,"s":80},{"i":2,"s":0}]} and include every person.\n\n'
         f"PEOPLE:\n\n{blocks}\n"
     )
 
 
-def _judge_prompt(criteria: str, p) -> str:
+def _judge_prompt(criteria: str, p, training=None) -> str:
+    tb = training_block(training)
     return (
         "You decide whether ONE Facebook person matches what the user is looking for.\n\n"
         f"WHAT THE USER IS LOOKING FOR:\n{criteria}\n\n{_RULES}\n\n"
-        f"EVERYTHING THIS PERSON WROTE:\n{dossier(p, 3000, 600)}\n\n"
+        + (tb + "\n\n" if tb else "")
+        + f"EVERYTHING THIS PERSON WROTE:\n{dossier(p, 3000, 600)}\n\n"
+        "A match ONLY when the person wants to buy the SAME thing as the query describes. "
+        "Wanting a different thing, giving advice, selling or promoting, or a bare reply "
+        "('Yes', 'Me', 'Inbox price' with no clear buying intent) is NOT a match, "
+        "however high the score would otherwise be.\n"
         "Scoring: 90-100 = their own words clearly state the need; 70-89 = strongly implied; "
         "40-69 = weak or unclear; 0-39 = no match. Do not give every person the same score.\n"
-        'Return ONLY JSON: {"evidence":"explicit" or "implied" or "none","promo":true or false,'
+        'Return ONLY JSON: {"wants_to_buy":true or false,'
+        '"wants_query_thing":true or false,'
+        '"wanted_thing":"what the person wants, in a few words",'
+        '"gives_advice":true or false,"sells_or_promotes":true or false,'
+        '"bare_reply":true or false,'
+        '"evidence":"explicit" or "implied" or "none","promo":true or false,'
         '"score":0-100,"match":true or false,"role":"poster" or "commenter",'
+        '"category":"one of the training categories, or \\"other\\"",'
         '"reason":"1-2 short sentences why, in the same language as the user description",'
-        '"quote":"exact words copied from the person text above that show the need (max 200 chars); empty if none"}'
+        '"quote":"exact words copied from the person text above that show the buying intent (max 200 chars); empty if none"}'
     )
 
 
-def _screen(cfg, criteria, batch):
+def _screen(cfg, criteria, batch, training=None):
     """-> ({index: score}, error). Missing indexes are simply not returned."""
-    text, err = _llm(cfg, _screen_prompt(criteria, batch))
+    text, err = _llm(cfg, _screen_prompt(criteria, batch, training))
     if err:
         return {}, err
     data = _json_of(text)
@@ -560,8 +659,22 @@ def _screen(cfg, criteria, batch):
     return out, "" if out else "Could not understand the AI's reply"
 
 
-def _judge(cfg, criteria, p):
-    text, err = _llm(cfg, _judge_prompt(criteria, p))
+def _reference(p, where):
+    """The full reference behind a verdict: the evidence item + its post."""
+    post = p["posts_by_id"].get(where["post_id"]) or {}
+    return {
+        "postText": _clip(post.get("text") or "", 1000),
+        "itemText": _clip(where["text"] or "", 600),
+        "itemKind": where["kind"],
+        "parentText": _clip(where.get("parent") or "", 300),
+        "sourceName": post.get("source_name") or "",
+        "postUrl": post.get("post_url") or "",
+        "postTitle": post.get("title") or "",
+    }
+
+
+def _judge(cfg, criteria, p, training=None):
+    text, err = _llm(cfg, _judge_prompt(criteria, p, training))
     if err:
         return None, err
     d = _json_of(text)
@@ -582,25 +695,47 @@ def _judge(cfg, criteria, p):
             if nq[:40] in _norm(it["text"]):
                 where = it
                 break
+    quote_verified = where is not None
     if where is None:
         where = next((i for i in p["items"] if i["kind"] == "post"), None) or max(
             p["items"], key=lambda i: len(i["text"])
         )
         quote = _clip(where["text"], 220)
     evidence = str(d.get("evidence") or "").lower()
-    promo = bool(d.get("promo"))
+    # strict checklist: a reply missing these keys is treated as "no" on every
+    # check, so an old-style model answer can never pass as a match.
+    wants_to_buy = bool(d.get("wants_to_buy"))
+    wants_query_thing = bool(d.get("wants_query_thing"))
+    wanted_thing = _clip(str(d.get("wanted_thing") or ""), 200)
+    gives_advice = bool(d.get("gives_advice"))
+    sells_or_promotes = bool(d.get("sells_or_promotes"))
+    bare_reply = bool(d.get("bare_reply"))
+    promo = bool(d.get("promo")) or sells_or_promotes
     if evidence == "implied":
         score = min(score, 78)
     if promo or evidence == "none":
         score = min(score, 30)
     role = "poster" if where["kind"] == "post" else "commenter"
     post = p["posts_by_id"].get(where["post_id"]) or {}
+    cats = (training or {}).get("categories") or []
+    category = str(d.get("category") or "").strip()
+    if cats:
+        category = category if category in cats else "other"
+    elif not category:
+        category = "other"
+    match = (
+        wants_to_buy
+        and wants_query_thing
+        and not gives_advice
+        and not sells_or_promotes
+        and not bare_reply
+        and evidence in ("explicit", "implied")
+        and score >= MATCH_MIN
+        and quote_verified
+    )
     return {
         "score": max(0, min(100, score)),
-        "match": bool(d.get("match"))
-        and score >= MATCH_MIN
-        and not promo
-        and evidence != "none",
+        "match": match,
         "evidence": evidence,
         "promo": promo,
         "role": role,
@@ -610,6 +745,15 @@ def _judge(cfg, criteria, p):
         "postId": where["post_id"],
         "postUrl": post.get("post_url") or "",
         "postTitle": post.get("title") or "",
+        "wants_to_buy": wants_to_buy,
+        "wants_query_thing": wants_query_thing,
+        "wanted_thing": wanted_thing,
+        "gives_advice": gives_advice,
+        "sells_or_promotes": sells_or_promotes,
+        "bare_reply": bare_reply,
+        "category": category,
+        "quote_verified": quote_verified,
+        "reference": _reference(p, where),
     }, ""
 
 
@@ -632,6 +776,8 @@ def _match_row(p, v):
         "postId": v["postId"],
         "postUrl": v["postUrl"],
         "postTitle": v["postTitle"],
+        "category": v.get("category") or "other",
+        "reference": v.get("reference") or {},
         "lastActiveAt": p["last"],
         "activityCount": len(p["items"]),
     }
@@ -834,6 +980,13 @@ def _worker(db, run_id, params):
         }
         criteria = params["criteria"].strip()
         ch = crit_hash(criteria)
+        training = params.get("training") or get_training(
+            db, params.get("accountId") or "", criteria
+        )
+        prog["training"] = {
+            "rules": len((training or {}).get("rules") or []),
+            "categories": (training or {}).get("categories") or [],
+        }
         rescan = bool(params.get("rescan"))
         excl = exclude_keys(params.get("excludeUrls"))
         with db._connect() as conn:
@@ -946,7 +1099,7 @@ def _worker(db, run_id, params):
         def judge_one(s1, p) -> bool:
             """True = keep going."""
             t1 = time.time()
-            v, err = _judge(cfg, criteria, p)
+            v, err = _judge(cfg, criteria, p, training)
             print(
                 f"analysis: judged {p['name'][:30]} in {time.time() - t1:.0f}s err={err[:80]}",
                 flush=True,
@@ -991,9 +1144,9 @@ def _worker(db, run_id, params):
                 f"analysis: screening batch {i // bsize + 1}/{math.ceil(len(todo_screen) / bsize)} ({len(batch)} log)",
                 flush=True,
             )
-            scores, err = _screen(cfg, criteria, batch)
+            scores, err = _screen(cfg, criteria, batch, training)
             if len(scores) < len(batch) / 2 and not err:
-                scores, err = _screen(cfg, criteria, batch)  # one retry
+                scores, err = _screen(cfg, criteria, batch, training)  # one retry
             print(
                 f"analysis: batch done in {time.time() - t0:.0f}s, got {len(scores)} scores, err={err[:80]}",
                 flush=True,
@@ -1062,6 +1215,134 @@ def _worker(db, run_id, params):
         finally:
             with _LOCK:
                 _ACTIVE.pop(run_id, None)
+
+
+# ----------------------------------------------------------------------
+# 3b. training helpers: clarification questions + chat
+# ----------------------------------------------------------------------
+_FALLBACK_QUESTIONS = [
+    {
+        "id": "q1",
+        "text": "Should people who only give tips or advice count as matches, or should they be excluded?",
+    },
+    {
+        "id": "q2",
+        "text": "Should people selling or promoting their own product or service count as matches?",
+    },
+    {
+        "id": "q3",
+        "text": "Should people who want something similar but different from the thing described count as matches?",
+    },
+    {
+        "id": "q4",
+        "text": "Which categories should matches be tagged with (for example beginner, rich, poor)?",
+    },
+    {
+        "id": "q5",
+        "text": "Should a short reply like 'Inbox price' with no clear buying intent count as a match?",
+    },
+]
+
+
+def _sample_people(db, account_id, source_ids, limit=10):
+    people, stats = build_people(db, source_ids, _own_name(db, account_id))
+    cands = [p for p in people.values() if not _is_trivial(p)]
+    posters = sorted(
+        [p for p in cands if p["has_post"]], key=lambda p: -len(p["items"])
+    )
+    others = sorted(
+        [p for p in cands if not p["has_post"]], key=lambda p: -len(p["items"])
+    )
+    # interleave posters and commenters so the sample shows both kinds
+    sample = []
+    for a, b in zip(posters, others):
+        sample.extend([a, b])
+    sample.extend(posters[len(others) :] or others[len(posters) :])
+    return sample[:limit], stats
+
+
+def suggest_questions(db, cfg, account_id, source_ids, criteria):
+    """Clarification questions about the REAL ambiguities in a data sample.
+
+    Returns {"questions": [{"id", "text"}], "sample": {people, posts, comments}}.
+    On any LLM failure the generic fallback questions are returned."""
+    sample, stats = _sample_people(db, account_id, source_ids, limit=10)
+    out_sample = {
+        "people": len(sample),
+        "posts": stats["posts"],
+        "comments": stats["comments"],
+    }
+    blocks = "\n\n".join(
+        f"### {p['name'] or p['key']}\n{dossier(p, 600, 200)}"
+        for p in sample
+    )
+    prompt = (
+        "You help a user train a lead-finding AI before it runs.\n\n"
+        f"WHAT THE USER IS LOOKING FOR:\n{criteria}\n\n"
+        "Below is a sample of the real people the AI will judge. "
+        "Look at the sample first, then ask up to 5 SHORT clarification questions "
+        "about the real ambiguities you see in it — for example people who give "
+        "advice instead of buying, people selling something, people who want a "
+        "similar-but-different thing, or short replies with no clear intent. "
+        "Ask only what changes who counts as a match.\n\n"
+        f"SAMPLE:\n\n{blocks}\n\n"
+        'Return ONLY JSON: {"questions":[{"id":"q1","text":"..."}]}'
+    )
+    text, err = _llm(cfg, prompt)
+    if not err:
+        data = _json_of(text)
+        rows = []
+        if isinstance(data, dict):
+            rows = data.get("questions") or []
+        if isinstance(rows, list):
+            qs = []
+            for i, r in enumerate(rows[:5], 1):
+                if isinstance(r, dict) and (r.get("text") or "").strip():
+                    qs.append(
+                        {"id": str(r.get("id") or f"q{i}"), "text": r["text"].strip()}
+                    )
+            if qs:
+                return {"questions": qs, "sample": out_sample}
+    return {"questions": list(_FALLBACK_QUESTIONS), "sample": out_sample}
+
+
+def chat_answer(db, cfg, account_id, criteria, source_ids, messages, training=None):
+    """One free-form chat turn for training the AI (plain text, not JSON mode).
+
+    Returns {"reply": str, "error": str}."""
+    import ai_models  # lazy: avoids an import cycle at module load
+
+    sample, _stats = _sample_people(db, account_id, source_ids or [], limit=5)
+    blocks = "\n\n".join(
+        f"### {p['name'] or p['key']}\n{dossier(p, 800, 200)}" for p in sample
+    )
+    history = "\n".join(
+        f"{'User' if (m.get('role') or '') == 'user' else 'Assistant'}: "
+        f"{_clip(m.get('text') or '', 500)}"
+        for m in (messages or [])
+        if isinstance(m, dict) and (m.get("text") or "").strip()
+    )
+    tb = training_block(training)
+    prompt = (
+        "You help a user train a lead-finding AI before it runs. Answer in plain "
+        "English, briefly, one point at a time.\n\n"
+        f"WHAT THE USER IS LOOKING FOR:\n{criteria}\n\n"
+        + (tb + "\n\n" if tb else "")
+        + "A small sample of the real people the AI will judge:\n\n"
+        f"{blocks}\n\n"
+        "Conversation so far:\n"
+        f"{history or '(none)'}\n\n"
+        "Answer the user's last message. If you are unsure who counts as a match, "
+        "ask ONE short question about it."
+    )
+    text, err = ai_models.generate(
+        cfg.get("provider") or "ollama",
+        cfg.get("model") or "",
+        cfg.get("geminiKey") or "",
+        cfg.get("ollamaUrl") or "",
+        prompt,
+    )
+    return {"reply": text or "", "error": err or ""}
 
 
 # ----------------------------------------------------------------------

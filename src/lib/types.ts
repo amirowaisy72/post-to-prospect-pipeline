@@ -74,6 +74,8 @@ export interface Lead {
   name: string;
   profileUrl: string;
   priority: LeadPriority;
+  /** Category tag from the analysis training (e.g. "beginner"). */
+  category?: string;
   reason: string;
   quotedComment: string;
   sourcePostUrl?: string;

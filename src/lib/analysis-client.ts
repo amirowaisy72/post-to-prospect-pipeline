@@ -27,6 +27,16 @@ export interface AnalysisProgress {
   lastError?: string;
 }
 
+export interface AnalysisMatchReference {
+  postText: string;
+  itemText: string;
+  itemKind: string;
+  parentText: string;
+  sourceName: string;
+  postUrl: string;
+  postTitle: string;
+}
+
 export interface AnalysisMatch {
   personKey: string;
   name: string;
@@ -43,6 +53,10 @@ export interface AnalysisMatch {
   postTitle: string;
   lastActiveAt: string | null;
   activityCount: number;
+  /** Category tag from the query's training (e.g. "beginner"). */
+  category?: string;
+  /** Full reference behind this match, so the pick can be verified. */
+  reference?: AnalysisMatchReference;
 }
 
 export type RunStatus = "running" | "stop-requested" | "done" | "stopped" | "failed";
@@ -101,6 +115,40 @@ export interface SourceAnalysis {
   runs: (AnalysisSummary & { matchesHere: number; pendingHere: number; checkedHere: number })[];
 }
 
+export interface TrainingRule {
+  question: string;
+  answer: string;
+}
+
+/** Per-query training: the answers collected before an analysis runs. */
+export interface Training {
+  rules: TrainingRule[];
+  categories: string[];
+}
+
+export interface GetTrainingResult {
+  found: boolean;
+  criteria: string;
+  rules: TrainingRule[];
+  categories: string[];
+  updated_at: string | null;
+}
+
+export interface ClarifyQuestion {
+  id: string;
+  text: string;
+}
+
+export interface ClarifyQuestionsResult {
+  questions: ClarifyQuestion[];
+  sample: { people: number; posts: number; comments: number };
+}
+
+export interface ChatAnalysisResult {
+  reply: string;
+  error: string;
+}
+
 export interface AnalysisSettings {
   provider: string;
   model: string;
@@ -115,6 +163,8 @@ export interface StartAnalysis extends AnalysisSettings {
   criteria: string;
   quantity: number;
   rescan: boolean;
+  /** Per-query training, when the user trained (or reused training for) this query. */
+  training?: Training;
 }
 
 const DOWN = "The agent is not running — start run-agent.bat.";
@@ -183,3 +233,33 @@ export const uncheckedCounts = (url: string, accountId: string) =>
 
 export const testModel = (url: string, provider: string, model: string, geminiKey: string, ollamaUrl: string) =>
   call<{ seconds: number; reply: string }>(url, "/ai/test", post({ provider, model, geminiKey, ollamaUrl }), 60000);
+
+export const getTraining = (url: string, accountId: string, criteria: string) =>
+  call<GetTrainingResult>(
+    url,
+    `/analysis/training?accountId=${encodeURIComponent(accountId)}&criteria=${encodeURIComponent(criteria)}`,
+  );
+
+export const saveTraining = (
+  url: string,
+  body: { accountId: string; criteria: string; rules: TrainingRule[]; categories: string[] },
+) => call<{ ok: boolean; criteria: string; rules: number; categories: string[] }>(url, "/analysis/training", post(body));
+
+export const suggestQuestions = (
+  url: string,
+  body: { accountId: string; sourceIds: string[]; criteria: string; provider: string; model: string; geminiKey: string; ollamaUrl: string },
+) => call<ClarifyQuestionsResult>(url, "/analysis/clarify-questions", post(body), 120000);
+
+export const chatAnalysis = (
+  url: string,
+  body: {
+    accountId: string;
+    criteria: string;
+    sourceIds?: string[];
+    provider: string;
+    model: string;
+    geminiKey: string;
+    ollamaUrl: string;
+    messages: { role: "user" | "assistant"; text: string }[];
+  },
+) => call<ChatAnalysisResult>(url, "/analysis/chat", post(body), 120000);
